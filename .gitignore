@@ -1,0 +1,14 @@
+# 凭据与私密，绝不入仓
+.env
+*.creds
+creds*
+etkn_diag_creds.txt
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 系统杂项
+.DS_Store
+*.log
