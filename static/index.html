@@ -42,7 +42,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
 </style>
 </head>
 <body>
-<h1>ETKN 监控 <span class="tag" id="roTag">v2</span></h1>
+<h1>ETKN 监控 <span class="tag" id="roTag">v2.1</span></h1>
 <div class="updated" id="updated">连接中…</div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -53,7 +53,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
   <div class="grid">
     <div class="card"><div class="k">待处理（媒体）</div><div class="v warn" id="cQueued">-<small>媒体</small></div><div class="sub" id="cQueuedSub">- 任务排队/运行</div></div>
     <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div></div>
-    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" id="cBad">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
+    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
     <div class="card w"><div class="k">链路测速（手动，无定时）<button class="act" id="btnSp" onclick="runSpeedtest()" style="float:right">开始测速</button></div>
@@ -68,8 +68,12 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
       <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th></tr></thead><tbody></tbody></table>
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
-    <div class="card w"><div class="k">今日失败/部分失败任务（可重试）</div>
+    <div class="card w"><div class="k">手动任务<button class="act" id="btnOrg" onclick="runOrganize()" style="float:right">手动整理网盘文件</button></div>
+      <div class="sub" style="margin-top:6px">调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理</div>
+    </div>
+    <div class="card w"><div class="k">今日失败/部分失败任务</div>
       <div class="flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th></th></tr></thead><tbody></tbody></table></div>
+      <div class="sub" style="margin-top:4px">重试仅对刮削入库类开放（ETKN 官方白名单）；其他类型官方不支持（409）</div>
     </div>
     <div class="card w"><div class="k">系统状态</div><div id="kDiag" style="margin-top:6px">-</div></div>
   </div>
@@ -112,16 +116,19 @@ function mOpen(title,body,goFn){
   retryTarget=goFn;
   document.getElementById('mTitle').textContent=title;
   document.getElementById('mBody').innerHTML=body;
+  document.getElementById('mGo').style.display=goFn?'':'none';  // 无确认动作的弹窗隐藏确认键
   document.getElementById('modal').style.display='flex';
 }
-function mClose(){document.getElementById('modal').style.display='none';retryTarget=null;}
+function mClose(){document.getElementById('modal').style.display='none';retryTarget=null;document.getElementById('mGo').style.display='';}
 async function mGo(){
   if(!retryTarget||mGo._busy)return;
   const fn=retryTarget; mClose();
   try{mGo._busy=true; await fn();}
   finally{mGo._busy=false;}
 }
-/* ---- 重试 ---- */
+/* ---- 重试（仅刮削入库类显示按钮；wf=batch_ingest 由后端 workflow_type 判定） ---- */
+const RETRYABLE_WF = new Set(['batch_ingest']);
+function canRetry(x){ return RETRYABLE_WF.has(x.wf || ''); }
 async function retryTask(id,title){
   mOpen('重试任务 #'+id,
     `标题：${title||'-'}<br>将调用 ETKN 官方重试接口，只重跑该任务的失败部分；成功后自动进 ETKN 队列。`,
@@ -159,6 +166,53 @@ async function runSpeedtest(){
   }catch(e){toast('测速失败：'+String(e).slice(0,60),'bad');}
   btn.disabled=false; btn.textContent='开始测速'; spBusy=false;
 }
+/* ---- 手动整理网盘文件（ETKN 原生，复用 mGo 忙锁） ---- */
+let orgBusy=false;
+async function runOrganize(){
+  if(orgBusy)return;
+  mOpen('手动整理网盘文件',
+    '调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可在「分类队列」中观察。',
+    ()=>doOrganize());
+}
+async function doOrganize(){
+  if(orgBusy)return; orgBusy=true;
+  const btn=document.getElementById('btnOrg'); btn.disabled=true; btn.textContent='提交中…';
+  try{
+    const r=await fetch('/api/run-task/organize-p115',{method:'POST'});
+    const b=await r.json();
+    if(r.ok&&(b.etkn_status===200||b.etkn_status===201||b.etkn_status===202)){
+      toast('已提交，任务进入队列','ok');
+      setTimeout(refresh,1500);
+    }else{
+      const msg=(b.etkn_body&&(b.etkn_body.detail||b.etkn_body.error))||JSON.stringify(b.etkn_body||b);
+      toast('ETKN 返回（状态 '+b.etkn_status+'）：'+String(msg).slice(0,120),'bad');
+    }
+  }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
+  btn.disabled=false; btn.textContent='手动整理网盘文件'; orgBusy=false;
+}
+/* ---- 异常媒体明细 ---- */
+let badBusy=false;
+async function showBad(){
+  if(badBusy)return; badBusy=true;
+  const body=document.getElementById('mBody');
+  document.getElementById('mTitle').textContent='异常媒体明细';
+  body.innerHTML='<div class="sub">加载中…</div>';
+  document.getElementById('modal').style.display='flex';
+  document.getElementById('mGo').style.display='none';   // 明细弹窗无确认动作
+  try{
+    const b=await (await fetch('/api/bad-media')).json();
+    const rows=(b.items||[]);
+    body.innerHTML = rows.length
+      ? `<div class="sub" style="margin-bottom:6px">${b.date} · 共 ${rows.length} 条（最多展示 60）</div>`+
+        `<div class="flist" style="max-height:50vh">`+rows.map(x=>
+          `<div class="sp"><span style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(x.name||'-').replace(/</g,'&lt;')}</span>`+
+          `<span class="sub">${(x.at||'').slice(11,16)} ${(x.reason||x.status||'').slice(0,26)}</span></div>`).join('')+`</div>`
+      : '<div class="sub">今日暂无异常媒体记录</div>';
+  }catch(e){
+    body.innerHTML='<div class="sub bad">加载失败：'+String(e).slice(0,60)+'</div>';
+  }
+  badBusy=false;
+}
 /* ---- 主刷新 ---- */
 async function refresh(){
   try{
@@ -191,11 +245,14 @@ async function refresh(){
       tb.insertAdjacentHTML('beforeend',`<tr><td>${k}</td><td class="num">${v.tasks}</td><td class="num">${v.items??'-'}</td><td class="num ok">${v.ok_media}</td><td class="num ${v.bad_media?'bad':''}">${v.bad_media}</td></tr>`)});
     document.getElementById('sumDone').textContent=rec.success??'-';
     document.getElementById('sumBad').textContent=rec.unrecognized??'-';
-    // 失败明细 + 重试按钮
+    // 失败明细 + 重试按钮（仅刮削入库类：按 workflow_type 过滤）
     const tf=document.querySelector('#tFail tbody');tf.innerHTML='';
     (s.failed_today||[]).slice(0,30).forEach(x=>{
+      const btn=canRetry(x)
+        ?`<button class="act" onclick="retryTask(${x.id},'${(x.title||'').replace(/'/g,'')}')">重试</button>`
+        :`<span class="sub" style="font-size:11px">不支持</span>`;
       tf.insertAdjacentHTML('beforeend',
-        `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td>${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td><button class="act" onclick="retryTask(${x.id},'${(x.title||'').replace(/'/g,'')}')">重试</button></td></tr>`)});
+        `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td>${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td>${btn}</td></tr>`)});
     const d=s.diag||{};
     document.getElementById('kDiag').innerHTML=Object.keys(d).length?
       `<div class="row"><span>全局运行</span><span class="sub">队列${d.queued_runs||0} · 运行${d.running_runs||0}</span></div>

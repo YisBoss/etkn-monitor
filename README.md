@@ -1,6 +1,11 @@
-# etkn-monitor —— ETKN 监控（v2）
+# etkn-monitor —— ETKN 监控（v2.1）
 
-手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试。
+手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试、手动整理触发、异常媒体明细。
+
+**v2.1 变化**（相对 v2）：
+- **重试按钮收敛**：仅「刮削入库」类（workflow_type=batch_ingest）显示重试按钮，其余类型不显示（ETKN 官方白名单仅刮削类，其余必 409）；按 workflow_type 过滤，不硬编码标题；列表标题去「（可重试）」
+- **手动整理网盘文件**：任务统计页一键触发，原样转发 ETKN 原生接口 `POST /api/task-center/tasks/organize-p115/runs`（参数形态取自历史运行），确认弹窗→成功 toast→自动刷新；复用 mGo 忙锁防连点
+- **异常媒体明细**：入库页「异常（媒体）」数字可点击，弹出当日明细（文件名+原因+时间），数据源 `GET /api/p115/records?status=unrecognized|failed`，无数据显示空态，不硬造数据
 
 **v2 变化**（相对 v1）：
 - 新增**手动链路测速**（仅按钮触发、无定时）：对 image.tmdb.org / api.themoviedb.org / api.telegram.org / shared.example.com 发起普通请求——不设代理、不强制直连，流量自然走软路由当前策略；每域名输出 TCP 建连 / TLS 握手 / HTTP 总耗时与状态，超时 10 秒。
