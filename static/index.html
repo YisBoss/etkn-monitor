@@ -80,12 +80,23 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
   <div class="box">
     <div id="mTitle" style="font-weight:700;margin-bottom:8px">确认</div>
     <div id="mBody" class="sub" style="font-size:13px;line-height:1.6"></div>
-    <div class="btns"><button onclick="mClose()">取消</button><button class="go" id="mGo">确认执行</button></div>
+    <div class="btns"><button onclick="mClose()">取消</button><button class="go" id="mGo" onclick="mGo()">确认执行</button></div>
   </div>
 </div>
 
+<div id="toast" style="display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:99;max-width:88%;padding:10px 16px;border-radius:10px;font-size:14px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,.45)"></div>
+
 <script>
-let POLL=15, metaLoaded=false, retryTarget=null, spBusy=false;
+function toast(msg, kind){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.style.background=kind==='ok'?'#12351f':(kind==='bad'?'#3d1518':'#3a2e10');
+  t.style.color=kind==='ok'?'#3fb950':(kind==='bad'?'#f85149':'#d29922');
+  t.style.border='1px solid '+(kind==='ok'?'#2ea043':(kind==='bad'?'#f85149':'#d29922'));
+  t.style.display='block';
+  clearTimeout(toast._h);
+  toast._h=setTimeout(()=>{t.style.display='none'},5000);
+}
 function sw(n){
   document.getElementById('page1').style.display=n===1?'':'none';
   document.getElementById('page2').style.display=n===2?'':'none';
@@ -96,6 +107,7 @@ const f1=(s)=>s.split(' · ')[0];
 const fmtCard=(v,u)=>`${v}<small>${u}</small>`;
 
 /* ---- 确认弹窗 ---- */
+let POLL=15, metaLoaded=false, retryTarget=null, spBusy=false;
 function mOpen(title,body,goFn){
   retryTarget=goFn;
   document.getElementById('mTitle').textContent=title;
@@ -104,9 +116,10 @@ function mOpen(title,body,goFn){
 }
 function mClose(){document.getElementById('modal').style.display='none';retryTarget=null;}
 async function mGo(){
-  if(!retryTarget)return;
+  if(!retryTarget||mGo._busy)return;
   const fn=retryTarget; mClose();
-  await fn();
+  try{mGo._busy=true; await fn();}
+  finally{mGo._busy=false;}
 }
 /* ---- 重试 ---- */
 async function retryTask(id,title){
@@ -119,14 +132,14 @@ async function doRetry(id){
     const r=await fetch('/api/retry/'+id,{method:'POST'});
     const b=await r.json();
     if(r.ok&&(b.etkn_status===200||b.etkn_status===201)){
-      alert('重试已受理：任务 #'+id+' 已进 ETKN 队列');
+      toast('已提交，任务 #'+id+' 进入 ETKN 队列','ok');
       refresh();
     }else{
       const msg=(b.etkn_body&&b.etkn_body.detail)?b.etkn_body.detail
         :(typeof b.etkn_body==='string'?b.etkn_body:JSON.stringify(b.etkn_body||b));
-      alert('ETKN 拒绝（状态 '+b.etkn_status+'）：'+msg);
+      toast('ETKN 拒绝（状态 '+b.etkn_status+'）：'+msg,'bad');
     }
-  }catch(e){alert('请求失败：'+String(e).slice(0,80));}
+  }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
 }
 /* ---- 测速 ---- */
 async function runSpeedtest(){
@@ -143,7 +156,7 @@ async function runSpeedtest(){
                     :`总耗时 ${x.total_ms}ms`;
       return `<div class="sp"><span>${x.host}</span><span class="sub">${seg} ${st}</span></div>`;
     }).join('')+`<div class="sub" style="margin-top:6px">测于 ${ (b.ts||'').slice(11,19) } · 不走代理，随当前路由策略</div>`;
-  }catch(e){box.innerHTML='<div class="bad">测速失败：'+String(e).slice(0,60)+'</div>';}
+  }catch(e){toast('测速失败：'+String(e).slice(0,60),'bad');}
   btn.disabled=false; btn.textContent='开始测速'; spBusy=false;
 }
 /* ---- 主刷新 ---- */
@@ -189,7 +202,8 @@ async function refresh(){
        <div class="row"><span>历史累计</span><span class="sub">成功${d.succeeded_runs||0} · 失败<span class="bad">${d.failed_runs||0}</span> · 部分${d.partial_runs||0}</span></div>`
       :'-';
   }catch(err){
-    document.getElementById('updated').textContent='连接失败：'+String(err).slice(0,60);
+    document.getElementById('updated').textContent='更新失败，将在下轮重试';
+    console.warn('refresh异常:',err);
   }
 }
 refresh();setInterval(refresh,POLL*1000);
