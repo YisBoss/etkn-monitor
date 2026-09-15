@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2 —— ETKN 监控服务（轮询+测速+重试）
+etkn-monitor v2.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细）
 配置全部走环境变量（零密钥）：
   ETKN_BASE_URL   ETKN 地址        默认 http://192.168.1.22:5257
   ETKN_USERNAME   登录用户名        默认 YisBoss
@@ -9,11 +9,10 @@ etkn-monitor v2 —— ETKN 监控服务（轮询+测速+重试）
   ETKN_ETA_WINDOW 分钟              ETA 滚动窗口，默认 10
   POLL_INTERVAL   秒                轮询间隔，默认 15
   MONITOR_PORT    监听端口          默认 8620
-v2 说明：
-  - 轮询采集仍只读；
-  - 新增 POST /api/speedtest：手动链路测速（4 域名，TCP/TLS/HTTP 三段耗时，超时 10 秒，无定时）；
-  - 新增 POST /api/retry/{id}：转发 ETKN 官方 retry-failed 接口，拒绝时原样透传状态码与错误；
-  - 今日完成/异常媒体统一 p115 records 口径。
+v2.1 说明（v2 基础上）：
+  - 重试按钮仅对刮削入库类（workflow_type=batch_ingest）生效，按类型过滤不硬编码标题；
+  - 新增 POST /api/run-task/organize-p115：原样转发 ETKN 原生「手动整理网盘文件」运行接口；
+  - 新增 GET /api/bad-media：异常媒体明细（p115/records，original_name/reason/processed_at）。
 """
 import json
 import os
@@ -170,6 +169,7 @@ def collect_today_done(today_prefix: str):
                     stop = True
                     break
                 out.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
+                            'wf': it.get('workflow_type') or '',
                             'title': it.get('display_title') or '',
                             'media': it.get('item_count') or 0,
                             'ok_media': it.get('succeeded_count') or 0,
@@ -304,7 +304,7 @@ def poll_once():
                     'bad_media': sum(d['bad_media'] for d in done)}
     snap['records'] = collect_records_day(today_prefix)
     snap['failed_today'] = [
-        {'id': d['id'], 'kind': d['kind'], 'title': d['title'][:40],
+        {'id': d['id'], 'kind': d['kind'], 'wf': d['wf'], 'title': d['title'][:40],
          'media': d['media'], 'bad_media': d['bad_media'], 'finished_at': d['finished_at'][:19]}
         for d in done if d['status'] in ('failed', 'partial')][:50]
     return snap
@@ -359,9 +359,27 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/meta':
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
-                'poll_interval': POLL_INTERVAL, 'version': 'v2.0', 'readonly': False,
-                'actions': ['speedtest', 'retry-failed'],
+                'poll_interval': POLL_INTERVAL, 'version': 'v2.1', 'readonly': False,
+                'actions': ['speedtest', 'retry-failed', 'run-organize-p115', 'bad-media'],
             }, ensure_ascii=False).encode())
+        if p == '/api/bad-media':
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            date = (q.get('date') or [''])[0]
+            today_prefix = _today00().date().isoformat() if not date else date
+            items, total = [], 0
+            for st in ('unrecognized', 'failed'):
+                s, b = api_get(f'/api/p115/records?page=1&per_page=50&status={st}'
+                               f'&processed_from={urllib.parse.quote(today_prefix)}')
+                if s != 200 or not isinstance(b, dict):
+                    continue
+                total += (b.get('total') or 0) if st == 'unrecognized' else 0
+                for x in (b.get('items') or [])[:50]:
+                    items.append({'id': x.get('id'), 'name': x.get('original_name') or x.get('current_name') or '-',
+                                  'status': x.get('status'), 'reason': (x.get('reason') or x.get('error') or '')[:120],
+                                  'at': (x.get('processed_at') or x.get('created_at') or '')[:19]})
+            items.sort(key=lambda x: x['at'], reverse=True)
+            return self._send(200, json.dumps({'date': today_prefix, 'total': total or len(items),
+                                               'items': items[:60]}, ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
     def do_POST(self):
@@ -377,6 +395,13 @@ class Handler(BaseHTTPRequestHandler):
             s, b = api_post(f'/api/workflows/{wid}/retry-failed')
             return self._send(s if s > 0 else 502, json.dumps(
                 {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
+        if p == '/api/run-task/organize-p115':
+            # 原样转发 ETKN 原生「手动整理网盘文件」运行接口（参数取自历史运行形态）
+            payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
+                                      'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
+            s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+            return self._send(s if s > 0 else 502, json.dumps(
+                {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
 
@@ -386,8 +411,8 @@ def main():
     threading.Thread(target=poll_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2，端口 {port}，轮询 {POLL_INTERVAL}s，ETA 窗口 {ETA_WINDOW_MIN}min，'
-          f'测速/重试=手动', flush=True)
+    print(f'etkn-monitor v2.1，端口 {port}，轮询 {POLL_INTERVAL}s，ETA 窗口 {ETA_WINDOW_MIN}min，'
+          f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()
 
 
