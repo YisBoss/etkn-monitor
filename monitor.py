@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v1 —— ETKN 只读监控服务
+etkn-monitor v2 —— ETKN 监控服务（轮询+测速+重试）
 配置全部走环境变量（零密钥）：
   ETKN_BASE_URL   ETKN 地址        默认 http://192.168.1.22:5257
   ETKN_USERNAME   登录用户名        默认 YisBoss
@@ -9,17 +9,23 @@ etkn-monitor v1 —— ETKN 只读监控服务
   ETKN_ETA_WINDOW 分钟              ETA 滚动窗口，默认 10
   POLL_INTERVAL   秒                轮询间隔，默认 15
   MONITOR_PORT    监听端口          默认 8620
-v1 只读：只 GET ETKN 接口 + 本地计算，绝不写任何状态。
+v2 说明：
+  - 轮询采集仍只读；
+  - 新增 POST /api/speedtest：手动链路测速（4 域名，TCP/TLS/HTTP 三段耗时，超时 10 秒，无定时）；
+  - 新增 POST /api/retry/{id}：转发 ETKN 官方 retry-failed 接口，拒绝时原样透传状态码与错误；
+  - 今日完成/异常媒体统一 p115 records 口径。
 """
 import json
 import os
 import re
+import socket
+import ssl
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import Counter, deque
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 BASE = os.environ.get('ETKN_BASE_URL', 'http://192.168.1.22:5257').rstrip('/')
@@ -29,6 +35,13 @@ ETA_WINDOW_MIN = float(os.environ.get('ETKN_ETA_WINDOW', '10'))
 POLL_INTERVAL = float(os.environ.get('POLL_INTERVAL', '15'))
 TZ = timezone(timedelta(hours=8))          # 展示时区固定北京
 PAGE = 100                                  # workflows 翻页大小
+
+SPEEDTEST_TARGETS = [                       # 手动测速目标（无代理，自然走当前路由策略）
+    ('TMDB 图片', 'image.tmdb.org'),
+    ('TMDB 接口', 'api.themoviedb.org'),
+    ('Telegram', 'api.telegram.org'),
+    ('共享中心', 'shared.example.com'),
+]
 
 # ---------- 登录会话（内存态，401 自动重登） ----------
 _sess_lock = threading.Lock()
@@ -78,7 +91,34 @@ def api_get(path: str, retry: bool = True):
         return -1, {}
 
 
-# ---------- 数据采集 ----------
+def api_post(path: str, payload=None, retry: bool = True):
+    """带会话的 POST；401 重登一次；非 2xx 读取响应体原样透传。"""
+    if not _cookie['value']:
+        with _sess_lock:
+            if not _cookie['value']:
+                login()
+    body = json.dumps(payload or {}).encode()
+    req = urllib.request.Request(BASE + path, data=body,
+                                 headers={'Cookie': _cookie['value'],
+                                          'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode() or '{}')
+    except urllib.error.HTTPError as e:
+        if e.code == 401 and retry:
+            with _sess_lock:
+                login()
+            return api_post(path, payload, retry=False)
+        try:
+            eb = json.loads(e.read().decode() or '{}')
+        except Exception:
+            eb = {}
+        return e.code, eb
+    except Exception as ex:
+        return -1, {'error': str(ex)[:120]}
+
+
+# ---------- 数据采集（只读） ----------
 def _today_prefix() -> str:
     """今日 0 点（北京）ISO 前缀，用于 created_at 字符串比较。"""
     return _today00().isoformat()
@@ -86,7 +126,7 @@ def _today_prefix() -> str:
 
 def collect_active_queue(today_prefix: str):
     """当前活跃队列（queued+running，只统计当日创建）。"""
-    tasks, media_total, by_kind = [], 0, {}
+    tasks, media_total = [], 0
     for st in ('queued', 'running'):
         offset = 0
         while True:
@@ -144,7 +184,7 @@ def collect_today_done(today_prefix: str):
 
 
 def collect_records_day(today_prefix: str):
-    """今日媒体记录（p115/records）——卡片口径主数据。"""
+    """今日媒体记录（p115/records）——全站统一媒体口径。"""
     out = {}
     for st in ('success', 'unrecognized'):
         s, b = api_get(f'/api/p115/records?page=1&per_page=1&status={st}'
@@ -187,6 +227,39 @@ def compute_eta(done_recent: list, remaining_media: int):
             'eta_text': eta_text, 'window_min': wmin, 'done_media_in_window': done_media}
 
 
+# ---------- 手动测速（无定时；无代理，自然走系统路由） ----------
+def speedtest_one(host: str, timeout: float = 10.0):
+    r = {'host': host, 'ok': False, 'tcp_ms': None, 'tls_ms': None, 'http_ms': None,
+         'total_ms': None, 'status': None, 'error': None}
+    t0 = time.perf_counter()
+    try:
+        sock = socket.create_connection((host, 443), timeout=timeout)
+        t1 = time.perf_counter()
+        r['tcp_ms'] = round((t1 - t0) * 1000)
+        tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+        t2 = time.perf_counter()
+        r['tls_ms'] = round((t2 - t1) * 1000)
+        tls.sendall(f'GET / HTTP/1.1\r\nHost: {host}\r\n'
+                    f'User-Agent: etkn-monitor\r\nConnection: close\r\n\r\n'.encode())
+        chunk = tls.recv(256)
+        t3 = time.perf_counter()
+        r['http_ms'] = round((t3 - t2) * 1000)
+        line = chunk.decode('latin1', 'replace').split('\r\n', 1)[0]
+        m = re.search(r'\b(\d{3})\b', line)
+        r['status'] = int(m.group(1)) if m else None
+        r['ok'] = bool(r['status'])
+        r['total_ms'] = round((t3 - t0) * 1000)
+        try:
+            tls.close()
+        except Exception:
+            pass
+    except Exception as e:
+        t3 = time.perf_counter()
+        r['total_ms'] = round((t3 - t0) * 1000)
+        r['error'] = str(e)[:80] or type(e).__name__
+    return r
+
+
 # ---------- 后台轮询线程 ----------
 _state = {'snapshot': None, 'error': None, 'ts': None, 'hist': deque(maxlen=2000)}
 
@@ -220,13 +293,13 @@ def poll_once():
     by_kind_done = {}
     for d in done:
         k = d['kind']
-        e = by_kind_done.setdefault(k, {'tasks': 0, 'media': 0, 'ok_media': 0, 'bad_media': 0})
+        e = by_kind_done.setdefault(k, {'tasks': 0, 'items': 0, 'ok_media': 0, 'bad_media': 0})
         e['tasks'] += 1
-        e['media'] += d['media']
+        e['items'] += d['media']
         e['ok_media'] += d['ok_media']
         e['bad_media'] += d['bad_media']
     snap['done'] = {'tasks': len(done), 'by_kind': by_kind_done,
-                    'media': sum(d['media'] for d in done),
+                    'items': sum(d['media'] for d in done),
                     'ok_media': sum(d['ok_media'] for d in done),
                     'bad_media': sum(d['bad_media'] for d in done)}
     snap['records'] = collect_records_day(today_prefix)
@@ -245,7 +318,7 @@ def poll_loop():
             _state['error'] = None
             _state['ts'] = snap['ts']
             _state['hist'].append({'ts': snap['ts'], 'active_media': snap['active']['media'],
-                                   'done_media': snap['done'].get('media', 0)})
+                                   'done_media': snap['records'].get('success', 0)})
         except Exception as e:
             _state['error'] = f'{e}'[:200]
         time.sleep(max(POLL_INTERVAL, 5))
@@ -286,8 +359,24 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/meta':
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
-                'poll_interval': POLL_INTERVAL, 'version': 'v1.0', 'readonly': True,
+                'poll_interval': POLL_INTERVAL, 'version': 'v2.0', 'readonly': False,
+                'actions': ['speedtest', 'retry-failed'],
             }, ensure_ascii=False).encode())
+        return self._send(404, '{"error":"not found"}'.encode())
+
+    def do_POST(self):
+        p = urllib.parse.urlparse(self.path).path
+        if p == '/api/speedtest':
+            results = [speedtest_one(h) for _, h in SPEEDTEST_TARGETS]
+            return self._send(200, json.dumps(
+                {'ts': _now().isoformat(timespec='seconds'), 'results': results},
+                ensure_ascii=False).encode())
+        m = re.match(r'^/api/retry/(\d+)$', p)
+        if m:
+            wid = m.group(1)
+            s, b = api_post(f'/api/workflows/{wid}/retry-failed')
+            return self._send(s if s > 0 else 502, json.dumps(
+                {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
 
@@ -297,7 +386,8 @@ def main():
     threading.Thread(target=poll_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v1 只读模式，端口 {port}，轮询 {POLL_INTERVAL}s，ETA 窗口 {ETA_WINDOW_MIN}min', flush=True)
+    print(f'etkn-monitor v2，端口 {port}，轮询 {POLL_INTERVAL}s，ETA 窗口 {ETA_WINDOW_MIN}min，'
+          f'测速/重试=手动', flush=True)
     srv.serve_forever()
 
 

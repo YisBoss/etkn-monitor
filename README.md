@@ -1,67 +1,81 @@
-# etkn-monitor —— ETKN 只读监控（v1）
+# etkn-monitor —— ETKN 监控（v2）
 
-手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计。**v1 纯只读**：不提供清空/排优等任何写操作，也无需任何密钥。
+手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试。
 
-## 功能
+**v2 变化**（相对 v1）：
+- 新增**手动链路测速**（仅按钮触发、无定时）：对 image.tmdb.org / api.themoviedb.org / api.telegram.org / shared.example.com 发起普通请求——不设代理、不强制直连，流量自然走软路由当前策略；每域名输出 TCP 建连 / TLS 握手 / HTTP 总耗时与状态，超时 10 秒。
+- 任务统计页失败列表每行新增**重试按钮**：确认弹窗 → 调用 ETKN 官方重试接口（`POST /api/workflows/{id}/retry-failed`）→ 成功后任务自动进 ETKN 队列并刷新；ETKN 返回 409 等拒绝时**原样展示**其错误信息，不隐藏不绕过。
+- 两页口径统一：完成/异常媒体全站以 p115 记录为准；分类表「任务项」列为运行条目数（含重试重算），仅作任务维度参考。
 
-**入库进度页**
-- 待处理（媒体数·任务数）：当前活跃队列（未终态、当日创建，排除历史）
-- 今日完成 / 异常（媒体数主口径，任务数副标）
-- ETA：滚动窗口（默认 10 分钟）完成速率外推剩余队列，速率为 0 显示「计算中」
-- 分类队列明细（共享登记/追剧刷新/刮削入库/网盘整理…各排几个、跑几个、多少媒体）
+**v1 特性保留**：
+- 入库进度页：待处理（当前活跃队列，未终态、当日创建）、今日完成、异常、ETA（滚动窗口速率外推，默认 10 分钟可配；速率为 0 显示「计算中」防除零）、分类队列。
+- 卡片口径：媒体数主口径（p115 记录），任务数副标（如「356媒体·41任务」），每卡标注单位。
+- 轮询间隔默认 15 秒（可配）；前端显示「更新于 XX:XX」。
+- 登录会话存内存、401 自动重登。
+- v1 的清空/一键排优按钮仍不提供（v2 亦未加）。
 
-**任务统计页**
-- 今日分类统计（任务/媒体/成功/异常）
-- 今日失败与部分失败任务清单
-- 系统状态（全局队列、历史累计）
+## 部署（飞牛 fnOS）
 
-顶部显示「更新于 XX:XX」，前端按后端轮询间隔自动刷新。
+```bash
+# 1. 克隆（或复制）项目
+cd /vol1/1000/docker
+git clone https://github.com/YisBoss/etkn-monitor.git
+cd etkn-monitor
 
-## 部署（飞牛 NAS / fnOS）
-
-1. 把本仓库克隆或上传到 NAS 的任意目录，例如 `/vol1/1000/docker/etkn-monitor`
-2. 在该目录创建 `.env` 文件（与 docker-compose.yml 同目录）：
-
-```
+# 2. 创建 .env（密码自填，绝不入仓）
+cat > .env <<'EOF'
 ETKN_BASE_URL=http://192.168.1.22:5257
 ETKN_USERNAME=YisBoss
-ETKN_PASSWORD=你的ETKN登录密码
-```
+ETKN_PASSWORD=你的ETKN密码
+MONITOR_PORT=8620
+POLL_INTERVAL=15
+EOF
+chmod 600 .env
 
-可选变量（有默认值）：
-
-```
-ETKN_ETA_WINDOW=10     # ETA 滚动窗口（分钟）
-POLL_INTERVAL=15       # 轮询间隔（秒）
-MONITOR_PORT=8620      # 面板端口
-```
-
-3. 启动：
-
-```
-cd /vol1/1000/docker/etkn-monitor
+# 3. 启动
 docker compose up -d
+
+# 4. 验证
+curl http://127.0.0.1:8620/api/meta
 ```
 
-4. 浏览器访问 `http://NAS的IP:8620`（手机加主屏即可当 App 用）
+浏览器访问 `http://<NAS-IP>:8620`。
 
-> 密码只进容器环境变量（compose 从 `.env` 注入），不写入代码、不落盘到仓库。`.env` 已被 `.gitignore` 排除。
+## 更新版本
 
-## 配置原则
+```bash
+cd /vol1/1000/docker/etkn-monitor
+git pull          # 或手动覆盖 monitor.py / static/index.html
+docker compose restart
+```
 
-- 零密钥：不内置任何凭据；一切走环境变量
-- 只读：对 ETKN 只发 GET 与登录请求
-- 会话存内存：401 自动重登，重启后自动恢复
+## 配置
 
-## 接口来源（ETKN，只读）
+| 变量 | 说明 | 默认 |
+|---|---|---|
+| ETKN_BASE_URL | ETKN 地址 | http://192.168.1.22:5257 |
+| ETKN_USERNAME | 登录用户名 | YisBoss |
+| ETKN_PASSWORD | 登录密码（必填） | 无 |
+| ETKN_ETA_WINDOW | ETA 滚动窗口（分钟） | 10 |
+| POLL_INTERVAL | 轮询间隔（秒） | 15 |
+| MONITOR_PORT | 监听端口 | 8620 |
 
-| 用途 | 接口 |
-|---|---|
-| 队列/健康 | `/api/health`、`/api/diagnostics/summary` |
-| 任务列表 | `/api/workflows?status=queued|running|succeeded|failed|partial` |
-| 入库记录 | `/api/p115/records?status=success|unrecognized&processed_from=…` |
-| 认证 | `POST /api/auth/login` |
+## 安全
 
-## 版本
+- 零密钥设计：密码只放 `.env`（600 权限），不入代码、不入仓库；Git 已忽略 `.env`。
+- 测速与重试均为手动触发，无任何定时任务。
+- 重试仅转发 ETKN 官方接口；ETKN 的拒绝（409 等）原样透传展示。
 
-- v1：只读监控（本版）。清空队列/一键排优等操作按钮计划 v2 加确认后提供。
+## 接口
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/` | GET | 前端页面 |
+| `/api/meta` | GET | 版本与配置 |
+| `/api/status` | GET | 监控快照（轮询缓存） |
+| `/api/speedtest` | POST | 手动测速（4 域名，无代理自然路由） |
+| `/api/retry/{id}` | POST | 转发 ETKN retry-failed，透传状态与错误 |
+
+## v1 → v2 规划落实
+
+- ~~清空/一键排优按钮~~：v1/v2 均未提供；如需将在后续版本带确认实现。
