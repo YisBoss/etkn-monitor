@@ -8,42 +8,46 @@
 :root{--bg:#0f1419;--card:#1a222c;--line:#2a3644;--tx:#e6edf3;--sub:#8b98a5;--ok:#3fb950;--bad:#f85149;--warn:#d29922;--acc:#58a6ff}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;padding:12px;max-width:560px;margin:0 auto}
-h1{font-size:18px;margin:4px 0 2px}
-.updated{color:var(--sub);font-size:12px;margin-bottom:10px}
-.tabs{display:flex;gap:8px;margin-bottom:12px}
-.tabs button{flex:1;padding:9px 0;border:1px solid var(--line);background:var(--card);color:var(--sub);border-radius:10px;font-size:15px}
-.tabs button.on{color:var(--tx);border-color:var(--acc);background:#16222f}
+h1{font-size:18px;margin:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.updated{color:var(--sub);font-size:12px}
+.tabs{display:flex;gap:8px;margin-bottom:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px}
+.tabs button{flex:1;min-height:44px;border:none;background:transparent;color:var(--sub);border-radius:9px;font-size:15px;transition:background .15s,color .15s}
+.tabs button.on{color:var(--tx);background:#1f3350;font-weight:600;box-shadow:inset 0 0 0 1px #2c4a77}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
 .card.w{grid-column:1/-1}
-.k{color:var(--sub);font-size:12px}
-.v{font-size:22px;font-weight:700;margin:2px 0}
-.v small{font-size:12px;color:var(--sub);font-weight:400;margin-left:4px}
+.k{color:var(--sub);font-size:12px;font-weight:600;letter-spacing:.02em}
+.v{font-size:26px;font-weight:800;margin:2px 0;font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.v small{font-size:12px;color:var(--sub);font-weight:400;margin-left:4px;font-family:inherit}
 .sub{font-size:12px;color:var(--sub)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.acc{color:var(--acc)}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left}
-th{color:var(--sub);font-weight:400}
-td.num,th.num{text-align:right}
-.tag{display:inline-block;padding:1px 7px;border-radius:8px;font-size:11px;background:#22303f;color:var(--sub);margin-right:4px}
-.eta{font-size:20px;font-weight:700;color:var(--acc)}
+thead th{border-bottom:1px solid var(--line);padding-bottom:6px}
+th,td{padding:7px 4px;border-bottom:1px solid rgba(42,54,68,.5);text-align:left}
+th{color:var(--sub);font-weight:400;white-space:nowrap}
+tbody tr:nth-child(even){background:rgba(255,255,255,.025)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+.tag{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;background:#22303f;color:var(--acc);border:1px solid #2c4a77}
+.eta{font-size:22px;font-weight:800;color:var(--acc);font-variant-numeric:tabular-nums}
 .row{display:flex;justify-content:space-between;align-items:baseline}
 .flist{max-height:300px;overflow-y:auto}
-.hint{color:var(--sub);font-size:12px;margin:8px 0;text-align:center}
-button.act{padding:3px 10px;border:1px solid var(--acc);background:transparent;color:var(--acc);border-radius:8px;font-size:12px}
-button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
-.sp{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:baseline}
+.hint{color:var(--sub);font-size:11px;margin:10px 0 2px;text-align:center}
+button.act{min-height:44px;padding:4px 14px;border:1px solid var(--acc);background:transparent;color:var(--acc);border-radius:9px;font-size:12px;cursor:pointer}
+button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:not-allowed}
+.sp{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:baseline}
 .sp:last-child{border-bottom:none}
+.empty{text-align:center;padding:18px 0;color:var(--sub);font-size:13px}
+.empty .ic{font-size:26px;display:block;margin-bottom:6px;opacity:.7}
 #modal{position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;align-items:center;justify-content:center;z-index:9}
-#modal .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;max-width:320px;width:88%}
+#modal .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;max-width:320px;width:88%;box-shadow:0 8px 30px rgba(0,0,0,.5)}
 #modal .btns{display:flex;gap:10px;margin-top:16px}
-#modal .btns button{flex:1;padding:9px 0;border-radius:10px;font-size:14px;border:1px solid var(--line);background:transparent;color:var(--tx)}
-#modal .btns button.go{border-color:var(--warn);color:var(--warn)}
+#modal .btns button{flex:1;min-height:44px;border-radius:10px;font-size:14px;border:1px solid var(--line);background:transparent;color:var(--tx)}
+#modal .btns button.go{border-color:var(--warn);color:var(--warn);font-weight:600}
 </style>
 </head>
 <body>
-<h1>ETKN 监控 <span class="tag" id="roTag">v2.1</span></h1>
-<div class="updated" id="updated">连接中…</div>
+<h1>ETKN 监控 <span class="tag" id="roTag">v2.2</span><span class="updated" id="updated">连接中…</span></h1>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
 <button id="tab2" onclick="sw(2)">任务统计</button>
@@ -57,7 +61,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
     <div class="card w"><div class="k">链路测速（手动，无定时）<button class="act" id="btnSp" onclick="runSpeedtest()" style="float:right">开始测速</button></div>
-      <div id="kSp" style="margin-top:6px"><div class="sub">点击右上「开始测速」：对 4 个域名发起普通请求（不走代理、不强制直连，自然走当前路由策略），输出建连/握手/总耗时。</div></div>
+      <div id="kSp" style="margin-top:6px"><div class="sub">点击右上「开始测速」开始</div></div>
     </div>
   </div>
 </div>
@@ -69,16 +73,15 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub)}
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
     <div class="card w"><div class="k">手动任务<button class="act" id="btnOrg" onclick="runOrganize()" style="float:right">手动整理网盘文件</button></div>
-      <div class="sub" style="margin-top:6px">调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理</div>
     </div>
     <div class="card w"><div class="k">今日失败/部分失败任务</div>
-      <div class="flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th></th></tr></thead><tbody></tbody></table></div>
+      <div class="flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th class="num">操作</th></tr></thead><tbody></tbody></table></div>
       <div class="sub" style="margin-top:4px">重试仅对刮削入库类开放（ETKN 官方白名单）；其他类型官方不支持（409）</div>
     </div>
     <div class="card w"><div class="k">系统状态</div><div id="kDiag" style="margin-top:6px">-</div></div>
   </div>
 </div>
-<div class="hint">数据来源 ETKN · 轮询自动刷新 · 测速与重试仅手动触发</div>
+<div class="hint">数据来源 ETKN · 轮询自动刷新 · 手动操作仅测速/重试/整理</div>
 
 <div id="modal" style="display:none">
   <div class="box">
@@ -162,7 +165,7 @@ async function runSpeedtest(){
       const seg=x.ok?`建连 ${x.tcp_ms}ms · 握手 ${x.tls_ms}ms · 总 ${x.total_ms}ms`
                     :`总耗时 ${x.total_ms}ms`;
       return `<div class="sp"><span>${x.host}</span><span class="sub">${seg} ${st}</span></div>`;
-    }).join('')+`<div class="sub" style="margin-top:6px">测于 ${ (b.ts||'').slice(11,19) } · 不走代理，随当前路由策略</div>`;
+    }).join('')+`<div class="sub" style="margin-top:6px">测于 ${ (b.ts||'').slice(11,19) }</div>`;
   }catch(e){toast('测速失败：'+String(e).slice(0,60),'bad');}
   btn.disabled=false; btn.textContent='开始测速'; spBusy=false;
 }
@@ -239,20 +242,26 @@ async function refresh(){
     document.getElementById('kQ').innerHTML=Object.keys(kb).length?
       Object.entries(kb).map(([k,v])=>`<div class="row" style="padding:3px 0"><span>${k}</span><span class="sub">${v.media} 媒体 · ${v.tasks} 任务（排${v.queued}/行${v.running}）</span></div>`).join('')
       :'<div class="sub">当前队列为空</div>';
-    // 分类统计：任务/任务项 + 汇总对齐 p115 口径
+    // 分类统计：任务/任务项 + 汇总对齐 p115 口径（类型列带状态色点：队列无运行绿/有运行蓝/有异常红）
     const tb=document.querySelector('#tKind tbody');tb.innerHTML='';
     Object.entries(dn.by_kind||{}).sort((x,y)=>y[1].tasks-x[1].tasks).forEach(([k,v])=>{
-      tb.insertAdjacentHTML('beforeend',`<tr><td>${k}</td><td class="num">${v.tasks}</td><td class="num">${v.items??'-'}</td><td class="num ok">${v.ok_media}</td><td class="num ${v.bad_media?'bad':''}">${v.bad_media}</td></tr>`)});
+      const dc=!v.bad_media?'var(--ok)':(v.ok_media>=v.bad_media?'var(--acc)':'var(--bad)');
+      tb.insertAdjacentHTML('beforeend',`<tr><td><span class="dot" style="background:${dc}"></span>${k}</td><td class="num">${v.tasks}</td><td class="num">${v.items??'-'}</td><td class="num ok">${v.ok_media}</td><td class="num ${v.bad_media?'bad':''}">${v.bad_media}</td></tr>`)});
     document.getElementById('sumDone').textContent=rec.success??'-';
     document.getElementById('sumBad').textContent=rec.unrecognized??'-';
-    // 失败明细 + 重试按钮（仅刮削入库类：按 workflow_type 过滤）
+    // 失败明细 + 重试按钮（仅刮削入库类：按 workflow_type 过滤）+ 空态占位
     const tf=document.querySelector('#tFail tbody');tf.innerHTML='';
-    (s.failed_today||[]).slice(0,30).forEach(x=>{
+    const frows=(s.failed_today||[]).slice(0,30);
+    if(!frows.length){
+      tf.insertAdjacentHTML('beforeend',
+        `<tr><td colspan="6"><div class="empty"><span class="ic">✅</span>今日暂无失败任务</div></td></tr>`);
+    }
+    frows.forEach(x=>{
       const btn=canRetry(x)
         ?`<button class="act" onclick="retryTask(${x.id},'${(x.title||'').replace(/'/g,'')}')">重试</button>`
         :`<span class="sub" style="font-size:11px">不支持</span>`;
       tf.insertAdjacentHTML('beforeend',
-        `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td>${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td>${btn}</td></tr>`)});
+        `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td>${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td class="num" style="text-align:right">${btn}</td></tr>`)});
     const d=s.diag||{};
     document.getElementById('kDiag').innerHTML=Object.keys(d).length?
       `<div class="row"><span>全局运行</span><span class="sub">队列${d.queued_runs||0} · 运行${d.running_runs||0}</span></div>
