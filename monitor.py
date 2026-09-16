@@ -430,9 +430,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.4', 'readonly': False,
+                'version': 'v2.4.1', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
-                            'run-generate-covers', 'bad-media'],
+                            'run-generate-covers', 'purge-register-queued', 'bad-media'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -481,6 +481,38 @@ class Handler(BaseHTTPRequestHandler):
                             {'parameters': {}})
             return self._send(s if s > 0 else 502, json.dumps(
                 {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
+        if p == '/api/purge-register-queued':
+            # 清空共享登记积压：只取消 status=queued 的共享登记运行（绝不碰 running）。
+            # 「共享登记」=display_title 前缀（其 workflow_type 是 manual_task，与追剧刷新同型），
+            # 因此按标题前缀识别而非 workflow_type。逐条调用原生 cancel；单条失败不中断。
+            limit = int(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                        .get('limit', ['500'])[0])
+            targets, offset = [], 0
+            while offset < 1000:
+                s0, b0 = api_get(f'/api/workflows?status=queued&limit={PAGE}&offset={offset}')
+                items = b0.get('items', []) if isinstance(b0, dict) else []
+                if not items:
+                    break
+                for x in items:
+                    if (x.get('status') == 'queued'
+                            and (x.get('display_title') or '').startswith('共享登记')):
+                        targets.append(x['id'])
+                offset += PAGE
+                if len(items) < PAGE:
+                    break
+            ok_ids, fails = [], []
+            for rid in targets:
+                try:
+                    s1, b1 = api_post(f'/api/workflows/{rid}/cancel', {})
+                    if s1 in (200, 201, 202):
+                        ok_ids.append(rid)
+                    else:
+                        fails.append({'id': rid, 'status': s1, 'body': b1})
+                except Exception as e:  # 单条失败不中断
+                    fails.append({'id': rid, 'error': str(e)[:120]})
+            return self._send(200, json.dumps(
+                {'found': len(targets), 'cancelled': len(ok_ids), 'failed': fails,
+                 'ids': ok_ids}, ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
 
@@ -491,7 +523,7 @@ def main():
     threading.Thread(target=fast_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.4，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.4.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()
