@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细）
+etkn-monitor v2.3.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照）
 配置全部走环境变量（零密钥）：
   ETKN_BASE_URL   ETKN 地址        默认 http://192.168.1.22:5257
   ETKN_USERNAME   登录用户名        默认 YisBoss
   ETKN_PASSWORD   登录密码          必填（部署者自填，不落盘）
   ETKN_ETA_WINDOW 分钟              ETA 滚动窗口，默认 10
-  POLL_INTERVAL   秒                轮询间隔，默认 15
+  POLL_INTERVAL   秒                慢速全量轮询间隔，默认 120
+  FAST_INTERVAL   秒                快速活跃队列轮询间隔，默认 2
   MONITOR_PORT    监听端口          默认 8620
-v2.1 说明（v2 基础上）：
-  - 重试按钮仅对刮削入库类（workflow_type=batch_ingest）生效，按类型过滤不硬编码标题；
-  - 新增 POST /api/run-task/organize-p115：原样转发 ETKN 原生「手动整理网盘文件」运行接口；
-  - 新增 GET /api/bad-media：异常媒体明细（p115/records，original_name/reason/processed_at）。
+v2.3.1 说明（滞后修复）：
+  - 旧版单线程串行拉全部数据：诊断汇总固定 ~13s + succeeded 深翻页(千页级 ~97s)，
+    单轮 110s+，快照滞后 2-3 分钟（2026-09-16 实测复现）。
+  - 拆分为「快照」（running/queued，单请求 <1s，默认 2 秒一轮，任务出现 ≤60s 内可见）
+    与「慢速全量」（succeeded/failed/partial 深翻页+诊断汇总+records，默认 120 秒一轮），
+    两线程独立，互不阻塞。/api/status 同时返回两组数据与各自采集时间。
+  - 深翻页提前停机：succeeded 首页最旧记录早于今日 0 点且已含窗口外数据时停止（今日口径不变）。
+v2.1/v2.2/v2.3 功能（重试收敛/手动整理/异常明细/手动操作卡/主题）不变。
 """
 import json
 import os
@@ -31,7 +36,8 @@ BASE = os.environ.get('ETKN_BASE_URL', 'http://192.168.1.22:5257').rstrip('/')
 USERNAME = os.environ.get('ETKN_USERNAME', 'YisBoss')
 PASSWORD = os.environ.get('ETKN_PASSWORD', '')
 ETA_WINDOW_MIN = float(os.environ.get('ETKN_ETA_WINDOW', '10'))
-POLL_INTERVAL = float(os.environ.get('POLL_INTERVAL', '15'))
+POLL_INTERVAL = float(os.environ.get('POLL_INTERVAL', '120'))   # 慢速全量轮询
+FAST_INTERVAL = float(os.environ.get('FAST_INTERVAL', '2'))     # 快速活跃队列轮询
 TZ = timezone(timedelta(hours=8))          # 展示时区固定北京
 PAGE = 100                                  # workflows 翻页大小
 
@@ -153,7 +159,11 @@ def collect_active_queue(today_prefix: str):
 
 
 def collect_today_done(today_prefix: str):
-    """今日终态任务（succeeded/failed/partial），带 finished_at，供速率与统计。"""
+    """今日终态任务（succeeded/failed/partial），带 finished_at，供速率与统计。
+
+    succeeded 深翻页优化（v2.3.1）：今日口径只需翻到「整页都早于今日 0 点」为止——
+    服务端按时间倒序返回，一旦某页最旧记录已早于今日 0 点，更深的页必然更旧，直接停。
+    """
     out = []
     for st in ('succeeded', 'failed', 'partial'):
         offset = 0
@@ -162,12 +172,12 @@ def collect_today_done(today_prefix: str):
             items = b.get('items', []) if isinstance(b, dict) else []
             if not items:
                 break
-            stop = False
+            page_oldest = min((it.get('finished_at') or it.get('created_at') or '')
+                              for it in items)
             for it in items:
                 fin = it.get('finished_at') or it.get('created_at') or ''
                 if fin < today_prefix:
-                    stop = True
-                    break
+                    continue
                 out.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
                             'wf': it.get('workflow_type') or '',
                             'title': it.get('display_title') or '',
@@ -175,7 +185,7 @@ def collect_today_done(today_prefix: str):
                             'ok_media': it.get('succeeded_count') or 0,
                             'bad_media': it.get('failed_count') or 0,
                             'finished_at': fin})
-            if stop:
+            if page_oldest < today_prefix:
                 break
             offset += PAGE
             if offset >= 3000:
@@ -260,8 +270,57 @@ def speedtest_one(host: str, timeout: float = 10.0):
     return r
 
 
-# ---------- 后台轮询线程 ----------
-_state = {'snapshot': None, 'error': None, 'ts': None, 'hist': deque(maxlen=2000)}
+# ---------- 后台轮询（双速双快照） ----------
+_state = {'snapshot': None, 'error': None, 'ts': None, 'hist': deque(maxlen=2000),
+          'fast': None, 'fast_ts': None, 'fast_error': None}
+
+
+def fast_once():
+    """快速快照：只拉 running+queued（与 ETKN 任务中心 UI 同源同参），单请求级成本。"""
+    today_prefix = _today_prefix()
+    snap = {'healthy': False, 'active': {'tasks': 0, 'media': 0, 'by_kind': {}}, 'diag': {}}
+    s, b = api_get('/api/health')
+    snap['healthy'] = (s == 200)
+    tasks, media_total = collect_active_queue(today_prefix)
+    snap['active']['tasks'] = len(tasks)
+    snap['active']['media'] = media_total
+    for t in tasks:
+        k = t['kind']
+        d = snap['active']['by_kind'].setdefault(k, {'queued': 0, 'running': 0, 'media': 0, 'tasks': 0})
+        d[t['status']] += 1
+        d['tasks'] += 1
+        d['media'] += t['media']
+    return snap
+
+
+def poll_loop():
+    while True:
+        try:
+            snap = poll_once()
+            _state['snapshot'] = snap
+            _state['error'] = None
+            _state['ts'] = snap['ts']
+            _state['hist'].append({'ts': snap['ts'], 'active_media': snap['active']['media'],
+                                   'done_media': snap['records'].get('success', 0)})
+        except Exception as e:
+            _state['error'] = f'{e}'[:200]
+        time.sleep(max(POLL_INTERVAL, 30))
+
+
+def fast_loop():
+    """快速线程：2 秒级刷新活跃队列；历史 done/records 用慢线程最后一次结果合并展示。"""
+    # 先等首份慢快照就绪（合并展示需要）
+    while _state['snapshot'] is None and _state['error'] is None:
+        time.sleep(0.5)
+    while True:
+        try:
+            fs = fast_once()
+            _state['fast'] = fs
+            _state['fast_ts'] = _now().isoformat(timespec='seconds')
+            _state['fast_error'] = None
+        except Exception as e:
+            _state['fast_error'] = f'{e}'[:200]
+        time.sleep(max(FAST_INTERVAL, 1))
 
 
 def poll_once():
@@ -352,14 +411,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, '前端未构建'.encode(), 'text/plain; charset=utf-8')
         if p == '/api/status':
             snap = _state.get('snapshot')
+            fs = _state.get('fast')
             if not snap:
                 return self._send(503, json.dumps({'error': _state.get('error') or '首轮采集中，请稍候'},
                                                   ensure_ascii=False).encode())
-            return self._send(200, json.dumps(snap, ensure_ascii=False).encode())
+            out = dict(snap)
+            if fs:
+                # 活跃队列/健康用快速快照（2s 级），历史数据用慢快照
+                out['healthy'] = fs['healthy'] and snap['healthy']
+                out['active'] = fs['active']
+                out['fast_ts'] = _state.get('fast_ts')
+                out['ts'] = _state.get('fast_ts') or snap['ts']   # 展示口径=最近成功采集时刻
+                if fs.get('diag'):
+                    out['diag'] = {**snap.get('diag', {}), **fs['diag']}
+            out['slow_ts'] = snap.get('ts')
+            return self._send(200, json.dumps(out, ensure_ascii=False).encode())
         if p == '/api/meta':
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
-                'poll_interval': POLL_INTERVAL, 'version': 'v2.3', 'readonly': False,
+                'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
+                'version': 'v2.3.1', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115', 'bad-media'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
@@ -409,9 +480,11 @@ def main():
     if not PASSWORD:
         raise SystemExit('缺少环境变量 ETKN_PASSWORD（只存环境，不落盘）')
     threading.Thread(target=poll_loop, daemon=True).start()
+    threading.Thread(target=fast_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.1，端口 {port}，轮询 {POLL_INTERVAL}s，ETA 窗口 {ETA_WINDOW_MIN}min，'
+    print(f'etkn-monitor v2.3.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+          f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()
 
