@@ -430,8 +430,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.3.1', 'readonly': False,
-                'actions': ['speedtest', 'retry-failed', 'run-organize-p115', 'bad-media'],
+                'version': 'v2.3.2', 'readonly': False,
+                'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
+                            'run-generate-covers', 'bad-media'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -473,6 +474,13 @@ class Handler(BaseHTTPRequestHandler):
             s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
             return self._send(s if s > 0 else 502, json.dumps(
                 {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
+        if p == '/api/run-task/generate-virtual-library-covers':
+            # 原样转发 ETKN 原生「生成媒体库封面」运行接口（Pro 任务；本机 is_pro=true 已验证；
+            # 无历史运行，用最小载荷走服务端面板默认值）
+            s, b = api_post('/api/task-center/tasks/generate-virtual-library-covers/runs',
+                            {'parameters': {}})
+            return self._send(s if s > 0 else 502, json.dumps(
+                {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
 
@@ -483,7 +491,7 @@ def main():
     threading.Thread(target=fast_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.3.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.3.2，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()
