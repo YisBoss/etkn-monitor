@@ -148,7 +148,10 @@ def collect_active_queue(today_prefix: str):
                 tasks.append({'id': it.get('id'), 'status': st,
                               'kind': kind_of(it), 'title': it.get('display_title') or '',
                               'media': media, 'created_at': it.get('created_at', ''),
-                              'started_at': it.get('started_at') or ''})
+                              'started_at': it.get('started_at') or '',
+                              'succeeded': it.get('succeeded_count') or 0,
+                              'failed': it.get('failed_count') or 0,
+                              'active': it.get('active_count') or 0})
                 media_total += media
             if stop:
                 break
@@ -207,7 +210,7 @@ def collect_records_day(today_prefix: str):
 
 def kind_of(it: dict) -> str:
     t = it.get('display_title') or ''
-    for p in ('共享登记', '追剧刷新', '刮削入库', '网盘整理', '手动整理网盘文件', '频道转存'):
+    for p in ('共享登记', '追剧刷新', '刮削入库', '网盘整理', '手动整理网盘文件', '频道转存', '订阅预处理'):
         if t.startswith(p):
             return p
     wt = it.get('workflow_type') or ''
@@ -218,7 +221,7 @@ def kind_of(it: dict) -> str:
 # 档位映射源：etk_vnext/workflow/repository.py claim_next_step() ORDER BY CASE（只读取证 9/16）
 TIER_BY_KIND = {'刮削入库': 10, '网盘整理': 10, '手动整理网盘文件': 10,
                 '共享登记': 20, '追剧刷新': 20, '手动任务': 20,
-                '生成媒体库封面': 20, '频道转存': 20}
+                '订阅预处理': 20, '生成媒体库封面': 20, '频道转存': 20}
 TIER_DEFAULT = 50
 
 
@@ -236,14 +239,33 @@ def apply_claim_order(tasks: list, by_kind: dict):
 
 
 # ---------- ETA：滚动窗口速率外推（只看当前队列时期的完成记录） ----------
-def compute_eta(done_recent: list, remaining_media: int):
+def compute_eta(done_recent: list, remaining_media: int, running_task: dict = None):
     """done_recent: 已按 finished_at 过滤到窗口内的记录（含 media=item_count）。
-    速率 = 窗口内完成媒体数 / 窗口分钟；ETA = 剩余媒体 / 速率。速率为 0 → 计算中。"""
+    速率 = 窗口内完成媒体数 / 窗口分钟；ETA = 剩余媒体 / 速率。
+    速率为 0 且剩余>0：有运行中任务 → 实时进度（运行中 X 分钟 · 子项 N/M）；无 → 等待领取。"""
     wmin = max(ETA_WINDOW_MIN, 1.0)
     done_media = sum(d['media'] for d in done_recent)
     rate = done_media / wmin if wmin else 0.0
     remaining = remaining_media
     if rate <= 0:
+        if remaining > 0 and running_task:
+            mins = 0
+            sa = running_task.get('started_at') or ''
+            if sa:
+                try:
+                    t0 = datetime.datetime.fromisoformat(sa)
+                    mins = max(0, int((_now() - t0).total_seconds() // 60))
+                except Exception:
+                    mins = 0
+            n, m = running_task.get('succeeded', 0), running_task.get('media') or 0
+            prog = f' · 子项 {n}/{m}' if m else ''
+            return {'rate': 0.0, 'remaining_media': remaining, 'eta_min': None,
+                    'eta_text': f'运行中 {mins} 分钟{prog}', 'fallback': 'running',
+                    'window_min': wmin, 'done_media_in_window': done_media}
+        if remaining > 0:
+            return {'rate': 0.0, 'remaining_media': remaining, 'eta_min': None,
+                    'eta_text': '等待领取', 'fallback': 'queued',
+                    'window_min': wmin, 'done_media_in_window': done_media}
         return {'rate': 0.0, 'remaining_media': remaining, 'eta_min': None, 'eta_text': '计算中',
                 'window_min': wmin, 'done_media_in_window': done_media}
     eta_min = remaining / rate
@@ -311,6 +333,7 @@ def fast_once():
         d[t['status']] += 1
         d['tasks'] += 1
         d['media'] += t['media']
+    apply_claim_order(tasks, snap['active']['by_kind'])   # v2.4.3 补：fast 快照同样带档位/排位
     return snap
 
 
@@ -370,13 +393,17 @@ def poll_once():
     done = collect_today_done(today_prefix)
     win_cut = (_now() - timedelta(minutes=ETA_WINDOW_MIN)).isoformat()
     recent = [d for d in done if (d.get('finished_at') or '') >= win_cut]
-    snap['eta'] = compute_eta(recent, media_total)
+    # v2.4.3 速率=0 兜底：剩余>0 时取「最早开始且仍在运行」的任务实时进度
+    running_tasks = sorted((t for t in tasks if t['status'] == 'running' and t.get('started_at')),
+                           key=lambda t: t['started_at'])
+    snap['eta'] = compute_eta(recent, media_total, running_tasks[0] if running_tasks else None)
     # 整理类预计（v2.4.2）：按 10 档类（网盘整理/手动整理/刮削入库）排队媒体与同窗口速率外推
     tier10 = [k for k, d in snap['active']['by_kind'].items() if d.get('tier') == 10]
     org_media = sum(snap['active']['by_kind'][k]['media'] for k in tier10)
     org_recent = [d for d in recent if d.get('wf') in ('p115_organize', 'batch_ingest', 'core_ingest')
                   or d['kind'] in tier10]
-    org_eta = compute_eta(org_recent, org_media)
+    org_run = next((t for t in running_tasks if t['kind'] in tier10), None)
+    org_eta = compute_eta(org_recent, org_media, org_run)
     org_eta['kinds'] = tier10
     snap['eta']['organize'] = org_eta
     by_kind_done = {}
@@ -460,7 +487,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.4.2', 'readonly': False,
+                'version': 'v2.4.3', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media'],
             }, ensure_ascii=False).encode())
@@ -553,7 +580,7 @@ def main():
     threading.Thread(target=fast_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.4.2，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.4.3，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()
