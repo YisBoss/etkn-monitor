@@ -359,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/meta':
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
-                'poll_interval': POLL_INTERVAL, 'version': 'v2.2', 'readonly': False,
+                'poll_interval': POLL_INTERVAL, 'version': 'v2.3', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115', 'bad-media'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
