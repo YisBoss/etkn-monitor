@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>ETKN 监控</title>
+<script>
+/* 防闪烁：渲染前先读主题（键 etkn_monitor_theme，兼容旧键 etknmon_theme；未设置默认深色） */
+try{
+  var _t=localStorage.getItem('etkn_monitor_theme')||localStorage.getItem('etknmon_theme');
+  if(_t==='light')document.documentElement.setAttribute('data-theme','light');
+}catch(e){}
+</script>
 <style>
 :root{--bg:#0f1419;--card:#1a222c;--line:#2a3644;--tx:#e6edf3;--sub:#8b98a5;--ok:#3fb950;--bad:#f85149;--warn:#d29922;--acc:#58a6ff;--shadow:0 2px 8px rgba(0,0,0,.25);--zebra:rgba(255,255,255,.025);--tabon-bg:#1f3350;--tabon-line:#2c4a77;--tag-bg:#22303f;--toast-ok-bg:#12351f;--toast-ok-tx:#3fb950;--toast-ok-bd:#2ea043;--toast-bad-bg:#3d1518;--toast-bad-tx:#f85149;--toast-bad-bd:#f85149;--toast-warn-bg:#3a2e10;--toast-warn-tx:#d29922;--toast-warn-bd:#d29922;--modal-mask:rgba(0,0,0,.65)}
 html[data-theme="light"]{--bg:#f5f7fa;--card:#ffffff;--line:#d8dee6;--tx:#1f2430;--sub:#5b6675;--ok:#1a7f37;--bad:#cf222e;--warn:#9a6700;--acc:#0969da;--shadow:0 2px 8px rgba(31,36,48,.08);--zebra:rgba(31,36,48,.03);--tabon-bg:#dbe9ff;--tabon-line:#8ab4f8;--tag-bg:#e8f0fe;--toast-ok-bg:#dafbe1;--toast-ok-tx:#1a7f37;--toast-ok-bd:#1a7f37;--toast-bad-bg:#ffebe9;--toast-bad-tx:#cf222e;--toast-bad-bd:#cf222e;--toast-warn-bg:#fff8c5;--toast-warn-tx:#9a6700;--toast-warn-bd:#9a6700;--modal-mask:rgba(31,36,48,.45)}
@@ -36,8 +43,21 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .hint{color:var(--sub);font-size:11px;margin:10px 0 2px;text-align:center}
 button.act{min-height:44px;padding:4px 14px;border:1px solid var(--acc);background:transparent;color:var(--acc);border-radius:9px;font-size:12px;cursor:pointer}
 button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:not-allowed}
-.sp{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13px;align-items:baseline}
+.sp{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--line)}
 .sp:last-child{border-bottom:none}
+.sptab{margin-top:2px}
+.sptab td{white-space:nowrap}
+.sptab td:first-child{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.row-bad td{color:var(--bad)}
+@media (max-width:480px){
+  .sptab thead{display:none}
+  .sptab tr{display:block;padding:8px 0;border-bottom:1px solid var(--line)}
+  .sptab td{display:inline-block;border:none;padding:2px 6px 2px 0}
+  .sptab td:first-child{display:block;width:100%;max-width:none;margin-bottom:2px;font-weight:600}
+  .sptab td:last-child{display:block;width:100%;padding:2px 0 0 18px}
+  .row-bad td:last-child{padding-left:0;margin-left:18px}
+}
+button.act.lnk{border-color:var(--line);color:var(--sub)}
 .empty{text-align:center;padding:18px 0;color:var(--sub);font-size:13px}
 .empty .ic{font-size:26px;display:block;margin-bottom:6px;opacity:.7}
 #modal{position:fixed;inset:0;background:var(--modal-mask);display:flex;align-items:center;justify-content:center;z-index:9}
@@ -48,7 +68,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
 </style>
 </head>
 <body>
-<h1>ETKN 监控 <span class="tag" id="roTag">v2.3.1</span><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="float:right;min-width:44px">🌓</button></h1>
+<h1>ETKN 监控 <span class="tag" id="roTag">v2.3.2</span><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="float:right;min-width:44px">🌓</button></h1>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
 <button id="tab2" onclick="sw(2)">任务统计</button>
@@ -61,7 +81,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
     <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
-    <div class="card w"><div class="k">手动操作<button class="act" id="btnSp1" onclick="runSpeedtest()" style="float:right;margin-left:8px">开始测速</button><button class="act" id="btnOrg1" onclick="runOrganize()" style="float:right">手动整理网盘文件</button></div>
+    <div class="card w"><div class="k">手动操作<button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'" style="float:right;margin-left:8px">更多任务 →</button><button class="act" id="btnSp1" onclick="runSpeedtest()" style="float:right;margin-left:8px">开始测速</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))" style="float:right;margin-left:8px">生成媒体库封面</button><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))" style="float:right">手动整理网盘文件</button></div>
       <div id="kSp" style="margin-top:6px"></div>
     </div>
   </div>
@@ -73,7 +93,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
       <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th></tr></thead><tbody></tbody></table>
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
-    <div class="card w"><div class="k">手动操作<button class="act" id="btnSp2" onclick="runSpeedtest()" style="float:right;margin-left:8px">开始测速</button><button class="act" id="btnOrg2" onclick="runOrganize()" style="float:right">手动整理网盘文件</button></div>
+    <div class="card w"><div class="k">手动操作<button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'" style="float:right;margin-left:8px">更多任务 →</button><button class="act" id="btnSp2" onclick="runSpeedtest()" style="float:right;margin-left:8px">开始测速</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))" style="float:right;margin-left:8px">生成媒体库封面</button><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))" style="float:right">手动整理网盘文件</button></div>
       <div id="kSp2" style="margin-top:6px"></div>
     </div>
     <div class="card w"><div class="k">今日失败/部分失败任务</div>
@@ -106,13 +126,13 @@ function toast(msg, kind){
   clearTimeout(toast._h);
   toast._h=setTimeout(()=>{t.style.display='none'},5000);
 }
-/* ---- 主题切换（localStorage 持久化，深色为默认） ---- */
+/* ---- 主题切换（键 etkn_monitor_theme，head 内联脚本已先行渲染防闪烁） ---- */
 function applyTheme(th){document.documentElement.setAttribute('data-theme',th);}
 function toggleTheme(){
   const cur=document.documentElement.getAttribute('data-theme')==='light'?'dark':'light';
-  applyTheme(cur); localStorage.setItem('etknmon_theme',cur);
+  applyTheme(cur); try{localStorage.setItem('etkn_monitor_theme',cur);}catch(e){}
+  try{localStorage.removeItem('etknmon_theme');}catch(e){}
 }
-(function(){const t=localStorage.getItem('etknmon_theme');if(t)applyTheme(t);})();
 function sw(n){
   document.getElementById('page1').style.display=n===1?'':'none';
   document.getElementById('page2').style.display=n===2?'':'none';
@@ -160,7 +180,16 @@ async function doRetry(id){
     }
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
 }
-/* ---- 测速 ---- */
+/* ---- 测速（表格：域名/建连/握手/总耗时/状态；异常码黄=可达，失败红） ---- */
+function spRow(x){
+  const okc = x.ok ? (x.status&&![200,204].includes(x.status)?'warn':'ok') : 'bad';
+  const dot = `<span class="dot" style="background:var(--${okc==='warn'?'warn':okc})"></span>`;
+  if(!x.ok){
+    return `<tr class="row-bad"><td>${dot}${x.host}</td><td class="num">-</td><td class="num">-</td><td class="num">${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
+  }
+  const stc = (x.status&&![200,204].includes(x.status)) ? `<span class="warn">HTTP ${x.status} 可达</span>` : `<span class="ok">HTTP ${x.status}</span>`;
+  return `<tr><td>${dot}${x.host}</td><td class="num">${x.tcp_ms}ms</td><td class="num">${x.tls_ms}ms</td><td class="num">${x.total_ms}ms</td><td>${stc}</td></tr>`;
+}
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
   ['btnSp1','btnSp2'].forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent='测速中…';}});
@@ -170,41 +199,31 @@ async function runSpeedtest(){
   try{
     const r=await fetch('/api/speedtest',{method:'POST'});
     const b=await r.json();
-    const rendered=(b.results||[]).map(x=>{
-      const st=x.ok?`<span class="ok">HTTP ${x.status}</span>`:`<span class="bad">${x.error||'失败'}</span>`;
-      const seg=x.ok?`建连 ${x.tcp_ms}ms · 握手 ${x.tls_ms}ms · 总 ${x.total_ms}ms`
-                    :`总耗时 ${x.total_ms}ms`;
-      return `<div class="sp"><span>${x.host}</span><span class="sub">${seg} ${st}</span></div>`;
-    }).join('')+`<div class="sub" style="margin-top:6px">测于 ${ (b.ts||'').slice(11,19) }</div>`;
+    const rendered=`<div class="sub" style="margin-bottom:4px">测于 ${ (b.ts||'').slice(11,16) }</div>`+
+      `<table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table>`;
     box.innerHTML=rendered; if(box2)box2.innerHTML=rendered;
   }catch(e){toast('测速失败：'+String(e).slice(0,60),'bad');}
   ['btnSp1','btnSp2'].forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=false;b.textContent='开始测速';}});
   spBusy=false;
 }
-/* ---- 手动整理网盘文件（ETKN 原生，复用 mGo 忙锁） ---- */
-let orgBusy=false;
-async function runOrganize(){
-  if(orgBusy)return;
-  mOpen('手动整理网盘文件',
-    '调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可在「分类队列」中观察。',
-    ()=>doOrganize());
-}
-async function doOrganize(){
-  if(orgBusy)return; orgBusy=true;
-  ['btnOrg1','btnOrg2'].forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent='提交中…';}});
+/* ---- 任务触发（organize-p115 / generate-virtual-library-covers 共用，各自忙锁） ---- */
+const taskBusy = {};
+async function runTask(key, btnIds, busyText, resetText){
+  if(taskBusy[key]) return; taskBusy[key]=true;
+  btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent=busyText;}});
   try{
-    const r=await fetch('/api/run-task/organize-p115',{method:'POST'});
+    const r=await fetch('/api/run-task/'+key,{method:'POST'});
     const b=await r.json();
     if(r.ok&&(b.etkn_status===200||b.etkn_status===201||b.etkn_status===202)){
-      toast('已提交，任务进入队列','ok');
+      toast('已提交进入队列','ok');
       setTimeout(refresh,1500);
     }else{
       const msg=(b.etkn_body&&(b.etkn_body.detail||b.etkn_body.error))||JSON.stringify(b.etkn_body||b);
       toast('ETKN 返回（状态 '+b.etkn_status+'）：'+String(msg).slice(0,120),'bad');
     }
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
-  ['btnOrg1','btnOrg2'].forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=false;b.textContent='手动整理网盘文件';}});
-  orgBusy=false;
+  btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=false;b.textContent=resetText;}});
+  taskBusy[key]=false;
 }
 /* ---- 异常媒体明细 ---- */
 let badBusy=false;
