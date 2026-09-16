@@ -214,6 +214,27 @@ def kind_of(it: dict) -> str:
     return {'batch_ingest': '刮削入库', 'p115_organize': '网盘整理', 'manual_task': '手动任务'}.get(wt, wt or '其他')
 
 
+# ---------- 实际领取序（排优重验证结案：档位小=先领，同档按步骤/运行先后） ----------
+# 档位映射源：etk_vnext/workflow/repository.py claim_next_step() ORDER BY CASE（只读取证 9/16）
+TIER_BY_KIND = {'刮削入库': 10, '网盘整理': 10, '手动整理网盘文件': 10,
+                '共享登记': 20, '追剧刷新': 20, '手动任务': 20,
+                '生成媒体库封面': 20, '频道转存': 20}
+TIER_DEFAULT = 50
+
+
+def apply_claim_order(tasks: list, by_kind: dict):
+    """给 by_kind 每类补 tier（档位）与 rank（该类第一条 queued 任务在全局领取序中的排位）。
+    领取序 = queued 任务按 (档位, 运行id) 升序；running 不占排位（已在消费）。"""
+    queued = sorted((t for t in tasks if t['status'] == 'queued'),
+                    key=lambda t: (TIER_BY_KIND.get(t['kind'], TIER_DEFAULT), t['id'] or 0))
+    first_rank = {}
+    for i, t in enumerate(queued, 1):
+        first_rank.setdefault(t['kind'], i)
+    for k, d in by_kind.items():
+        d['tier'] = TIER_BY_KIND.get(k, TIER_DEFAULT)
+        d['rank'] = first_rank.get(k)          # None=该类无排队（可能在 running 或已清空）
+
+
 # ---------- ETA：滚动窗口速率外推（只看当前队列时期的完成记录） ----------
 def compute_eta(done_recent: list, remaining_media: int):
     """done_recent: 已按 finished_at 过滤到窗口内的记录（含 media=item_count）。
@@ -344,11 +365,20 @@ def poll_once():
         d[t['status']] += 1
         d['tasks'] += 1
         d['media'] += t['media']
+    apply_claim_order(tasks, snap['active']['by_kind'])   # v2.4.2 排位口径=实际领取序
 
     done = collect_today_done(today_prefix)
     win_cut = (_now() - timedelta(minutes=ETA_WINDOW_MIN)).isoformat()
     recent = [d for d in done if (d.get('finished_at') or '') >= win_cut]
     snap['eta'] = compute_eta(recent, media_total)
+    # 整理类预计（v2.4.2）：按 10 档类（网盘整理/手动整理/刮削入库）排队媒体与同窗口速率外推
+    tier10 = [k for k, d in snap['active']['by_kind'].items() if d.get('tier') == 10]
+    org_media = sum(snap['active']['by_kind'][k]['media'] for k in tier10)
+    org_recent = [d for d in recent if d.get('wf') in ('p115_organize', 'batch_ingest', 'core_ingest')
+                  or d['kind'] in tier10]
+    org_eta = compute_eta(org_recent, org_media)
+    org_eta['kinds'] = tier10
+    snap['eta']['organize'] = org_eta
     by_kind_done = {}
     for d in done:
         k = d['kind']
@@ -430,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.4.1', 'readonly': False,
+                'version': 'v2.4.2', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media'],
             }, ensure_ascii=False).encode())
@@ -523,7 +553,7 @@ def main():
     threading.Thread(target=fast_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.4.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.4.2，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()

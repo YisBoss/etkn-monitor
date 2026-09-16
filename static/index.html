@@ -92,7 +92,7 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.4.1</span></h1><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.4.2</span></h1><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -104,7 +104,7 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
     <div class="card"><div class="k">待处理（媒体）</div><div class="v warn" id="cQueued">-<small>媒体</small></div><div class="sub" id="cQueuedSub">- 任务排队/运行</div></div>
     <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div></div>
     <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
-    <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div></div>
+    <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div><div class="sub" id="cEtaOrg" style="margin-top:2px">整理类预计 -</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
     <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
       <div id="kSp" style="margin-top:6px"></div>
@@ -345,12 +345,17 @@ async function refresh(){
     document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务`;
     document.getElementById('cBad').innerHTML=fmtCard(rec.unrecognized||0,'未识别');
     document.getElementById('cBadSub').textContent=`失败/部分任务 ${s.failed_today?.length||0} 个`;
-    const e=s.eta||{};
+    const e=s.eta||{}, eo=e.organize||{};
     document.getElementById('cEta').textContent=e.eta_text||'计算中';
     document.getElementById('cEtaSub').textContent=`速率 ${e.rate||0} 媒体/分 · 剩 ${e.remaining_media||0} 媒体（窗口 ${e.window_min||10} 分）`;
+    document.getElementById('cEtaOrg').textContent=eo.kinds&&eo.kinds.length?
+      `整理类预计 ${eo.eta_text}（剩 ${eo.remaining_media||0} 媒体 · ${eo.rate||0} 媒体/分）`:'整理类队列空闲';
     const kb=a.by_kind||{};
     document.getElementById('kQ').innerHTML=Object.keys(kb).length?
-      Object.entries(kb).map(([k,v])=>`<div class="row" style="padding:3px 0"><span>${kindZh(k)}</span><span class="sub">${v.media} 媒体 · ${v.tasks} 任务（排${v.queued>=150?`<span class="hot">${v.queued}</span>`:v.queued}/行${v.running}）</span></div>`).join('')
+      Object.entries(kb).sort((x,y)=>(x[1].tier||50)-(y[1].tier||50)||x[1].rank-y[1].rank).map(([k,v])=>{
+        const q=v.queued>=150?`<span class="hot">${v.queued}</span>`:v.queued;
+        const rk=v.rank?`档位序第${v.rank}位`:((v.running?'消费中':'空闲'));
+        return `<div class="row" style="padding:3px 0"><span>${kindZh(k)}<span class="sub">〔${rk}〕</span></span><span class="sub">${v.media} 媒体 · ${v.tasks} 任务（排${q}/行${v.running}）</span></div>`;}).join('')
       :'<div class="sub">当前队列为空</div>';
     // 拥堵提示：任一类型排队≥150 才显示（badge 行，随每轮刷新更新）
     const jams=Object.entries(kb).filter(([k,v])=>v.queued>=150);
