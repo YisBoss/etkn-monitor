@@ -92,7 +92,7 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.4</span></h1><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.4.1</span></h1><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -106,7 +106,7 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
     <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
-    <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
+    <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
       <div id="kSp" style="margin-top:6px"></div>
     </div>
   </div>
@@ -118,7 +118,7 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
       <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th></tr></thead><tbody></tbody></table>
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
-    <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
+    <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
       <div id="kSp2" style="margin-top:6px"></div>
     </div>
     <div class="card w"><div class="k">今日失败/部分失败任务</div>
@@ -255,6 +255,30 @@ function renderKind(by){
       :`<tr><td class="ttl">${name}</td><td class="num">${v.tasks}</td><td class="num">${v.items??'-'}</td><td class="num ok">${v.ok_media}</td><td class="num ${v.bad_media?'bad':''}">${v.bad_media}</td></tr>`);
   });
 }
+/* ---- 清空共享登记积压（原生 cancel，仅 queued；绝不碰 running） ---- */
+let purgeBusy = false;
+async function purgeRegister(){
+  if(purgeBusy) return;
+  const st = window._lastStatus || {};
+  const n = (((st.active||{}).by_kind||{})['register_shared_source']||{}).queued;
+  mOpen('清空共享登记积压',
+    `将取消 ${n ?? '若干'} 个排队中的共享登记任务（运行中不受影响），已取消的媒体本次不再登记共享中心。`,
+    async ()=>{
+      purgeBusy = true;
+      try{
+        const r = await fetch('/api/purge-register-queued',{method:'POST'});
+        const b = await r.json();
+        if(r.ok){
+          const failTxt = (b.failed&&b.failed.length)?`，失败 ${b.failed.length} 个`:'';
+          toast(`已取消 ${b.cancelled} 个共享登记任务${failTxt}`, (b.failed&&b.failed.length)?'warn':'ok');
+          setTimeout(refresh, 1500);
+        }else{
+          toast('清空失败：'+String(b.error||JSON.stringify(b)).slice(0,100),'bad');
+        }
+      }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
+      purgeBusy = false;
+    });
+}
 const taskBusy = {};
 async function runTask(key, btnIds, busyText, resetText){
   if(taskBusy[key]) return; taskBusy[key]=true;
@@ -307,6 +331,7 @@ async function refresh(){
     const r=await fetch('/api/status',{cache:'no-store'});
     if(r.status===503){document.getElementById('updated').textContent='首轮采集中…';return}
     const s=await r.json();
+    window._lastStatus=s;
     lastOkTs=Date.now();              // 浏览器本地成功时刻，杜绝陈旧缓存时间
     const hm=new Date(lastOkTs).toTimeString().slice(0,5);
     const slowTs=(s.slow_ts||'').slice(11,16);
