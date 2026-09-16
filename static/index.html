@@ -48,7 +48,7 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
 </style>
 </head>
 <body>
-<h1>ETKN 监控 <span class="tag" id="roTag">v2.3</span><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="float:right;min-width:44px">🌓</button></h1>
+<h1>ETKN 监控 <span class="tag" id="roTag">v2.3.1</span><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="float:right;min-width:44px">🌓</button></h1>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
 <button id="tab2" onclick="sw(2)">任务统计</button>
@@ -234,15 +234,18 @@ let lastOkTs=null;                    // 最近一次成功取数的真实时间
 async function refresh(){
   try{
     if(!metaLoaded){
-      const m=await (await fetch('/api/meta')).json();
-      POLL=Math.max(m.poll_interval||15,5); metaLoaded=true;
+      const m=await (await fetch('/api/meta',{cache:'no-store'})).json();
+      POLL=Math.max(m.poll_interval||2,1); metaLoaded=true;
     }
     const r=await fetch('/api/status',{cache:'no-store'});
     if(r.status===503){document.getElementById('updated').textContent='首轮采集中…';return}
     const s=await r.json();
     lastOkTs=Date.now();              // 浏览器本地成功时刻，杜绝陈旧缓存时间
     const hm=new Date(lastOkTs).toTimeString().slice(0,5);
-    document.getElementById('updated').textContent=`更新于 ${hm} · ${s.healthy?'服务正常':'服务异常'}`;
+    const slowTs=(s.slow_ts||'').slice(11,16);
+    const lagMin=slowTs?Math.round((lastOkTs-new Date(s.slow_ts).getTime())/60000):null;
+    const lagTxt=lagMin==null?'':(lagMin>=1?` · 统计截至 ${slowTs}(滞后${lagMin}分)`:'');
+    document.getElementById('updated').textContent=`更新于 ${hm}${lagTxt} · ${s.healthy?'服务正常':'服务异常'}`;
     const a=s.active||{}, rec=s.records||{}, dn=s.done||{};
     document.getElementById('cQueued').innerHTML=fmtCard(a.media||0,'媒体');
     document.getElementById('cQueuedSub').textContent=`${a.tasks||0} 任务（排队+运行）`;
