@@ -45,6 +45,7 @@ PAGE = 100                                  # workflows 翻页大小
 SPEEDTEST_TARGETS = [                       # 手动测速目标（无代理，自然走当前路由策略）
     ('TMDB 图片', 'image.tmdb.org'),
     ('TMDB 接口', 'api.themoviedb.org'),
+    ('TMDB 自建', 'tmdb.relay.example.com'),
     ('Telegram', 'api.telegram.org'),
     ('共享中心', 'shared.example.com'),
 ]
@@ -688,7 +689,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.5.0', 'readonly': False,
+                'version': 'v2.5.1', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now'],
