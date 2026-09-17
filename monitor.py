@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.3.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照）
+etkn-monitor v2.5.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+                        +设置页+飞书Webhook告警中心：500检测/定时测速/积压告警）
 配置全部走环境变量（零密钥）：
   ETKN_BASE_URL   ETKN 地址        默认 http://192.168.1.22:5257
   ETKN_USERNAME   登录用户名        默认 YisBoss
@@ -47,6 +48,206 @@ SPEEDTEST_TARGETS = [                       # 手动测速目标（无代理，�
     ('Telegram', 'api.telegram.org'),
     ('共享中心', 'shared.example.com'),
 ]
+
+# ==================== V2.5 设置 / 飞书推送 / 告警引擎 ====================
+# 设置持久化到本地 JSON；容器内 /app 只读挂载时按顺位降级：
+#   SETTINGS_PATH 环境变量 > /app/data/ > /data/ > /tmp/（容器层，restart 后保留）
+SETTINGS_DEFAULTS = {
+    'webhook_url': '',            # 飞书自定义机器人 Webhook（零 token，不经过第三方）
+    'push_enabled': False,        # 推送总开关
+    'alert_500_enabled': True,    # TMDB HTTP 500 检测告警
+    'alert_speed_enabled': False, # 定时测速异常告警（定时测速默认关闭）
+    'alert_backlog_enabled': True,# 队列积压告警
+    'interval_500_min': 10,       # 500 检测间隔（分钟）
+    'interval_speed_min': 0,      # 定时测速间隔（分钟，0=关闭）
+    'count_500_threshold': 5,     # 500 告警阈值（今日命中条数）
+    'backlog_threshold': 200,     # 积压告警阈值（任一类型排队数）
+    'speed_threshold_ms': 5000,   # 测速异常阈值（总耗时毫秒）
+}
+
+
+def _pick_settings_path() -> str:
+    cands = []
+    if os.environ.get('SETTINGS_PATH'):
+        cands.append(os.environ['SETTINGS_PATH'])
+    cands += ['/app/data/settings.json', '/data/etkn-monitor-settings.json',
+              '/tmp/etkn-monitor-settings.json']
+    for c in cands:                     # 已有文件优先（换部署方式不丢配置）
+        if os.path.isfile(c):
+            return c
+    for c in cands:
+        try:
+            d = os.path.dirname(c)
+            os.makedirs(d, exist_ok=True)
+            if os.access(d, os.W_OK):
+                return c
+        except Exception:
+            continue
+    return cands[-1]
+
+
+SETTINGS_PATH = _pick_settings_path()
+SETTINGS = dict(SETTINGS_DEFAULTS)
+
+
+def settings_load():
+    try:
+        with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
+            d = json.loads(f.read() or '{}')
+        if isinstance(d, dict):
+            for k in SETTINGS_DEFAULTS:
+                if k in d:
+                    SETTINGS[k] = d[k]
+    except Exception:
+        pass
+    for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled'):
+        SETTINGS[k] = bool(SETTINGS[k])
+    for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
+              'backlog_threshold', 'speed_threshold_ms'):
+        try:
+            v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
+            if v >= 0:
+                SETTINGS[k] = v
+        except Exception:
+            SETTINGS[k] = SETTINGS_DEFAULTS[k]
+
+
+def settings_save():
+    tmp = SETTINGS_PATH + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(SETTINGS, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SETTINGS_PATH)
+
+
+_push_hist = deque(maxlen=50)     # 推送历史（最近 50 条，含测试）
+_speed_hist = deque(maxlen=50)    # 测速历史（最近 50 轮，手动+定时）
+
+
+def record_push(kind: str, text: str, delivered: bool, err: str = ''):
+    _push_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'kind': kind,
+                           'text': (text or '').replace('\n', ' ')[:200],
+                           'delivered': bool(delivered), 'err': (err or '')[:120]})
+
+
+def feishu_push(text: str):
+    """飞书自定义机器人 Webhook（msg_type=text）。返回 (ok, err)。零 token，不经过第三方。"""
+    url = (SETTINGS.get('webhook_url') or '').strip()
+    if not url.startswith(('http://', 'https://')):
+        return False, '未配置 Webhook URL'
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps({'msg_type': 'text', 'content': {'text': text}}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}, method='POST')
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode('utf-8', 'replace')
+            ok = 200 <= resp.status < 300
+            if ok:      # 飞书业务失败也返 200，需看 code 字段
+                m = re.search(r'"code"\s*:\s*(\d+)', body)
+                if m and m.group(1) != '0':
+                    return False, body[:160]
+            return ok, ('' if ok else f'HTTP {resp.status}')
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+# ---------- 告警引擎（三检测器，仅异常时推送，正常完全静默） ----------
+_500_sig = re.compile(r'(?i)http[ _-]?500|status[=:]\s*500')
+_alm = {'t500_fired': False, 't500_day': '', 'speed_fired': {}, 'backlog_fired': set(),
+        'next_500': 0.0, 'next_speed': 0.0}
+
+
+def _alert_text(kind_line: str, detail_lines: list) -> str:
+    return ('⚠️ ETKN 告警 · ' + kind_line + '\n时间 ' + _now().strftime('%m-%d %H:%M') +
+            '\n' + '\n'.join(detail_lines))
+
+
+def check_500():
+    """今日异常明细中 500 签名命中 ≥ 阈值 → 推送一次；归零自动重新布防。"""
+    day = _today00().date().isoformat()
+    if _alm['t500_day'] != day:
+        _alm['t500_day'] = day
+        _alm['t500_fired'] = False
+    cnt, samples = 0, []
+    for st in ('unrecognized', 'failed'):
+        s, b = api_get(f'/api/p115/records?page=1&per_page=50&status={st}'
+                       f'&processed_from={urllib.parse.quote(day)}')
+        if s != 200 or not isinstance(b, dict):
+            continue
+        for x in (b.get('items') or [])[:50]:
+            reason = str(x.get('reason') or x.get('error') or x.get('status') or '')
+            if _500_sig.search(reason):
+                cnt += 1
+                if len(samples) < 3:
+                    samples.append((x.get('original_name') or '-')[:28])
+    if cnt >= SETTINGS['count_500_threshold'] and not _alm['t500_fired']:
+        _alm['t500_fired'] = True
+        text = _alert_text('TMDB HTTP 500', [
+            f'今日命中 500 签名异常 {cnt} 条（阈值 {SETTINGS["count_500_threshold"]}）',
+            '样例：' + ('、'.join(samples) if samples else '-'),
+            '疑似出口节点对 TMDB 限流/拦截；建议复测节点后在任务中心重试失败子项'])
+        ok, err = feishu_push(text)
+        record_push('t500', text, ok, err)
+
+
+def run_speed_round(alert: bool = True):
+    """一轮测速：写历史；shared 域不参与自动告警（手动测速保留）。"""
+    results = [speedtest_one(h) for _, h in SPEEDTEST_TARGETS]
+    _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
+    if alert and SETTINGS['push_enabled'] and SETTINGS['alert_speed_enabled']:
+        thr = SETTINGS['speed_threshold_ms']
+        for r in results:
+            if r['host'] == 'shared.example.com':
+                continue
+            bad = (not r['ok']) or (r['total_ms'] is not None and r['total_ms'] > thr)
+            host = r['host']
+            if bad and not _alm['speed_fired'].get(host):
+                _alm['speed_fired'][host] = True
+                desc = (f'连接失败：{r["error"]}' if not r['ok']
+                        else f'总耗时 {r["total_ms"]}ms（阈值 {thr}ms）')
+                text = _alert_text('链路测速异常', [
+                    f'{host}　{desc}', '定时测速检出该域名异常，可能影响刮削/图片链路'])
+                ok, err = feishu_push(text)
+                record_push('speed', text, ok, err)
+            elif not bad:
+                _alm['speed_fired'][host] = False
+    return results
+
+
+def check_backlog(fast_snap):
+    """分类队列任一类型排队数 ≥ 阈值 → 推送一次；回落后重新布防。"""
+    if not (SETTINGS['push_enabled'] and SETTINGS['alert_backlog_enabled']):
+        return
+    thr = SETTINGS['backlog_threshold']
+    by = ((fast_snap or {}).get('active') or {}).get('by_kind') or {}
+    fired = _alm['backlog_fired']
+    for k, v in by.items():
+        q = v.get('queued') or 0
+        if q >= thr and k not in fired:
+            fired.add(k)
+            text = _alert_text('队列积压', [
+                f'{k} 排队 {q}（阈值 {thr}）', '该类任务积压，消费可能滞后，建议关注任务中心'])
+            ok, err = feishu_push(text)
+            record_push('backlog', text, ok, err)
+        elif q < thr and k in fired:
+            fired.discard(k)
+
+
+def alarm_loop():
+    settings_load()
+    while True:
+        try:
+            now = time.time()
+            if SETTINGS['alert_500_enabled'] and now >= _alm['next_500']:
+                _alm['next_500'] = now + max(5, int(SETTINGS['interval_500_min'])) * 60
+                check_500()
+            iv = int(SETTINGS['interval_speed_min'] or 0)
+            if iv and now >= _alm['next_speed']:
+                _alm['next_speed'] = now + iv * 60
+                run_speed_round(alert=True)
+            check_backlog(_state.get('fast'))
+        except Exception as e:
+            record_push('engine', f'告警引擎异常：{str(e)[:150]}', False, 'engine')
+        time.sleep(30)
 
 # ---------- 登录会话（内存态，401 自动重登） ----------
 _sess_lock = threading.Lock()
@@ -487,9 +688,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.4.3', 'readonly': False,
+                'version': 'v2.5.0', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
-                            'run-generate-covers', 'purge-register-queued', 'bad-media'],
+                            'run-generate-covers', 'purge-register-queued', 'bad-media',
+                            'settings', 'test-push', 'check-500-now', 'speed-now'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -509,12 +711,82 @@ class Handler(BaseHTTPRequestHandler):
             items.sort(key=lambda x: x['at'], reverse=True)
             return self._send(200, json.dumps({'date': today_prefix, 'total': total or len(items),
                                                'items': items[:60]}, ensure_ascii=False).encode())
+        if p == '/api/settings':
+            return self._do_settings_get()
+        if p == '/api/push-history':
+            return self._send(200, json.dumps({'items': list(_push_hist)},
+                                              ensure_ascii=False).encode())
+        if p == '/api/speed-history':
+            return self._send(200, json.dumps({'items': list(_speed_hist)},
+                                              ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
+
+    def _body(self):
+        try:
+            n = int(self.headers.get('Content-Length') or 0)
+            return json.loads(self.rfile.read(n).decode('utf-8') or '{}') if n else {}
+        except Exception:
+            return {}
+
+    def _do_settings_get(self):
+        d = dict(SETTINGS)
+        if d.get('webhook_url'):        # 脱敏展示：协议+域名+尾部4位
+            m = re.match(r'^(https?://[^/]+/)(.*)$', d['webhook_url'])
+            d['webhook_masked'] = (m.group(1) + '***' + m.group(2)[-4:]) if m else '***'
+        else:
+            d['webhook_masked'] = ''
+        d['settings_path'] = SETTINGS_PATH
+        return self._send(200, json.dumps(d, ensure_ascii=False).encode())
+
+    def _do_settings_post(self):
+        b = self._body()
+        if not isinstance(b, dict):
+            return self._send(400, '{"error":"bad body"}'.encode())
+        if 'webhook_url' in b and isinstance(b['webhook_url'], str):
+            SETTINGS['webhook_url'] = b['webhook_url'].strip()
+        for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled'):
+            if k in b:
+                SETTINGS[k] = bool(b[k])
+        for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
+                      ('count_500_threshold', 1), ('backlog_threshold', 1),
+                      ('speed_threshold_ms', 1000)):
+            if k in b:
+                try:
+                    v = int(b[k])
+                    if v >= lo:
+                        SETTINGS[k] = v
+                except Exception:
+                    pass
+        try:
+            settings_save()
+        except Exception as e:
+            return self._send(500, json.dumps({'error': f'保存失败：{e}'[:120]},
+                                              ensure_ascii=False).encode())
+        return self._do_settings_get()
 
     def do_POST(self):
         p = urllib.parse.urlparse(self.path).path
+        if p == '/api/settings':
+            return self._do_settings_post()
+        if p == '/api/test-push':
+            text = _alert_text('测试推送', ['设置页手动触发 · 验证 Webhook 链路',
+                                    '收到本条说明 etkn-monitor → 飞书 推送链路可达'])
+            ok, err = feishu_push(text)
+            record_push('test', text, ok, err)
+            return self._send(200, json.dumps({'ok': ok, 'err': err},
+                                              ensure_ascii=False).encode())
+        if p == '/api/check-500-now':
+            check_500()
+            return self._send(200, json.dumps({'fired': _alm['t500_fired']},
+                                              ensure_ascii=False).encode())
+        if p == '/api/speed-now':
+            results = run_speed_round(alert=False)
+            return self._send(200, json.dumps(
+                {'ts': _now().isoformat(timespec='seconds'), 'results': results},
+                ensure_ascii=False).encode())
         if p == '/api/speedtest':
             results = [speedtest_one(h) for _, h in SPEEDTEST_TARGETS]
+            _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results},
                 ensure_ascii=False).encode())
@@ -578,9 +850,10 @@ def main():
         raise SystemExit('缺少环境变量 ETKN_PASSWORD（只存环境，不落盘）')
     threading.Thread(target=poll_loop, daemon=True).start()
     threading.Thread(target=fast_loop, daemon=True).start()
+    threading.Thread(target=alarm_loop, daemon=True).start()
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.4.3，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.5.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'测速/重试/手动整理=手动', flush=True)
     srv.serve_forever()
