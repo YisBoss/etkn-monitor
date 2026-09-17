@@ -89,10 +89,25 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
 #modal .btns{display:flex;gap:10px;margin-top:16px}
 #modal .btns button{flex:1;min-height:44px;border-radius:10px;font-size:14px;border:1px solid var(--line);background:transparent;color:var(--tx)}
 #modal .btns button.go{border-color:var(--warn);color:var(--warn);font-weight:600}
+/* ---- 设置页（v2.5）：行式布局+开关，主题全走变量 ---- */
+.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.setrow:last-of-type{border-bottom:none}
+.setrow>label:first-child{font-size:14px}
+.setbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+select,input[type=text],input[type=number]{background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px;min-height:44px}
+input[type=text]{flex:1;min-width:220px}
+input[type=number]{width:90px}
+.switch{position:relative;width:48px;height:28px;display:inline-block;flex:none}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;inset:0;background:var(--line);border-radius:28px;transition:.2s}
+.slider:before{content:'';position:absolute;height:22px;width:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+.slider{background:var(--ok)}
+.switch input:checked+.slider:before{transform:translateX(20px)}
+.histsub{font-size:12px;color:var(--sub);margin-top:6px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.4.3</span></h1><span class="updated" id="updated">连接中…</span><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.5.0</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -129,6 +144,38 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
   </div>
 </div>
 <div class="hint">数据来源 ETKN · 轮询自动刷新 · 手动操作仅测速/重试/整理</div>
+
+<div id="page3" style="display:none">
+  <div class="grid">
+    <div class="card w">
+      <div class="tabs" style="margin-bottom:10px">
+        <button id="cfgTab1" class="on" onclick="swCfg(1)">推送与巡检</button>
+        <button id="cfgTab2" onclick="swCfg(2)">推送历史</button>
+        <button id="cfgTab3" onclick="swCfg(3)">测速历史</button>
+      </div>
+      <div id="cfgForm">
+        <div class="setrow"><label>飞书 Webhook 地址</label></div>
+        <div class="setrow"><input type="text" id="cfgUrl" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"></div>
+        <div class="setrow"><label>推送总开关（关闭则全部静默）</label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
+        <div class="setrow"><label>TMDB HTTP 500 检测告警</label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
+        <div class="setrow"><label>定时测速（异常才推送）</label><div class="setbox"><select id="cfgISp"><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 60 分钟</option><option value="120">每 120 分钟</option></select><label class="switch"><input type="checkbox" id="cfgASp"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>队列积压告警</label><div class="setbox"><span class="sub">任一类型排队 ≥</span><input type="number" id="cfgTbl" min="1"><span class="sub">推送</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>500 命中阈值（今日条数）</label><input type="number" id="cfgT500" min="1"></div>
+        <div class="setrow"><label>测速异常阈值（总耗时毫秒）</label><input type="number" id="cfgTsp" min="1000"></div>
+        <div class="ops"><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button></div>
+        <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
+      </div>
+      <div id="cfgHist" style="display:none">
+        <table id="tPush"><thead><tr><th>时间</th><th>类型</th><th>内容</th><th class="num">结果</th></tr></thead><tbody></tbody></table>
+        <div class="histsub">保留最近 50 条推送（含测试）</div>
+      </div>
+      <div id="cfgHistSp" style="display:none">
+        <table id="tSpd"><thead><tr><th>时间</th><th>TMDB 图片</th><th>TMDB 接口</th><th>Telegram</th><th>共享中心</th></tr></thead><tbody></tbody></table>
+        <div class="histsub">保留最近 50 轮（手动+定时）</div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div id="modal" style="display:none">
   <div class="box">
@@ -319,6 +366,97 @@ async function showBad(){
     body.innerHTML='<div class="sub bad">加载失败：'+String(e).slice(0,60)+'</div>';
   }
   badBusy=false;
+}
+/* ---- 设置页（v2.5）：读写设置/测试推送/手动检测/推送与测速历史 ---- */
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+const PUSH_KIND={'t500':'TMDB 500','speed':'测速异常','backlog':'队列积压','test':'测试推送','engine':'引擎'};
+function openCfg(){
+  document.getElementById('page1').style.display='none';
+  document.getElementById('page2').style.display='none';
+  document.getElementById('page3').style.display='';
+  ['tab1','tab2'].forEach(id=>{const b=document.getElementById(id);b.classList.remove('on');});
+  swCfg(1); cfgLoad();
+}
+function swCfg(n){
+  document.getElementById('cfgForm').style.display=n===1?'':'none';
+  document.getElementById('cfgHist').style.display=n===2?'':'none';
+  document.getElementById('cfgHistSp').style.display=n===3?'':'none';
+  ['cfgTab1','cfgTab2','cfgTab3'].forEach((id,i)=>{const b=document.getElementById(id);b.className=(i+1===n)?'on':'';});
+  if(n===2)cfgLoadPush(); if(n===3)cfgLoadSpeed();
+}
+async function cfgLoad(){
+  try{
+    const d=await (await fetch('/api/settings',{cache:'no-store'})).json();
+    document.getElementById('cfgUrl').value=d.webhook_url||'';
+    document.getElementById('cfgUrl').placeholder=d.webhook_masked||'https://open.feishu.cn/open-apis/bot/v2/hook/…';
+    document.getElementById('cfgPush').checked=!!d.push_enabled;
+    document.getElementById('cfgA500').checked=!!d.alert_500_enabled;
+    document.getElementById('cfgASp').checked=!!d.alert_speed_enabled;
+    document.getElementById('cfgABl').checked=!!d.alert_backlog_enabled;
+    document.getElementById('cfgI500').value=String(d.interval_500_min||10);
+    document.getElementById('cfgISp').value=String(d.interval_speed_min||0);
+    document.getElementById('cfgTbl').value=d.backlog_threshold??200;
+    document.getElementById('cfgT500').value=d.count_500_threshold??5;
+    document.getElementById('cfgTsp').value=d.speed_threshold_ms??5000;
+  }catch(e){toast('读取设置失败：'+String(e).slice(0,60),'bad');}
+}
+async function cfgSave(){
+  const b=document.getElementById('btnCfgSave');b.disabled=true;b.textContent='保存中…';
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        webhook_url:document.getElementById('cfgUrl').value.trim(),
+        push_enabled:document.getElementById('cfgPush').checked,
+        alert_500_enabled:document.getElementById('cfgA500').checked,
+        alert_speed_enabled:document.getElementById('cfgASp').checked,
+        alert_backlog_enabled:document.getElementById('cfgABl').checked,
+        interval_500_min:+document.getElementById('cfgI500').value||10,
+        interval_speed_min:+document.getElementById('cfgISp').value||0,
+        count_500_threshold:+document.getElementById('cfgT500').value||5,
+        backlog_threshold:+document.getElementById('cfgTbl').value||200,
+        speed_threshold_ms:+document.getElementById('cfgTsp').value||5000})});
+    const d=await r.json();
+    if(r.ok){document.getElementById('cfgUrl').value=d.webhook_url||'';document.getElementById('cfgUrl').placeholder=d.webhook_masked||'…';toast('设置已保存（重启后仍生效）','ok');}
+    else toast('保存失败：'+String(d.error||JSON.stringify(d)).slice(0,100),'bad');
+  }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
+  b.disabled=false;b.textContent='保存设置';
+}
+async function cfgTestPush(){
+  const b=document.getElementById('btnCfgTest');b.disabled=true;b.textContent='发送中…';
+  try{
+    const d=await (await fetch('/api/test-push',{method:'POST'})).json();
+    if(d.ok)toast('测试推送已送达飞书','ok');
+    else toast('推送失败：'+String(d.err||'').slice(0,120),'bad');
+  }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
+  b.disabled=false;b.textContent='发送测试推送';
+}
+async function cfgCheck500(){
+  const b=document.getElementById('btnCfg500');b.disabled=true;b.textContent='检测中…';
+  try{
+    const d=await (await fetch('/api/check-500-now',{method:'POST'})).json();
+    toast(d.fired?'已达阈值：已向飞书推送 500 告警':'未达阈值：今日 500 签名命中数不足',d.fired?'warn':'ok');
+  }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
+  b.disabled=false;b.textContent='立即检测 500';
+}
+async function cfgLoadPush(){
+  try{
+    const b=await (await fetch('/api/push-history',{cache:'no-store'})).json();
+    const rows=(b.items||[]);
+    document.querySelector('#tPush tbody').innerHTML=rows.length?rows.map(x=>
+      `<tr><td class="num">${(x.ts||'').slice(5,16)}</td><td>${PUSH_KIND[x.kind]||esc(x.kind)}</td><td class="ttl" title="${esc(x.text)}">${esc((x.text||'').slice(0,60))}</td><td class="num ${x.delivered?'ok':'bad'}">${x.delivered?'已送达':esc((x.err||'失败').slice(0,18))}</td></tr>`).join('')
+      :'<tr><td colspan="4"><div class="empty"><span class="ic">📭</span>暂无推送记录（异常时才会推送）</div></td></tr>';
+  }catch(e){toast('读取推送历史失败','bad');}
+}
+async function cfgLoadSpeed(){
+  try{
+    const b=await (await fetch('/api/speed-history',{cache:'no-store'})).json();
+    const rows=(b.items||[]);
+    const cell=r=>!r||r.ok==null?'-':(!r.ok?'<span class="bad">失败</span>':`${r.total_ms??'-'}ms`);
+    document.querySelector('#tSpd tbody').innerHTML=rows.length?rows.map(x=>{
+      const m={};(x.results||[]).forEach(r=>m[r.host]=r);
+      return `<tr><td class="num">${(x.ts||'').slice(5,16)}</td><td class="num">${cell(m['image.tmdb.org'])}</td><td class="num">${cell(m['api.themoviedb.org'])}</td><td class="num">${cell(m['api.telegram.org'])}</td><td class="num">${cell(m['shared.55565576.xyz'])}</td></tr>`;}).join('')
+      :'<tr><td colspan="5"><div class="empty"><span class="ic">⚡</span>暂无测速记录（手动测速或开启定时测速后出现）</div></td></tr>';
+  }catch(e){toast('读取测速历史失败','bad');}
 }
 /* ---- 主刷新 ---- */
 let lastOkTs=null;                    // 最近一次成功取数的真实时间
