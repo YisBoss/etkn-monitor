@@ -42,13 +42,16 @@ FAST_INTERVAL = float(os.environ.get('FAST_INTERVAL', '2'))     # 快速活跃�
 TZ = timezone(timedelta(hours=8))          # 展示时区固定北京
 PAGE = 100                                  # workflows 翻页大小
 
-SPEEDTEST_TARGETS = [                       # 手动测速目标（无代理，自然走当前路由策略）
-    ('TMDB 图片', 'image.tmdb.org'),
-    ('TMDB 接口', 'api.themoviedb.org'),
-    ('TMDB 自建', 'tmdb.relay.example.com'),
-    ('Telegram', 'api.telegram.org'),
-    ('共享中心', 'shared.55565576.xyz'),
+SPEEDTEST_TARGETS = [                       # 手动测速目标（默认无代理，自然走当前路由策略）
+    ('TMDB 图片', 'image.tmdb.org', None),
+    ('TMDB 接口', 'api.themoviedb.org', None),
+    ('TMDB 自建', 'tmdb.relay.example.com', '192.168.1.1:7890'),  # 模拟 ETKN 业务真实路径（经代理）
+    ('Telegram', 'api.telegram.org', None),
+    ('共享中心', 'shared.55565576.xyz', None),
 ]
+SPEEDTEST_VIA_NOTE = {                      # 面板口径备注：经代理测量的域名
+    'tmdb.relay.example.com': '经代理',
+}
 
 # ==================== V2.5 设置 / 飞书推送 / 告警引擎 ====================
 # 设置持久化到本地 JSON；容器内 /app 只读挂载时按顺位降级：
@@ -192,7 +195,7 @@ def check_500():
 
 def run_speed_round(alert: bool = True):
     """一轮测速：写历史；shared 域不参与自动告警（手动测速保留）。"""
-    results = [speedtest_one(h) for _, h in SPEEDTEST_TARGETS]
+    results = [speedtest_one(h, proxy=px) for _, h, px in SPEEDTEST_TARGETS]
     _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
     if alert and SETTINGS['push_enabled'] and SETTINGS['alert_speed_enabled']:
         thr = SETTINGS['speed_threshold_ms']
@@ -482,23 +485,46 @@ def compute_eta(done_recent: list, remaining_media: int, running_task: dict = No
             'eta_text': eta_text, 'window_min': wmin, 'done_media_in_window': done_media}
 
 
-# ---------- 手动测速（无定时；无代理，自然走系统路由） ----------
-def speedtest_one(host: str, timeout: float = 10.0):
+# ---------- 手动测速（无定时；默认直连，proxy 指定域经代理 CONNECT 隧道） ----------
+def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
     r = {'host': host, 'ok': False, 'tcp_ms': None, 'tls_ms': None, 'http_ms': None,
-         'total_ms': None, 'status': None, 'error': None}
+         'total_ms': None, 'status': None, 'error': None, 'via': 'proxy' if proxy else 'direct'}
     t0 = time.perf_counter()
     try:
-        sock = socket.create_connection((host, 443), timeout=timeout)
-        t1 = time.perf_counter()
-        r['tcp_ms'] = round((t1 - t0) * 1000)
-        tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
-        t2 = time.perf_counter()
-        r['tls_ms'] = round((t2 - t1) * 1000)
+        if proxy:
+            # 经代理 CONNECT 隧道：模拟 ETKN 业务真实路径（socket 全程代持，分阶段仍可计时）
+            phost, pport = proxy.rsplit(':', 1)
+            sock = socket.create_connection((phost, int(pport)), timeout=timeout)
+            t1 = time.perf_counter()
+            r['tcp_ms'] = round((t1 - t0) * 1000)   # 阶段1：到代理的连接
+            sock.sendall(f'CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n'
+                         f'Proxy-Connection: keep-alive\r\n\r\n'.encode())
+            buf = b''
+            while b'\r\n\r\n' not in buf and time.perf_counter() - t1 < timeout:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            if not re.match(r'HTTP/1\.[01] 200', buf.split(b'\r\n', 1)[0].decode('latin1', 'replace')):
+                raise ConnectionError('代理隧道建立失败: '
+                                      + buf.split(b'\r\n', 1)[0].decode('latin1', 'replace')[:60])
+            t2 = time.perf_counter()
+            r['tls_ms'] = round((t2 - t1) * 1000)   # 阶段2：CONNECT 隧道建立（含代理侧回源）
+            tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+            t3 = time.perf_counter()
+            r['http_ms'] = round((t3 - t2) * 1000)  # 阶段3：TLS 握手（真目标）
+        else:
+            sock = socket.create_connection((host, 443), timeout=timeout)
+            t1 = time.perf_counter()
+            r['tcp_ms'] = round((t1 - t0) * 1000)
+            tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
+            t2 = time.perf_counter()
+            r['tls_ms'] = round((t2 - t1) * 1000)
         tls.sendall(f'GET / HTTP/1.1\r\nHost: {host}\r\n'
                     f'User-Agent: etkn-monitor\r\nConnection: close\r\n\r\n'.encode())
         chunk = tls.recv(256)
         t3 = time.perf_counter()
-        r['http_ms'] = round((t3 - t2) * 1000)
+        r['http_ms'] = round((t3 - t2) * 1000)  # 代理路径：末段=GET 响应；直连路径：=首字节
         line = chunk.decode('latin1', 'replace').split('\r\n', 1)[0]
         m = re.search(r'\b(\d{3})\b', line)
         r['status'] = int(m.group(1)) if m else None
@@ -689,7 +715,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.5.1', 'readonly': False,
+                'version': 'v2.5.2', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now'],
@@ -786,7 +812,7 @@ class Handler(BaseHTTPRequestHandler):
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results},
                 ensure_ascii=False).encode())
         if p == '/api/speedtest':
-            results = [speedtest_one(h) for _, h in SPEEDTEST_TARGETS]
+            results = [speedtest_one(h, proxy=px) for _, h, px in SPEEDTEST_TARGETS]
             _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results},
