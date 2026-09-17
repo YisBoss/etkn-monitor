@@ -67,6 +67,13 @@ SETTINGS_DEFAULTS = {
     'count_500_threshold': 5,     # 500 告警阈值（今日命中条数）
     'backlog_threshold': 200,     # 积压告警阈值（任一类型排队数）
     'speed_threshold_ms': 5000,   # 测速异常阈值（总耗时毫秒）
+    # ---- v2.5.3 整理任务静止告警 + 完成提醒 ----
+    'alert_stall_enabled': True,   # 整理任务静止告警开关
+    'stall_threshold_min': 10,     # 静止判定阈值（分钟）
+    'stall_repeat_min': 30,        # 持续静止重复提醒间隔（分钟）
+    'stall_grace_enabled': True,   # 大文件宽限开关（运行>1小时阈值放宽到 30 分钟）
+    'alert_finish_enabled': True,  # 整理任务完成提醒开关
+    'finish_scope': 'all',         # 推送范围：ok=仅成功 / all=成功+失败
 }
 
 
@@ -104,16 +111,20 @@ def settings_load():
                     SETTINGS[k] = d[k]
     except Exception:
         pass
-    for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled'):
+    for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
+              'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled'):
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
-              'backlog_threshold', 'speed_threshold_ms'):
+              'backlog_threshold', 'speed_threshold_ms',
+              'stall_threshold_min', 'stall_repeat_min'):
         try:
             v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
             if v >= 0:
                 SETTINGS[k] = v
         except Exception:
             SETTINGS[k] = SETTINGS_DEFAULTS[k]
+    if SETTINGS['finish_scope'] not in ('ok', 'all'):
+        SETTINGS['finish_scope'] = 'all'
 
 
 def settings_save():
@@ -236,6 +247,154 @@ def check_backlog(fast_snap):
             fired.discard(k)
 
 
+# ---------- v2.5.3 整理任务静止告警 + 完成提醒 ----------
+# 整理类按 display_title 前缀区分（共享登记/追剧刷新的 workflow_type 同为 manual_task，按类型筛会误伤）
+ORGANIZE_PREFIXES = ('网盘整理', '刮削入库', '手动整理网盘文件')
+STALL_GRACE_MIN = 30          # 大文件宽限阈值（分钟）
+STALL_GRACE_RUNTIME_MIN = 60  # 触发宽限的运行时长下限（分钟）
+
+_organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}}  # id→(计数快照/布防/上次推送ts)
+
+
+def _log_last_time(run_id: int):
+    """任务日志接口最后一条（=最新，实测 limit=1 返回新→旧首条）的 (ISO时间, message)。"""
+    try:
+        s, b = api_get(f'/api/workflows/{run_id}/logs?limit=1')
+        if s != 200:
+            return None
+        items = b.get('items') if isinstance(b, dict) else b
+        it = (items or [None])[0]
+        if it and it.get('created_at'):
+            return it.get('created_at'), (it.get('message') or '')
+    except Exception:
+        pass
+    return None
+
+
+def _parse_ts(v):
+    try:
+        return datetime.fromisoformat((v or '').replace('Z', '+00:00')).astimezone(TZ)
+    except Exception:
+        return None
+
+
+def _fmt_hhmm(v):
+    d = _parse_ts(v)
+    return d.strftime('%H:%M') if d else '--:--'
+
+
+def check_organize_running(now=None):
+    """静止告警 + 完成提醒（对整理类 running 任务）。
+
+    最后推进时间：优先任务日志接口最后一条时间；接口失败/无日志时回退
+    「succeeded+failed+active 计数快照对比」（计数变化即视为推进）。
+    """
+    now = now or _now()
+    s, b = api_get(f'/api/workflows?status=running&limit={PAGE}&offset=0')
+    if s != 200 or not isinstance(b, dict):
+        return
+    items = b.get('items') or []
+    org = [t for t in items if (t.get('display_title') or '').startswith(ORGANIZE_PREFIXES)]
+    cur = {}
+    for t in org:
+        cnt = ((t.get('succeeded_count') or 0) + (t.get('failed_count') or 0)
+               + (t.get('active_count') or 0))
+        cur[t['id']] = {'title': t.get('display_title') or '', 'item': t.get('item_count') or 0,
+                        'ok': t.get('succeeded_count') or 0, 'bad': t.get('failed_count') or 0,
+                        'cnt': cnt, 'started_at': t.get('started_at') or ''}
+    for rid, c in cur.items():                    # 每任务一次日志尾时间（判据主信号，判据与快照共用）
+        info = _log_last_time(rid)
+        c['last_at'] = info[0] if info else None
+
+    prev = _organize_state['snap']
+    gone = [rid for rid in prev if rid not in cur]
+    if gone and SETTINGS['push_enabled'] and SETTINGS['alert_finish_enabled'] \
+            and SETTINGS['finish_scope'] in ('ok', 'all'):
+        lines = []
+        for rid in gone[:10]:                     # 单轮最多 10 条，防刷屏
+            s2, b2 = api_get(f'/api/workflows/{rid}')
+            if s2 != 200 or not isinstance(b2, dict):
+                continue
+            st2 = (b2.get('status') or '?').lower()
+            ok2, bad2 = b2.get('succeeded_count') or 0, b2.get('failed_count') or 0
+            it2 = b2.get('item_count') or 0
+            if st2 == 'running':
+                continue                          # 父任务重开子链等场景，不算完成
+            if st2 in ('succeeded', 'partial', 'failed', 'cancelled'):
+                if st2 != 'succeeded' and SETTINGS['finish_scope'] != 'all':
+                    continue                      # 仅成功模式下跳过失败/取消
+                dur = ''
+                d0, d1 = _parse_ts(b2.get('started_at')), _parse_ts(b2.get('finished_at'))
+                if d0 and d1:
+                    dur = f'耗时{max(1, round((d1 - d0).total_seconds() / 60))}分钟 · '
+                tag = '✅' if st2 == 'succeeded' else '⚠️'
+                why = '' if st2 == 'succeeded' else f'（{st2}，失败 {bad2} 项）'
+                lines.append(f'{tag} #{rid}「{(b2.get("display_title") or "")[:40]}」已完成{why}\n'
+                             f'{dur}进度 {ok2}/{it2}')
+        if lines:
+            text = '✅ ETKN 整理完成\n' + '\n'.join(lines)
+            ok, err = feishu_push(text)
+            record_push('finish', text, ok, err)
+
+    # ---- 静止告警 ----
+    if SETTINGS['push_enabled'] and SETTINGS['alert_stall_enabled']:
+        thr_min = int(SETTINGS['stall_threshold_min'])
+        rep_min = int(SETTINGS['stall_repeat_min'])
+        grace = bool(SETTINGS['stall_grace_enabled'])
+        fast = _state.get('fast') or {}
+        by_kind = ((fast.get('active') or {}).get('by_kind') or {})
+        a_run = sum((by_kind.get(k) or {}).get('running', 0) for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
+        a_que = sum((by_kind.get(k) or {}).get('queued', 0) for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
+        a_shr = (by_kind.get('共享登记') or {}).get('running', 0)
+        qline = f'当前队列：运行 {a_run} · 排队 {a_que}（共享登记 {a_shr}）'
+        for rid, c in cur.items():
+            last_iso = c.get('last_at')
+            old = prev.get(rid)
+            if last_iso:                                  # 主判据：日志尾时间变化=有推进
+                advanced = (old is None) or (old.get('last_at') != last_iso)
+            else:                                         # 回退：计数快照对比
+                advanced = bool(old) and c['cnt'] != old.get('cnt')
+                last_iso = old.get('last_at') if old else None
+            if advanced:
+                _organize_state['stall_fired'].pop(rid, None)
+                _organize_state['stall_last_push'].pop(rid, None)
+            d_last = _parse_ts(last_iso)
+            if d_last is None:
+                continue                              # 无任何时间信号，不妄报
+            still_min = (now - d_last).total_seconds() / 60
+            eff_thr = thr_min
+            if grace:
+                d0g = _parse_ts(c['started_at'])
+                if d0g:
+                    run_min = (now - d0g).total_seconds() / 60
+                    if run_min >= STALL_GRACE_RUNTIME_MIN:  # 大文件宽限：运行超1小时阈值放宽
+                        eff_thr = STALL_GRACE_MIN
+            if still_min >= eff_thr:
+                last_push = _organize_state['stall_last_push'].get(rid, 0)
+                now_ts = time.time()
+                if rid not in _organize_state['stall_fired']:
+                    _organize_state['stall_fired'][rid] = True
+                    need = True
+                else:
+                    need = now_ts - last_push >= rep_min * 60
+                if need:
+                    _organize_state['stall_last_push'][rid] = now_ts
+                    remain = max(0, c['item'] - c['ok'] - c['bad'])
+                    text = _alert_text('整理任务静止', [
+                        f'任务 #{rid}「{c["title"][:40]}」已静止 {int(still_min)} 分钟',
+                        f'进度 {c["ok"]}/{c["item"]}（剩 {remain}）· 最后推进 {_fmt_hhmm(last_iso)}',
+                        qline,
+                        '建议：查最后推进时间前后是否卡在 TMDB 外呼；必要时取消重派或重启容器'])
+                    ok, err = feishu_push(text)
+                    record_push('stall', text, ok, err)
+            else:
+                _organize_state['stall_fired'].pop(rid, None)
+                _organize_state['stall_last_push'].pop(rid, None)
+
+    _organize_state['snap'] = {rid: {'cnt': c['cnt'], 'last_at': c.get('last_at')}
+                               for rid, c in cur.items()}
+
+
 def alarm_loop():
     settings_load()
     while True:
@@ -249,6 +408,7 @@ def alarm_loop():
                 _alm['next_speed'] = now + iv * 60
                 run_speed_round(alert=True)
             check_backlog(_state.get('fast'))
+            check_organize_running()          # v2.5.3：整理静止告警 + 完成提醒
         except Exception as e:
             record_push('engine', f'告警引擎异常：{str(e)[:150]}', False, 'engine')
         time.sleep(30)
@@ -715,7 +875,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.5.2', 'readonly': False,
+                'version': 'v2.5.3', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now'],
@@ -771,12 +931,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, '{"error":"bad body"}'.encode())
         if 'webhook_url' in b and isinstance(b['webhook_url'], str):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
-        for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled'):
+        for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
+                  'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled'):
             if k in b:
                 SETTINGS[k] = bool(b[k])
         for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
                       ('count_500_threshold', 1), ('backlog_threshold', 1),
-                      ('speed_threshold_ms', 1000)):
+                      ('speed_threshold_ms', 1000),
+                      ('stall_threshold_min', 1), ('stall_repeat_min', 5)):
             if k in b:
                 try:
                     v = int(b[k])
@@ -784,6 +946,8 @@ class Handler(BaseHTTPRequestHandler):
                         SETTINGS[k] = v
                 except Exception:
                     pass
+        if 'finish_scope' in b and b['finish_scope'] in ('ok', 'all'):
+            SETTINGS['finish_scope'] = b['finish_scope']
         try:
             settings_save()
         except Exception as e:
