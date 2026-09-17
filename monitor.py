@@ -253,7 +253,9 @@ ORGANIZE_PREFIXES = ('网盘整理', '刮削入库', '手动整理网盘文件')
 STALL_GRACE_MIN = 30          # 大文件宽限阈值（分钟）
 STALL_GRACE_RUNTIME_MIN = 60  # 触发宽限的运行时长下限（分钟）
 
-_organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}}  # id→(计数快照/布防/上次推送ts)
+_organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_queued': 0,
+                   'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
+                             'last': None, 'last_ts': None}}
 
 
 def _log_last_time(run_id: int):
@@ -308,33 +310,64 @@ def check_organize_running(now=None):
 
     prev = _organize_state['snap']
     gone = [rid for rid in prev if rid not in cur]
-    if gone and SETTINGS['push_enabled'] and SETTINGS['alert_finish_enabled'] \
-            and SETTINGS['finish_scope'] in ('ok', 'all'):
-        lines = []
-        for rid in gone[:10]:                     # 单轮最多 10 条，防刷屏
-            s2, b2 = api_get(f'/api/workflows/{rid}')
-            if s2 != 200 or not isinstance(b2, dict):
-                continue
-            st2 = (b2.get('status') or '?').lower()
-            ok2, bad2 = b2.get('succeeded_count') or 0, b2.get('failed_count') or 0
-            it2 = b2.get('item_count') or 0
-            if st2 == 'running':
-                continue                          # 父任务重开子链等场景，不算完成
-            if st2 in ('succeeded', 'partial', 'failed', 'cancelled'):
-                if st2 != 'succeeded' and SETTINGS['finish_scope'] != 'all':
-                    continue                      # 仅成功模式下跳过失败/取消
-                dur = ''
-                d0, d1 = _parse_ts(b2.get('started_at')), _parse_ts(b2.get('finished_at'))
-                if d0 and d1:
-                    dur = f'耗时{max(1, round((d1 - d0).total_seconds() / 60))}分钟 · '
-                tag = '✅' if st2 == 'succeeded' else '⚠️'
-                why = '' if st2 == 'succeeded' else f'（{st2}，失败 {bad2} 项）'
-                lines.append(f'{tag} #{rid}「{(b2.get("display_title") or "")[:40]}」已完成{why}\n'
-                             f'{dur}进度 {ok2}/{it2}')
-        if lines:
-            text = '✅ ETKN 整理完成\n' + '\n'.join(lines)
+
+    # ---- v2.5.4 批次累计 + 清空提醒（取代 v2.5.3 单任务完成即推） ----
+    batch = _organize_state['batch']
+    for rid in gone[:50]:                     # 单轮最多回查 50 个离开 running 的任务
+        s2, b2 = api_get(f'/api/workflows/{rid}')
+        if s2 != 200 or not isinstance(b2, dict):
+            continue
+        st2 = (b2.get('status') or '?').lower()
+        if st2 == 'running':
+            continue                          # 父任务重开子链等场景，不算终态
+        if st2 in ('succeeded', 'partial'):
+            batch['done'] += 1
+        elif st2 == 'failed':
+            batch['failed'] += 1
+        elif st2 == 'cancelled':
+            batch['cancelled'] += 1
+        else:
+            continue
+        batch['active'] = True
+        fin = _parse_ts(b2.get('finished_at'))
+        if fin and (batch['last_ts'] is None or fin > batch['last_ts']):
+            batch['last_ts'] = fin
+            d0 = _parse_ts(b2.get('started_at'))
+            batch['last'] = {'id': rid, 'title': b2.get('display_title') or '',
+                             'min': max(1, round((fin - d0).total_seconds() / 60)) if d0 else 0}
+
+    if SETTINGS['push_enabled'] and SETTINGS['alert_finish_enabled']:
+        nq = -1                               # -1=本轮排队数未知（未取/取失败）
+        if not cur:
+            s3, b3 = api_get(f'/api/workflows?status=queued&limit={PAGE}&offset=0')
+            if s3 == 200 and isinstance(b3, dict):
+                qitems = b3.get('items') or []
+                nq = sum(1 for t in qitems
+                         if (t.get('display_title') or '').startswith(ORGANIZE_PREFIXES))
+                _organize_state['prev_queued'] = nq
+        total_prev = len(prev) + _organize_state['prev_queued']
+        total_cur = len(cur) + max(nq, 0)
+        known = bool(cur) or nq >= 0          # 排队数未知时不评估，防误报清空
+        if batch['active'] and known and total_prev > 0 and total_cur == 0:
+            fast = _state.get('fast') or {}
+            shr_q = ((((fast.get('active') or {}).get('by_kind') or {}).get('共享登记')
+                      or {}).get('queued', 0))
+            lines = ['✅ ETKN 整理任务已清空，可以整理下一批',
+                     f"本批汇总：完成 {batch['done']} · 失败 {batch['failed']}"
+                     f" · 取消 {batch['cancelled']}"]
+            if batch['last']:
+                lines.append(f"最后任务：#{batch['last']['id']}「{batch['last']['title'][:40]}」"
+                             f"· 耗时 {batch['last']['min']} 分钟")
+            lines.append(f'当前后台：共享登记排队 {shr_q}（不影响整理）')
+            if batch['failed'] and SETTINGS['finish_scope'] != 'ok':
+                lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
+            text = '\n'.join(lines)
             ok, err = feishu_push(text)
-            record_push('finish', text, ok, err)
+            record_push('clear', text, ok, err)
+            _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
+                                        'cancelled': 0, 'last': None, 'last_ts': None}
+        elif total_cur > 0:
+            batch['active'] = True            # 有整理任务在跑/在排=批次进行中
 
     # ---- 静止告警 ----
     if SETTINGS['push_enabled'] and SETTINGS['alert_stall_enabled']:
@@ -875,7 +908,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.5.3', 'readonly': False,
+                'version': 'v2.5.4', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now'],
