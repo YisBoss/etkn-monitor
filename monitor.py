@@ -23,6 +23,7 @@ v2.1/v2.2/v2.3 功能（重试收敛/手动整理/异常明细/手动操作卡/�
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
 import threading
@@ -34,6 +35,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 BASE = os.environ.get('ETKN_BASE_URL', 'http://192.168.1.22:5257').rstrip('/')
+LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '192.168.1.22:8620')   # 内网面板地址（清空提醒链接用）
 USERNAME = os.environ.get('ETKN_USERNAME', 'YisBoss')
 PASSWORD = os.environ.get('ETKN_PASSWORD', '')
 ETA_WINDOW_MIN = float(os.environ.get('ETKN_ETA_WINDOW', '10'))
@@ -72,8 +74,11 @@ SETTINGS_DEFAULTS = {
     'stall_threshold_min': 10,     # 静止判定阈值（分钟）
     'stall_repeat_min': 30,        # 持续静止重复提醒间隔（分钟）
     'stall_grace_enabled': True,   # 大文件宽限开关（运行>1小时阈值放宽到 30 分钟）
-    'alert_finish_enabled': True,  # 整理任务完成提醒开关
-    'finish_scope': 'all',         # 推送范围：ok=仅成功 / all=成功+失败
+    'alert_finish_enabled': True,  # 整理任务清空提醒开关
+    'finish_scope': 'all',         # 推送范围：ok=汇总隐藏失败行 / all=含失败行
+    # ---- v2.5.5 一键整理入口（清空提醒富文本） ----
+    'trigger_enabled': False,      # 清空提醒附「整理下一批」按钮（令牌链接）
+    'trigger_public_base': '',     # 外网基础地址（如 https://etknjk.example.com），空=内网地址
 }
 
 
@@ -112,7 +117,8 @@ def settings_load():
     except Exception:
         pass
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
-              'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled'):
+              'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
+              'trigger_enabled'):
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
               'backlog_threshold', 'speed_threshold_ms',
@@ -125,6 +131,8 @@ def settings_load():
             SETTINGS[k] = SETTINGS_DEFAULTS[k]
     if SETTINGS['finish_scope'] not in ('ok', 'all'):
         SETTINGS['finish_scope'] = 'all'
+    if not isinstance(SETTINGS['trigger_public_base'], str):
+        SETTINGS['trigger_public_base'] = ''
 
 
 def settings_save():
@@ -255,7 +263,10 @@ STALL_GRACE_RUNTIME_MIN = 60  # 触发宽限的运行时长下限（分钟）
 
 _organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_queued': 0,
                    'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
+                             'm_ok': 0, 'm_bad': 0, 'started_at': None,
                              'last': None, 'last_ts': None}}
+_trigger_lock = threading.Lock()          # 忙锁：整理下一批触发期间拒绝并发/连点
+_trigger_token = {'val': None, 'exp': 0}  # 一次性令牌（30 分钟有效，每次清空提醒轮换）
 
 
 def _log_last_time(run_id: int):
@@ -311,7 +322,7 @@ def check_organize_running(now=None):
     prev = _organize_state['snap']
     gone = [rid for rid in prev if rid not in cur]
 
-    # ---- v2.5.4 批次累计 + 清空提醒（取代 v2.5.3 单任务完成即推） ----
+    # ---- v2.5.4/5 批次累计 + 清空提醒（取代单任务完成即推） ----
     batch = _organize_state['batch']
     for rid in gone[:50]:                     # 单轮最多回查 50 个离开 running 的任务
         s2, b2 = api_get(f'/api/workflows/{rid}')
@@ -328,13 +339,22 @@ def check_organize_running(now=None):
             batch['cancelled'] += 1
         else:
             continue
+        # 媒体口径（v2.5.5）：终态时各拉一次 /status 累加（任务级 succeeded/failed_count
+        # 即媒体数，与 p115 记录一致；一次只读请求，无高频新增）
+        s2b, b2b = api_get(f'/api/workflows/{rid}/status')
+        sm = b2b.get('summary') or {} if s2b == 200 and isinstance(b2b, dict) else {}
+        batch['m_ok'] += int(sm.get('succeeded') or 0)
+        batch['m_bad'] += int(sm.get('failed') or 0)
         batch['active'] = True
+        if batch['started_at'] is None:
+            d0 = _parse_ts(b2.get('started_at')) or now   # 兜底=本轮时刻，防 None
+            batch['started_at'] = d0                      # 近似批开始（首个完成任务的开始时刻）
         fin = _parse_ts(b2.get('finished_at'))
         if fin and (batch['last_ts'] is None or fin > batch['last_ts']):
             batch['last_ts'] = fin
-            d0 = _parse_ts(b2.get('started_at'))
+            dd0 = _parse_ts(b2.get('started_at'))
             batch['last'] = {'id': rid, 'title': b2.get('display_title') or '',
-                             'min': max(1, round((fin - d0).total_seconds() / 60)) if d0 else 0}
+                             'min': max(1, round((fin - dd0).total_seconds() / 60)) if dd0 else 0}
 
     if SETTINGS['push_enabled'] and SETTINGS['alert_finish_enabled']:
         nq = -1                               # -1=本轮排队数未知（未取/取失败）
@@ -344,30 +364,58 @@ def check_organize_running(now=None):
                 qitems = b3.get('items') or []
                 nq = sum(1 for t in qitems
                          if (t.get('display_title') or '').startswith(ORGANIZE_PREFIXES))
-                _organize_state['prev_queued'] = nq
         total_prev = len(prev) + _organize_state['prev_queued']
         total_cur = len(cur) + max(nq, 0)
         known = bool(cur) or nq >= 0          # 排队数未知时不评估，防误报清空
         if batch['active'] and known and total_prev > 0 and total_cur == 0:
             fast = _state.get('fast') or {}
-            shr_q = ((((fast.get('active') or {}).get('by_kind') or {}).get('共享登记')
-                      or {}).get('queued', 0))
-            lines = ['✅ ETKN 整理任务已清空，可以整理下一批',
-                     f"本批汇总：完成 {batch['done']} · 失败 {batch['failed']}"
-                     f" · 取消 {batch['cancelled']}"]
+            by = ((fast.get('active') or {}).get('by_kind') or {})
+            def _k(k):                       # 全类型快照行（复用分类队列同源数据）
+                d = by.get(k) or {}
+                return (d.get('running', 0), d.get('queued', 0))
+            qr, qq = _k('刮削入库'); nr, nq2 = _k('网盘整理')
+            sr, sq = _k('共享登记'); wr, wq = _k('追剧刷新')
+            org_keys = ('网盘整理', '刮削入库', '手动整理网盘文件')
+            a_run = sum((by.get(k) or {}).get('running', 0) for k in org_keys)
+            a_que = sum((by.get(k) or {}).get('queued', 0) for k in org_keys)
+            lines = ['✅ ETKN 整理任务已清空，可以整理下一批']
+            scope = SETTINGS['finish_scope']
+            task_part = f"任务 完成{batch['done']}·失败{batch['failed']}·取消{batch['cancelled']}"
+            media_part = f"媒体 完成{batch['m_ok']}·失败{batch['m_bad']}"
+            if scope == 'ok':                # 仅成功范围：失败数值归零展示，隐藏失败细节行
+                media_part = f"媒体 完成{batch['m_ok']}·失败0"
+            lines.append(f'本批：{task_part} ｜ {media_part}')
             if batch['last']:
                 lines.append(f"最后任务：#{batch['last']['id']}「{batch['last']['title'][:40]}」"
                              f"· 耗时 {batch['last']['min']} 分钟")
-            lines.append(f'当前后台：共享登记排队 {shr_q}（不影响整理）')
-            if batch['failed'] and SETTINGS['finish_scope'] != 'ok':
+            if batch['started_at']:
+                tmin = max(1, round((now - batch['started_at']).total_seconds() / 60))
+                lines.append(f'本批总耗时 {tmin} 分钟（{_fmt_hhmm(batch["started_at"])} 开始 → '
+                             f'{_fmt_hhmm(now)} 清空）')
+            lines.append(f'当前队列：刮削 运行{qr}/排队{qq} · 网盘 {nr}/{nq2} · '
+                         f'共享 运行{sr}/排队{sq} · 追剧 运行{wr}/排队{wq}')
+            if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
+            if SETTINGS['trigger_enabled'] and not a_run and not a_que:
+                # 富文本入口：一次性令牌 30 分钟；每次清空轮换，旧令牌作废
+                tok = secrets.token_urlsafe(24)
+                _trigger_token['val'] = tok
+                _trigger_token['exp'] = time.time() + 1800
+                base = (SETTINGS['trigger_public_base'] or f'http://{LAN_HOST}').rstrip('/')
+                lines.append(f'👉 [整理下一批]({base}/trigger/organize?token={tok})'
+                             '（30 分钟内有效，点击确认后触发）')
             text = '\n'.join(lines)
             ok, err = feishu_push(text)
             record_push('clear', text, ok, err)
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
-                                        'cancelled': 0, 'last': None, 'last_ts': None}
+                                        'cancelled': 0, 'm_ok': 0, 'm_bad': 0,
+                                        'started_at': None, 'last': None, 'last_ts': None}
         elif total_cur > 0:
             batch['active'] = True            # 有整理任务在跑/在排=批次进行中
+            if batch['started_at'] is None:
+                batch['started_at'] = now     # 批开始=第一个整理类任务入队时刻
+        if nq >= 0:                           # 评估完成后才更新排队快照（v2.5.5 修复：
+            _organize_state['prev_queued'] = nq   # 原先提前覆盖导致纯排队批次清空永不触发）
 
     # ---- 静止告警 ----
     if SETTINGS['push_enabled'] and SETTINGS['alert_stall_enabled']:
@@ -864,6 +912,52 @@ def poll_loop():
 # ---------- HTTP ----------
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer   # noqa: E402
 
+# v2.5.5 一键整理确认页（极简内联样式；取消为默认焦点；确认走 POST）
+_TRIGGER_PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>整理下一批 · 确认</title><style>
+body{{font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+background:#0f1420;color:#e8ecf3;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
+.card{{background:#171e2e;border:1px solid #2a3450;border-radius:14px;padding:28px 30px;max-width:420px;width:92%}}
+h1{{font-size:19px;margin:0 0 6px}} .sub{{color:#8b96ad;font-size:13px;margin-bottom:14px}}
+.snap{{background:#0f1420;border:1px solid #2a3450;border-radius:8px;padding:10px 12px;font-size:13px;
+color:#aebad0;margin-bottom:18px;font-family:ui-monospace,monospace}}
+.btns{{display:flex;gap:10px}} button{{flex:1;padding:11px 0;border-radius:9px;border:0;font-size:15px;cursor:pointer}}
+.b-ok{{background:#2f81f7;color:#fff}} .b-no{{background:#232c42;color:#c3cbdc}}
+#msg{{margin-top:14px;font-size:13px;min-height:18px}}
+.ok{{color:#3fb950}} .bad{{color:#f85149}}</style></head><body>
+<div class="card"><h1>✅ 确认整理下一批？</h1>
+<div class="sub">将触发 ETKN 原生「手动整理网盘文件」（与面板按钮同一接口）</div>
+<div class="snap">当前队列快照：{snap}</div>
+<div class="btns">
+<form id="f" method="post" action="/trigger/organize" style="flex:1;display:contents">
+<input type="hidden" name="token" value="{token}">
+<button type="button" class="b-no" id="bNo" autofocus onclick="location.href='about:blank'">取消</button>
+<button type="button" class="b-ok" id="bOk" onclick="doGo()">确认整理</button>
+</form></div><div id="msg"></div></div>
+<script>
+async function doGo(){{
+  const m=document.getElementById('msg'),o=document.getElementById('bOk');
+  o.disabled=true;m.textContent='触发中…';m.className='';
+  try{{
+    const r=await fetch('/trigger/organize',{{method:'POST',
+      headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{token:'{token}'}})}});
+    const d=await r.json().catch(()=>({{}}));
+    if(r.ok&&d.ok){{m.textContent='✅ 已触发，网盘整理任务已入队';m.className='ok';}}
+    else{{m.textContent='❌ '+(d.error||('失败 '+r.status));m.className='bad';o.disabled=false;}}
+  }}catch(e){{m.textContent='❌ '+e;m.className='bad';o.disabled=false;}}
+}}
+</script></body></html>"""
+
+_TRIGGER_PAGE_BAD = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>链接已失效</title>
+<style>body{{font-family:system-ui,sans-serif;background:#0f1420;color:#e8ecf3;display:flex;
+min-height:100vh;align-items:center;justify-content:center;margin:0}}
+.c{{text-align:center;color:#8b96ad}} b{{color:#f85149;font-size:17px}}</style></head><body>
+<div class="c"><b>链接已失效或已使用</b><div style="margin-top:8px">令牌一次性、30 分钟有效；<br>请使用最新一条清空提醒里的按钮</div></div>
+</body></html>"""
+
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
 
@@ -908,10 +1002,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.5.4', 'readonly': False,
+                'version': 'v2.5.5', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
-                            'settings', 'test-push', 'check-500-now', 'speed-now'],
+                            'settings', 'test-push', 'check-500-now', 'speed-now',
+                            'trigger-organize'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -936,6 +1031,23 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/push-history':
             return self._send(200, json.dumps({'items': list(_push_hist)},
                                               ensure_ascii=False).encode())
+        m = re.match(r'^/trigger/organize$', p)
+        if m:                                 # v2.5.5 一键整理入口（GET 确认页）
+            tok_q = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                     .get('token') or [''])[0]
+            valid = (SETTINGS['trigger_enabled'] and _trigger_token['val']
+                     and tok_q == _trigger_token['val'] and time.time() < _trigger_token['exp'])
+            if not valid:
+                return self._send(403, _TRIGGER_PAGE_BAD.encode())
+            fast = _state.get('fast') or {}
+            by = ((fast.get('active') or {}).get('by_kind') or {})
+            def _kk(k):
+                d = by.get(k) or {}
+                return f"{d.get('running', 0)}/{d.get('queued', 0)}"
+            snap_line = (f"刮削 {_kk('刮削入库')} · 网盘 {_kk('网盘整理')} · "
+                         f"共享 {_kk('共享登记')} · 追剧 {_kk('追剧刷新')}")
+            return self._send(200, _TRIGGER_PAGE.format(
+                token=tok_q, snap=snap_line, gen=secrets.token_hex(8)).encode())
         if p == '/api/speed-history':
             return self._send(200, json.dumps({'items': list(_speed_hist)},
                                               ensure_ascii=False).encode())
@@ -965,7 +1077,8 @@ class Handler(BaseHTTPRequestHandler):
         if 'webhook_url' in b and isinstance(b['webhook_url'], str):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
         for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
-                  'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled'):
+                  'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
+                  'trigger_enabled'):
             if k in b:
                 SETTINGS[k] = bool(b[k])
         for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
@@ -981,6 +1094,8 @@ class Handler(BaseHTTPRequestHandler):
                     pass
         if 'finish_scope' in b and b['finish_scope'] in ('ok', 'all'):
             SETTINGS['finish_scope'] = b['finish_scope']
+        if 'trigger_public_base' in b and isinstance(b['trigger_public_base'], str):
+            SETTINGS['trigger_public_base'] = b['trigger_public_base'].strip().rstrip('/')
         try:
             settings_save()
         except Exception as e:
@@ -1013,6 +1128,39 @@ class Handler(BaseHTTPRequestHandler):
             _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results},
+                ensure_ascii=False).encode())
+        if p == '/trigger/organize':          # v2.5.5 确认执行（忙锁+令牌+防连点）
+            b = self._body()
+            tok_q = str(b.get('token') or '')
+            valid = (SETTINGS['trigger_enabled'] and _trigger_token['val']
+                     and tok_q == _trigger_token['val'] and time.time() < _trigger_token['exp'])
+            if not valid:
+                return self._send(403, json.dumps({'error': '令牌无效或已过期（30 分钟有效期），'
+                                                  '请使用最新一条清空提醒里的链接'},
+                                                  ensure_ascii=False).encode())
+            if _trigger_lock.locked():
+                return self._send(429, json.dumps({'error': '整理已在触发中，请勿连点'},
+                                                  ensure_ascii=False).encode())
+            with _trigger_lock:               # 拿锁后二次复核令牌（防近同时双击竞态）与队列，再发
+                if not (SETTINGS['trigger_enabled'] and _trigger_token['val']
+                        and tok_q == _trigger_token['val'] and time.time() < _trigger_token['exp']):
+                    return self._send(403, json.dumps({'error': '令牌无效或已过期'},
+                                                      ensure_ascii=False).encode())
+                fast = _state.get('fast') or {}
+                by = ((fast.get('active') or {}).get('by_kind') or {})
+                busy = any((by.get(k) or {}).get('running', 0) or (by.get(k) or {}).get('queued', 0)
+                           for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
+                if busy:
+                    return self._send(409, json.dumps(
+                        {'error': '整理队列非空，未触发；请稍后再看'}, ensure_ascii=False).encode())
+                _trigger_token['val'] = None  # 一次性：触发即作废
+                _trigger_token['exp'] = 0
+                payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
+                                          'module_key': 'p115_organize',
+                                          'handoff_mode': 'independent'}}
+                s, b2 = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+            return self._send(s if s > 0 else 502, json.dumps(
+                {'ok': s in (200, 201, 202), 'etkn_status': s, 'etkn_body': b2},
                 ensure_ascii=False).encode())
         m = re.match(r'^/api/retry/(\d+)$', p)
         if m:
