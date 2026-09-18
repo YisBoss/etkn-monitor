@@ -952,9 +952,9 @@ async function doGo(){{
 
 _TRIGGER_PAGE_BAD = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>链接已失效</title>
-<style>body{{font-family:system-ui,sans-serif;background:#0f1420;color:#e8ecf3;display:flex;
-min-height:100vh;align-items:center;justify-content:center;margin:0}}
-.c{{text-align:center;color:#8b96ad}} b{{color:#f85149;font-size:17px}}</style></head><body>
+<style>body{font-family:system-ui,sans-serif;background:#0f1420;color:#e8ecf3;display:flex;
+min-height:100vh;align-items:center;justify-content:center;margin:0}
+.c{text-align:center;color:#8b96ad} b{color:#f85149;font-size:17px}</style></head><body>
 <div class="c"><b>链接已失效或已使用</b><div style="margin-top:8px">令牌一次性、30 分钟有效；<br>请使用最新一条清空提醒里的按钮</div></div>
 </body></html>"""
 
