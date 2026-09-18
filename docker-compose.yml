@@ -18,6 +18,8 @@ services:
     volumes:
       - ./:/app:ro
       - ./data:/app/data
+      # v2.7 自动喂料：CloudDrive 115 云盘挂载（fuse；同挂载内 os.rename=115 秒级移动）
+      - /vol1/1000/CloudNAS/CloudDrive/115:/cloud115:rw
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8620/api/meta >/dev/null 2>&1 || exit 1"]
       interval: 60s
