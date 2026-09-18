@@ -994,7 +994,7 @@ def collect_today_done(today_prefix: str):
             if page_oldest < today_prefix:
                 break
             offset += PAGE
-            if offset >= 3000:
+            if offset >= 30000:   # v2.7.1 安全闸：防接口异常时的无限翻页（正常今日远小于此）
                 break
     return out
 
@@ -1245,6 +1245,11 @@ def poll_once():
                     'ok_media': sum(d['ok_media'] for d in done),
                     'bad_media': sum(d['bad_media'] for d in done)}
     snap['records'] = collect_records_day(today_prefix)
+    # v2.7.1：本周完成（口径=records success 累计值，与 ETKN 整理记录「本周处理」同源）
+    week_cut = (_now() - timedelta(days=7)).isoformat()
+    s, b = api_get(f'/api/p115/records?page=1&per_page=1&status=success'
+                   f'&processed_from={urllib.parse.quote(week_cut)}')
+    snap['week'] = {'media': (b or {}).get('total', 0) if s == 200 else None}
     snap['failed_today'] = [
         {'id': d['id'], 'kind': d['kind'], 'wf': d['wf'], 'title': d['title'][:40],
          'media': d['media'], 'bad_media': d['bad_media'], 'finished_at': d['finished_at'][:19]}
@@ -1359,7 +1364,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.7', 'readonly': False,
+                'version': 'v2.7.1', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
