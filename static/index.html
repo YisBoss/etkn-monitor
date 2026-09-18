@@ -107,7 +107,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.5.4</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.5.5</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -165,6 +165,8 @@ input[type=number]{width:90px}
         <div class="setrow"><label>整理任务静止告警</label><div class="setbox"><span class="sub">静止 ≥</span><input type="number" id="cfgTStall" min="1"><span class="sub">分钟推送，重复间隔</span><input type="number" id="cfgRStall" min="5"><span class="sub">分钟</span><label class="switch"><input type="checkbox" id="cfgAStall"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>大文件宽限（运行超1小时阈值放宽到30分钟）</label><label class="switch"><input type="checkbox" id="cfgGrace"><span class="slider"></span></label></div>
         <div class="setrow"><label>整理任务清空提醒</label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>一键整理入口（清空提醒附「整理下一批」按钮，令牌30分钟一次性）</label><label class="switch"><input type="checkbox" id="cfgTrg"><span class="slider"></span></label></div>
+        <div class="setrow"><label>外网面板地址（空=内网 192.168.1.22:8620）</label><input type="text" id="cfgTrgBase" placeholder="https://etknjk.example.com" style="max-width:260px"></div>
         <div class="ops"><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button></div>
         <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
       </div>
@@ -407,6 +409,8 @@ async function cfgLoad(){
     document.getElementById('cfgGrace').checked=!!d.stall_grace_enabled;
     document.getElementById('cfgAFin').checked=!!d.alert_finish_enabled;
     document.getElementById('cfgFScope').value=d.finish_scope||'all';
+    document.getElementById('cfgTrg').checked=!!d.trigger_enabled;
+    document.getElementById('cfgTrgBase').value=d.trigger_public_base||'';
   }catch(e){toast('读取设置失败：'+String(e).slice(0,60),'bad');}
 }
 async function cfgSave(){
@@ -429,7 +433,9 @@ async function cfgSave(){
         stall_repeat_min:+document.getElementById('cfgRStall').value||30,
         stall_grace_enabled:document.getElementById('cfgGrace').checked,
         alert_finish_enabled:document.getElementById('cfgAFin').checked,
-        finish_scope:document.getElementById('cfgFScope').value})});
+        finish_scope:document.getElementById('cfgFScope').value,
+        trigger_enabled:document.getElementById('cfgTrg').checked,
+        trigger_public_base:document.getElementById('cfgTrgBase').value.trim()})});
     const d=await r.json();
     if(r.ok){document.getElementById('cfgUrl').value=d.webhook_url||'';document.getElementById('cfgUrl').placeholder=d.webhook_masked||'…';toast('设置已保存（重启后仍生效）','ok');}
     else toast('保存失败：'+String(d.error||JSON.stringify(d)).slice(0,100),'bad');
