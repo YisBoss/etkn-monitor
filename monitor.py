@@ -91,6 +91,10 @@ def _pick_settings_path() -> str:
     for c in cands:                     # 已有文件优先（换部署方式不丢配置）
         if os.path.isfile(c):
             return c
+    # v2.5.5 修复：无既有文件时**优先宿主机挂载卷**（/app/data 经 compose 挂宿主机
+    # data/，容器重建不丢）；旧顺序曾把新装设置落进容器可写层，重建即丢。
+    if os.environ.get('SETTINGS_PATH'):
+        return cands[0]
     for c in cands:
         try:
             d = os.path.dirname(c)
