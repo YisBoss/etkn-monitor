@@ -36,6 +36,7 @@ from datetime import datetime, timedelta, timezone
 
 BASE = os.environ.get('ETKN_BASE_URL', 'http://192.168.1.22:5257').rstrip('/')
 LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '192.168.1.22:8620')   # 内网面板地址（清空提醒链接用）
+ETKN_PUBLIC_URL = 'https://etkn.example.com'   # v2.6 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
 USERNAME = os.environ.get('ETKN_USERNAME', 'YisBoss')
 PASSWORD = os.environ.get('ETKN_PASSWORD', '')
 ETA_WINDOW_MIN = float(os.environ.get('ETKN_ETA_WINDOW', '10'))
@@ -156,14 +157,32 @@ def record_push(kind: str, text: str, delivered: bool, err: str = ''):
                            'delivered': bool(delivered), 'err': (err or '')[:120]})
 
 
-def feishu_push(text: str):
-    """飞书自定义机器人 Webhook（msg_type=text）。返回 (ok, err)。零 token，不经过第三方。"""
+def feishu_push(text: str, buttons: list = None, title: str = '', tcolor: str = 'blue'):
+    """飞书自定义机器人 Webhook。v2.6：buttons 非空 → msg_type=interactive 卡片
+    （title=卡片标题；正文=原文全文保留，口径零变化），否则 msg_type=text 兼容旧通道。
+    buttons=[{'tag':'default','text':'整理下一批','url':'https://…','type':'primary'},…]。
+    返回 (ok, err)。零 token，不经过第三方。"""
     url = (SETTINGS.get('webhook_url') or '').strip()
     if not url.startswith(('http://', 'https://')):
         return False, '未配置 Webhook URL'
+    if buttons:
+        # 卡片：header 标题 + markdown 正文（原文全量）+ 按钮行（url 跳转，飞书内置浏览器打开）
+        first, _, rest = text.partition('\n')
+        body = rest.strip() or first
+        if not title:
+            title = first
+        elements = [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': body}}]
+        elements.append({'tag': 'action', 'actions': [
+            {'tag': 'button', 'text': {'tag': 'plain_text', 'content': b.get('text', '打开')},
+             'type': b.get('type', 'default'), 'url': b['url']} for b in buttons]})
+        payload = {'msg_type': 'interactive', 'card': {
+            'header': {'template': tcolor, 'title': {'tag': 'plain_text', 'content': title}},
+            'elements': elements}}
+    else:
+        payload = {'msg_type': 'text', 'content': {'text': text}}
     try:
         req = urllib.request.Request(
-            url, data=json.dumps({'msg_type': 'text', 'content': {'text': text}}).encode('utf-8'),
+            url, data=json.dumps(payload).encode('utf-8'),
             headers={'Content-Type': 'application/json'}, method='POST')
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = resp.read().decode('utf-8', 'replace')
@@ -188,6 +207,35 @@ def _alert_text(kind_line: str, detail_lines: list) -> str:
             '\n' + '\n'.join(detail_lines))
 
 
+def _alert_push(kind: str, kind_line: str, detail_lines: list, buttons: list = None,
+                tcolor: str = 'yellow'):
+    """v2.6 卡片化告警推送：文本口径不变，加标题/按钮。"""
+    text = _alert_text(kind_line, detail_lines)
+    if buttons:
+        ok, err = feishu_push(text, buttons=buttons, title='⚠️ ' + kind_line, tcolor=tcolor)
+    else:
+        ok, err = feishu_push(text)
+    record_push(kind, text, ok, err)
+    return ok, err
+
+
+def _panel_base() -> str:
+    """面板外网基址（卡片「打开面板」按钮用）。"""
+    return (SETTINGS.get('trigger_public_base') or f'http://{LAN_HOST}').rstrip('/')
+
+
+def _card_buttons(tok: str = '') -> list:
+    """v2.6 卡片按钮组：[整理下一批(有令牌时)] + 打开面板 + 打开ETKN。"""
+    btns = []
+    if tok:
+        btns.append({'text': '整理下一批',
+                     'url': _panel_base() + '/trigger/organize?token=' + tok,
+                     'type': 'primary'})
+    btns.append({'text': '打开面板', 'url': _panel_base(), 'type': 'default'})
+    btns.append({'text': '打开ETKN', 'url': ETKN_PUBLIC_URL, 'type': 'default'})
+    return btns
+
+
 def check_500():
     """今日异常明细中 500 签名命中 ≥ 阈值 → 推送一次；归零自动重新布防。"""
     day = _today00().date().isoformat()
@@ -208,12 +256,11 @@ def check_500():
                     samples.append((x.get('original_name') or '-')[:28])
     if cnt >= SETTINGS['count_500_threshold'] and not _alm['t500_fired']:
         _alm['t500_fired'] = True
-        text = _alert_text('TMDB HTTP 500', [
+        _alert_push('t500', 'TMDB HTTP 500', [
             f'今日命中 500 签名异常 {cnt} 条（阈值 {SETTINGS["count_500_threshold"]}）',
             '样例：' + ('、'.join(samples) if samples else '-'),
-            '疑似出口节点对 TMDB 限流/拦截；建议复测节点后在任务中心重试失败子项'])
-        ok, err = feishu_push(text)
-        record_push('t500', text, ok, err)
+            '疑似出口节点对 TMDB 限流/拦截；建议复测节点后在任务中心重试失败子项'],
+            buttons=_card_buttons())
 
 
 def run_speed_round(alert: bool = True):
@@ -231,10 +278,9 @@ def run_speed_round(alert: bool = True):
                 _alm['speed_fired'][host] = True
                 desc = (f'连接失败：{r["error"]}' if not r['ok']
                         else f'总耗时 {r["total_ms"]}ms（阈值 {thr}ms）')
-                text = _alert_text('链路测速异常', [
-                    f'{host}　{desc}', '定时测速检出该域名异常，可能影响刮削/图片链路'])
-                ok, err = feishu_push(text)
-                record_push('speed', text, ok, err)
+                _alert_push('speed', '链路测速异常', [
+                    f'{host}　{desc}', '定时测速检出该域名异常，可能影响刮削/图片链路'],
+                    buttons=_card_buttons())
             elif not bad:
                 _alm['speed_fired'][host] = False
     return results
@@ -251,10 +297,9 @@ def check_backlog(fast_snap):
         q = v.get('queued') or 0
         if q >= thr and k not in fired:
             fired.add(k)
-            text = _alert_text('队列积压', [
-                f'{k} 排队 {q}（阈值 {thr}）', '该类任务积压，消费可能滞后，建议关注任务中心'])
-            ok, err = feishu_push(text)
-            record_push('backlog', text, ok, err)
+            _alert_push('backlog', '队列积压', [
+                f'{k} 排队 {q}（阈值 {thr}）', '该类任务积压，消费可能滞后，建议关注任务中心'],
+                buttons=_card_buttons())
         elif q < thr and k in fired:
             fired.discard(k)
 
@@ -462,16 +507,17 @@ def check_organize_running(now=None):
                          f'共享 运行{sr}/排队{sq} · 追剧 运行{wr}/排队{wq}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
+            btns = _card_buttons()
             if SETTINGS['trigger_enabled'] and not a_run and not a_que:
-                # 富文本入口：一次性令牌 30 分钟；每次清空轮换，旧令牌作废
+                # v2.6 卡片按钮入口：一次性令牌 30 分钟；每次清空轮换，旧令牌作废
                 tok = secrets.token_urlsafe(24)
                 _trigger_token['val'] = tok
                 _trigger_token['exp'] = time.time() + 1800
-                base = (SETTINGS['trigger_public_base'] or f'http://{LAN_HOST}').rstrip('/')
-                lines.append(f'👉 [整理下一批]({base}/trigger/organize?token={tok})'
-                             '（30 分钟内有效，点击确认后触发）')
+                btns = _card_buttons(tok)
+                lines.append('（30 分钟内有效，点击「整理下一批」确认后触发）')
             text = '\n'.join(lines)
-            ok, err = feishu_push(text)
+            ok, err = feishu_push(text, buttons=btns,
+                                  title='✅ 整理任务已清空', tcolor='green')
             record_push('clear', text, ok, err)
             _organize_state['last_clear_at'] = now
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
@@ -534,13 +580,12 @@ def check_organize_running(now=None):
                 if need:
                     _organize_state['stall_last_push'][rid] = now_ts
                     remain = max(0, c['item'] - c['ok'] - c['bad'])
-                    text = _alert_text('整理任务静止', [
+                    _alert_push('stall', '整理任务静止', [
                         f'任务 #{rid}「{c["title"][:40]}」已静止 {int(still_min)} 分钟',
                         f'进度 {c["ok"]}/{c["item"]}（剩 {remain}）· 最后推进 {_fmt_hhmm(last_iso)}',
                         qline,
-                        '建议：查最后推进时间前后是否卡在 TMDB 外呼；必要时取消重派或重启容器'])
-                    ok, err = feishu_push(text)
-                    record_push('stall', text, ok, err)
+                        '建议：查最后推进时间前后是否卡在 TMDB 外呼；必要时取消重派或重启容器'],
+                        buttons=_card_buttons())
             else:
                 _organize_state['stall_fired'].pop(rid, None)
                 _organize_state['stall_last_push'].pop(rid, None)
@@ -1075,7 +1120,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.5.5', 'readonly': False,
+                'version': 'v2.6', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1183,8 +1228,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._do_settings_post()
         if p == '/api/test-push':
             text = _alert_text('测试推送', ['设置页手动触发 · 验证 Webhook 链路',
-                                    '收到本条说明 etkn-monitor → 飞书 推送链路可达'])
-            ok, err = feishu_push(text)
+                                    '收到本条说明 etkn-monitor → 飞书 推送链路可达',
+                                    'v2.6：本条为交互卡片，按钮可在飞书内置浏览器打开'])
+            ok, err = feishu_push(text, buttons=_card_buttons(),
+                                  title='✅ 测试推送', tcolor='blue')
             record_push('test', text, ok, err)
             return self._send(200, json.dumps({'ok': ok, 'err': err},
                                               ensure_ascii=False).encode())
