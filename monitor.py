@@ -244,10 +244,24 @@ def _alert_push(kind: str, kind_line: str, detail_lines: list, buttons: list = N
 # ================= v2.7 自动喂料（清空提醒后自动分批转移） =================
 _feed_lock = threading.Lock()          # 忙锁：防并发喂料
 _feed_state = {'last_run': 0.0, 'moving': False}
+_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # v2.7.2④：扫描缓存（10 分钟）
+_feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时器
 
 
 def _feed_scan_dirs(src: str) -> list:
-    """扫描源目录：[(文件夹名, 递归文件数)]，仅一级目录（一夹=一剧/一影），旧→新排序。"""
+    """扫描源目录：[(文件夹名, 文件数)]，仅一级目录（一夹=一剧/一影），旧→新排序。
+
+    v2.7.2②：只数到第二层（剧夹→子目录/文件一层），不再全深递归——
+    全深 os.walk 每夹多次列目录调用，上千夹会把 115 接口配额烧光
+    （首跑实证：21:22 扫描烧配额→21:27 整理扫描即撞「已达到当前访问上限」）。
+    层级口径：剧夹直属文件 + 各子目录直属文件（Season1/ep01.mkv 算 1 个），
+    不再往下钻 Season1/子目录/更深。计数为选批参考，非精确值（整理引擎不受影响）。
+    v2.7.2④：10 分钟缓存（重复清空窗口内不重扫，mtime 排序结果同窗内视为稳定）。
+    """
+    now = time.time()
+    if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
+            and now - _feed_scan_cache['ts'] < 600):
+        return _feed_scan_cache['dirs']
     try:
         names = sorted(os.listdir(src), key=lambda n: os.path.getmtime(
             os.path.join(src, n)) if os.path.exists(os.path.join(src, n)) else 0)
@@ -258,12 +272,25 @@ def _feed_scan_dirs(src: str) -> list:
         p = os.path.join(src, n)
         if not os.path.isdir(p):
             continue
+        try:
+            entries = os.listdir(p)    # 第二层：只列一次
+        except OSError:
+            entries = []
         cnt = 0
-        for root, _dirs, files in os.walk(p):
-            cnt += len(files)
+        for e in entries:
+            ep = os.path.join(p, e)
+            if os.path.isfile(ep):
+                cnt += 1
+            elif os.path.isdir(ep):
+                try:                   # 第三层只数直属文件数，不再下钻
+                    cnt += sum(1 for x in os.listdir(ep)
+                               if os.path.isfile(os.path.join(ep, x)))
+                except OSError:
+                    pass
             if cnt > 100000:           # 防异常爆量
                 break
         out.append((n, cnt))
+    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})
     return out
 
 
@@ -301,6 +328,28 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
             err = f'{name[:40]}：{e.strerror or e}'
             break
     return ok_names, err
+
+
+def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
+    """v2.7.2①：转移成功后延迟 90 秒触发原生整理；③失败时识别 115 限流给重试指引。"""
+    payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
+                              'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
+    s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+    if s in (200, 201, 202):
+        _alert_push('feed', '自动喂料已触发整理', [
+            f'本批 {moved_n} 夹 / {total_files} 文件已在待整理目录',
+            '整理任务已提交，出结果后正常推清空提醒'], tcolor='green')
+        return
+    body = json.dumps(b, ensure_ascii=False) if isinstance(b, (dict, list)) else str(b or '')
+    if ('访问上限' in body) or ('429' in body) or ('限流' in body) or ('Too Many' in body):
+        _alert_push('feed_err', '自动喂料触发整理失败（115 限流）', [
+            f'本批 {moved_n} 夹 / {total_files} 文件已转移成功，但整理触发撞 115 访问上限',
+            '文件不会丢：全部在待整理目录等待', '稍后（约 10-30 分钟）到面板点「整理下一批」即可',
+            f'错误：{body[:90]}'])
+    else:
+        _alert_push('feed_err', '自动喂料触发整理失败', [
+            f'转移 {moved_n} 夹 / {total_files} 文件已成功，但整理触发失败（HTTP {s}）',
+            body[:100], '请到面板手动触发「手动整理网盘文件」'])
 
 
 def _feed_run() -> None:
@@ -341,18 +390,19 @@ def _feed_run() -> None:
                 '已转移部分保留在目标目录，可在面板手动触发整理'])
             return
         # 转移全部成功 → 触发原生「手动整理网盘文件」（与面板/卡片按钮同源载荷）
-        payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
-                                  'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
-        s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
-        if s in (200, 201, 202):
-            _alert_push('feed', '自动喂料完成', [
-                f'已转移 {len(moved)} 夹 / {total_files} 文件（{names_brief}）',
-                '已自动触发「手动整理网盘文件」，稍后出整理任务'],
-                tcolor='green')
-        else:
-            _alert_push('feed_err', '自动喂料触发整理失败', [
-                f'转移 {len(moved)} 夹 / {total_files} 文件已成功，但整理触发失败（HTTP {s}）',
-                str(b)[:100] if b else '', '请到面板手动触发「手动整理网盘文件」'])
+        # v2.7.2①：延迟 90 秒触发——扫描+转移刚消耗大量 115 接口调用，
+        # 立即触发整理会撞「已达到当前访问上限」（首跑 #21354 实证），留配额恢复窗口。
+        _alert_push('feed', '自动喂料完成', [
+            f'已转移 {len(moved)} 夹 / {total_files} 文件（{names_brief}）',
+            '90 秒后自动触发「手动整理网盘文件」'],
+            tcolor='green')
+        old = _feed_trigger.get('timer')
+        if old:
+            old.cancel()
+        t = threading.Timer(90.0, _feed_delayed_trigger, args=(len(moved), total_files))
+        t.daemon = True
+        _feed_trigger['timer'] = t
+        t.start()
     finally:
         _feed_state['moving'] = False
         _feed_state['last_run'] = time.time()
@@ -1364,7 +1414,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.7.1', 'readonly': False,
+                'version': 'v2.7.2', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
