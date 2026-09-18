@@ -117,7 +117,7 @@ input[type=number]{width:90px}
 <div id="page1">
   <div class="grid">
     <div class="card"><div class="k">待处理（媒体）</div><div class="v warn" id="cQueued">-<small>媒体</small></div><div class="sub" id="cQueuedSub">- 任务排队/运行</div></div>
-    <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div></div>
+    <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div><div class="sub" id="cDoneWk" style="margin-top:2px;color:var(--dim)">本周 -</div></div>
     <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div><div class="sub" id="cEtaOrg" style="margin-top:2px">整理类预计 -</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
@@ -543,7 +543,8 @@ async function refresh(){
     document.getElementById('cQueued').innerHTML=fmtCard(a.media||0,'媒体');
     document.getElementById('cQueuedSub').textContent=`${a.tasks||0} 任务（排队+运行）`;
     document.getElementById('cDone').innerHTML=fmtCard(rec.success||0,'媒体');
-    document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务`;
+    document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务（含流程类，与媒体数不同口径）`;
+    document.getElementById('cDoneWk').textContent=`本周完成 ${(s.week?.media??'-')} 媒体（整理记录口径）`;
     document.getElementById('cBad').innerHTML=fmtCard(rec.unrecognized||0,'未识别');
     document.getElementById('cBadSub').textContent=`失败/部分任务 ${s.failed_today?.length||0} 个`;
     const e=s.eta||{}, eo=e.organize||{};
