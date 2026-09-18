@@ -24,8 +24,10 @@ import json
 import os
 import re
 import secrets
+import shlex
 import socket
 import ssl
+import subprocess
 import threading
 import time
 import urllib.error
@@ -37,6 +39,12 @@ from datetime import datetime, timedelta, timezone
 BASE = os.environ.get('ETKN_BASE_URL', 'http://192.168.1.22:5257').rstrip('/')
 LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '192.168.1.22:8620')   # 内网面板地址（清空提醒链接用）
 ETKN_PUBLIC_URL = 'https://etkn.example.com'   # v2.6 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
+
+CARD_LINKS_DEFAULT = [  # v2.7（六）：卡片按钮可配置，「整理下一批」固定带令牌不在此列
+    {'text': 'ETKN监控', 'url': 'https://etknjk.example.com/'},
+    {'text': 'ETKN', 'url': 'https://etkn.example.com/'},
+    {'text': 'CloudDrive2', 'url': 'https://cd2.example.com/'},
+]
 USERNAME = os.environ.get('ETKN_USERNAME', 'YisBoss')
 PASSWORD = os.environ.get('ETKN_PASSWORD', '')
 ETA_WINDOW_MIN = float(os.environ.get('ETKN_ETA_WINDOW', '10'))
@@ -80,6 +88,15 @@ SETTINGS_DEFAULTS = {
     # ---- v2.5.5 一键整理入口（清空提醒富文本） ----
     'trigger_enabled': False,      # 清空提醒附「整理下一批」按钮（令牌链接）
     'trigger_public_base': '',     # 外网基础地址（如 https://etknjk.example.com），空=内网地址
+    # ---- v2.7 自动喂料（清空后源目录→待整理目录自动分批转移） ----
+    'feed_enabled': False,         # 自动喂料开关（默认关）
+    'feed_src_dir': '/cloud115/自动整理入库',                              # 源目录（容器内路径）
+    'feed_dst_dir': '/cloud115/媒体库-ETKN/待整理目录',                    # 目标目录（容器内路径）
+    'feed_batch_limit': 500,       # 每批媒体项（文件数）上限；不拆剧
+    # ---- v2.7 静止告警自动处置（只 restart，禁重建） ----
+    'auto_restart_enabled': False, # 自动重启开关（默认关）
+    # ---- v2.7 卡片按钮可配置（六）：[{'text','url'}]，空/非法剔除，≤6 个 ----
+    'card_links': CARD_LINKS_DEFAULT,
 }
 
 
@@ -123,11 +140,11 @@ def settings_load():
         pass
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
               'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-              'trigger_enabled'):
+              'trigger_enabled', 'feed_enabled', 'auto_restart_enabled'):
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
               'backlog_threshold', 'speed_threshold_ms',
-              'stall_threshold_min', 'stall_repeat_min'):
+              'stall_threshold_min', 'stall_repeat_min', 'feed_batch_limit'):
         try:
             v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
             if v >= 0:
@@ -138,6 +155,11 @@ def settings_load():
         SETTINGS['finish_scope'] = 'all'
     if not isinstance(SETTINGS['trigger_public_base'], str):
         SETTINGS['trigger_public_base'] = ''
+    for k in ('feed_src_dir', 'feed_dst_dir'):
+        if not isinstance(SETTINGS[k], str) or not SETTINGS[k].strip():
+            SETTINGS[k] = SETTINGS_DEFAULTS[k]
+    cl = _norm_card_links(SETTINGS.get('card_links'))   # v2.7（六）：脏数据兜底
+    SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
 
 
 def settings_save():
@@ -219,20 +241,234 @@ def _alert_push(kind: str, kind_line: str, detail_lines: list, buttons: list = N
     return ok, err
 
 
+# ================= v2.7 自动喂料（清空提醒后自动分批转移） =================
+_feed_lock = threading.Lock()          # 忙锁：防并发喂料
+_feed_state = {'last_run': 0.0, 'moving': False}
+
+
+def _feed_scan_dirs(src: str) -> list:
+    """扫描源目录：[(文件夹名, 递归文件数)]，仅一级目录（一夹=一剧/一影），旧→新排序。"""
+    try:
+        names = sorted(os.listdir(src), key=lambda n: os.path.getmtime(
+            os.path.join(src, n)) if os.path.exists(os.path.join(src, n)) else 0)
+    except FileNotFoundError:
+        return None                    # 源目录不存在（挂载未生效等）
+    out = []
+    for n in names:
+        p = os.path.join(src, n)
+        if not os.path.isdir(p):
+            continue
+        cnt = 0
+        for root, _dirs, files in os.walk(p):
+            cnt += len(files)
+            if cnt > 100000:           # 防异常爆量
+                break
+        out.append((n, cnt))
+    return out
+
+
+def _feed_plan(dirs: list, limit: int) -> list:
+    """分批规则（纯函数，回归用）：
+    正常：按顺序累加，整夹文件数 ≤ 上限就继续；加下一个会超 → 停（不拆剧）。
+    单剧超限：某夹文件数本身 > 上限 → 本批只转这一个（整批仅它，虽超不拆）。
+    返回 [(名称, 文件数)]；空列表=源目录无剧。"""
+    picked, total = [], 0
+    for name, cnt in dirs:
+        if cnt > limit:                # 单剧超限：本批还没选 → 独占本批（虽超不拆）；
+            if not picked:
+                return [(name, cnt)]   # 已有累积 → 先出本批，它留给下一批独占
+            break
+        if total + cnt > limit:        # 加上会超上限 → 停（不拆剧）
+            break
+        picked.append((name, cnt))
+        total += cnt
+    return picked
+
+
+def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
+    """整夹剪切 src→dst（fuse 同挂载 os.rename=115 秒级移动）；任一失败即停并回报。
+    返回 (成功夹名列表, 失败描述或 '')。只单向 src→dst，禁反向/删除。"""
+    ok_names, err = [], ''
+    for name, _cnt in picks:
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        try:
+            if os.path.exists(d):      # 目标同名已存在：不覆盖（防数据破坏）
+                err = f'{name[:40]}：目标目录已存在同名文件夹'
+                break
+            os.rename(s, d)            # 同 fuse 挂载 → 原子改名（0.2s 级，无真复制）
+            ok_names.append(name)
+        except OSError as e:
+            err = f'{name[:40]}：{e.strerror or e}'
+            break
+    return ok_names, err
+
+
+def _feed_run() -> None:
+    """喂料主流程（清空提醒推送成功后调用）：扫描→计划→转移→触发原生整理。
+    转移失败/触发失败→飞书告警卡片；空源目录→飞书提示。全程忙锁+冷却。"""
+    if not (SETTINGS['push_enabled'] and SETTINGS['feed_enabled']):
+        return
+    if _feed_state['moving'] or time.time() - _feed_state['last_run'] < 120:
+        return                         # 忙锁 + 2 分钟冷却（清空重试窗口内不重复进）
+    with _feed_lock:
+        if _feed_state['moving']:
+            return
+        _feed_state['moving'] = True
+    try:
+        src = SETTINGS['feed_src_dir'].rstrip('/')
+        dst = SETTINGS['feed_dst_dir'].rstrip('/')
+        limit = max(1, int(SETTINGS['feed_batch_limit'] or 500))
+        dirs = _feed_scan_dirs(src)
+        if dirs is None:
+            _alert_push('feed_err', '自动喂料失败', [
+                f'源目录不可读：{src}', '多半是 /cloud115 挂载未生效或权限变化，请检查容器挂载'])
+            return
+        if not dirs:
+            _alert_push('feed_empty', '源目录已空，可放新文件', [
+                f'{src} 当前没有待整理文件夹', '放入新剧/电影后，下次清空提醒会自动喂料'],
+                tcolor='blue')
+            return
+        picks = _feed_plan(dirs, limit)
+        if not picks:
+            return
+        total_files = sum(c for _n, c in picks)
+        moved, err = _feed_move_batch(src, dst, picks)
+        names_brief = '、'.join(n[:16] for n, _c in picks[:4]) + ('…' if len(picks) > 4 else '')
+        if err or not moved:
+            _alert_push('feed_err', '自动喂料转移失败', [
+                f'本批计划：{len(picks)} 夹 / {total_files} 文件（{names_brief}）',
+                f'已完成 {len(moved)} 夹后中止：{err[:80]}',
+                '已转移部分保留在目标目录，可在面板手动触发整理'])
+            return
+        # 转移全部成功 → 触发原生「手动整理网盘文件」（与面板/卡片按钮同源载荷）
+        payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
+                                  'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
+        s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+        if s in (200, 201, 202):
+            _alert_push('feed', '自动喂料完成', [
+                f'已转移 {len(moved)} 夹 / {total_files} 文件（{names_brief}）',
+                '已自动触发「手动整理网盘文件」，稍后出整理任务'],
+                tcolor='green')
+        else:
+            _alert_push('feed_err', '自动喂料触发整理失败', [
+                f'转移 {len(moved)} 夹 / {total_files} 文件已成功，但整理触发失败（HTTP {s}）',
+                str(b)[:100] if b else '', '请到面板手动触发「手动整理网盘文件」'])
+    finally:
+        _feed_state['moving'] = False
+        _feed_state['last_run'] = time.time()
+
+
+# ============ v2.7 静止告警自动处置（只 restart etkn，禁重建） ============
+_auto_state = {'restarts': [], 'pending': None}   # restarts=24h 窗口时刻表；pending=观察期任务
+
+
+def _auto_restart_allowed() -> str:
+    """护栏检查：返回 ''=允许；否则返回拒绝原因（写入告警）。"""
+    now = time.time()
+    _auto_state['restarts'] = [t for t in _auto_state['restarts'] if now - t < 86400]
+    if len(_auto_state['restarts']) >= 2:
+        return '24 小时内已自动重启 2 次，超出上限，不再自动重启'
+    return ''
+
+
+def _auto_restart_etkn() -> tuple:
+    """执行 docker restart etkn（SSH 白名单单命令；monitor 容器内无 docker/sock）。
+    返回 (是否成功, 输出摘要)。"""
+    PW = ''
+    for line in ('/hermes/.env', '/app/hermes/.env', '/vol1/@appdata/trim.hermes/hermes/.env'):
+        try:
+            with open(line, encoding='utf-8') as f:
+                for ln in f:
+                    if ln.startswith('SUDO_PASSWORD='):
+                        PW = ln.split('=', 1)[1].strip()
+                        break
+        except OSError:
+            continue
+        if PW:
+            break
+    if not PW:
+        return False, '宿主凭据不可读（hermes/.env 缺 SUDO_PASSWORD）'
+    cmd = ("sshpass -p %s ssh -p %s -o StrictHostKeyChecking=no -o ConnectTimeout=10 "
+           "%s@%s \"echo %s | sudo -S -p '' docker restart etkn\"" % (
+               shlex.quote(PW), shlex.quote(os.environ.get('SSH_PORT', '66')),
+               shlex.quote(os.environ.get('SSH_USER', 'YisBoss')),
+               shlex.quote(os.environ.get('SSH_HOST', '192.168.1.22')),
+               shlex.quote(PW)))
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=90)
+        ok = r.returncode == 0 and 'etkn' in (r.stdout or '')
+        return ok, (r.stdout or r.stderr).strip().replace('\n', ' ')[:120]
+    except Exception as e:
+        return False, str(e)[:120]
+
+
+def _auto_stall_handler(rid, c) -> None:
+    """静止告警触发时的自动处置（设置 auto_restart_enabled 开启才动手）：
+    观察期（重启后 10 分钟）内再静止 → 升级告警不再动手；否则按护栏 restart。"""
+    if not (SETTINGS['push_enabled'] and SETTINGS['auto_restart_enabled']):
+        return
+    pend = _auto_state['pending']
+    now = time.time()
+    if pend and rid == pend['rid']:
+        if now - pend['ts'] < 600:     # 重启后 10 分钟观察期内又静止 → 升级人工
+            _auto_state['pending'] = None
+            _alert_push('stall', '自动重启未恢复，需人工介入', [
+                f'任务 #{rid}「{(c or {}).get("title", "")[:40]}」在自动重启后再次静止',
+                '已按护栏停止自动重启（24h≤2 次且不重复动手）',
+                '建议标准流程：取消任务 → 三轮验僵尸 → 低峰重启 etkn → 重派整理',
+                f'任务 ID：{rid}'])
+            return
+        _auto_state['pending'] = None  # 观察期已过才告警 → 视为新事件，走正常护栏
+    why = _auto_restart_allowed()
+    if why:
+        _alert_push('stall', '整理任务静止（自动重启受限）', [
+            f'任务 #{rid} 触发自动处置，但{why}', '请人工按标准流程处置'])
+        return
+    ok, out = _auto_restart_etkn()
+    _auto_state['restarts'].append(now)
+    _auto_state['pending'] = {'rid': rid, 'ts': now}
+    if ok:
+        _alert_push('auto_restart', '已自动重启 etkn，观察中', [
+            f'因整理任务 #{rid} 静止触发（现有判据）',
+            '观察 10 分钟：任务继续推进则静默恢复；再次静止将升级告警需人工介入'],
+            tcolor='green')
+    else:
+        _alert_push('stall', '自动重启 etkn 失败，需人工介入', [
+            f'任务 #{rid} 触发自动处置，但执行失败', f'错误：{out}'])
+
+
 def _panel_base() -> str:
     """面板外网基址（卡片「打开面板」按钮用）。"""
     return (SETTINGS.get('trigger_public_base') or f'http://{LAN_HOST}').rstrip('/')
 
 
+def _norm_card_links(raw) -> list:
+    """清洗用户配置的按钮列表：非空名+合法 http(s) URL 才保留，最多 6 个。"""
+    out = []
+    if not isinstance(raw, list):
+        return []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get('text') or '').strip()
+        url = str(it.get('url') or '').strip()
+        if name and url.startswith(('http://', 'https://')) and ' ' not in url:
+            out.append({'text': name[:12], 'url': url})
+        if len(out) >= 6:
+            break
+    return out
+
+
 def _card_buttons(tok: str = '') -> list:
-    """v2.6 卡片按钮组：[整理下一批(有令牌时)] + 打开面板 + 打开ETKN。"""
+    """卡片按钮组：[整理下一批(有令牌时)] + 可配置链接（设置 card_links，默认三项）。
+    空/非法 URL 的按钮在 _norm_card_links 已剔除，不影响其他按钮。"""
     btns = []
     if tok:
         btns.append({'text': '整理下一批',
                      'url': _panel_base() + '/trigger/organize?token=' + tok,
                      'type': 'primary'})
-    btns.append({'text': '打开面板', 'url': _panel_base(), 'type': 'default'})
-    btns.append({'text': '打开ETKN', 'url': ETKN_PUBLIC_URL, 'type': 'default'})
+    for it in _norm_card_links(SETTINGS.get('card_links')) or CARD_LINKS_DEFAULT:
+        btns.append({'text': it['text'], 'url': it['url'], 'type': 'default'})
     return btns
 
 
@@ -524,6 +760,8 @@ def check_organize_running(now=None):
                                         'cancelled': 0, 'm_ok': 0, 'm_bad': 0,
                                         'started_at': None, 'last': None, 'last_ts': None,
                                         'flow': {}}
+            if ok:
+                _feed_run()               # v2.7：清空提醒送达后自动喂料（事件驱动）
         elif total_cur > 0:
             batch['active'] = True            # 有整理任务在跑/在排=批次进行中
             if batch['started_at'] is None:
@@ -586,6 +824,7 @@ def check_organize_running(now=None):
                         qline,
                         '建议：查最后推进时间前后是否卡在 TMDB 外呼；必要时取消重派或重启容器'],
                         buttons=_card_buttons())
+                    _auto_stall_handler(rid, c)   # v2.7 五：告警后自动处置（开关+护栏内）
             else:
                 _organize_state['stall_fired'].pop(rid, None)
                 _organize_state['stall_last_push'].pop(rid, None)
@@ -1120,7 +1359,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.6', 'readonly': False,
+                'version': 'v2.7', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1197,13 +1436,14 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
         for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-                  'trigger_enabled'):
+                  'trigger_enabled', 'feed_enabled', 'auto_restart_enabled'):
             if k in b:
                 SETTINGS[k] = bool(b[k])
         for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
                       ('count_500_threshold', 1), ('backlog_threshold', 1),
                       ('speed_threshold_ms', 1000),
-                      ('stall_threshold_min', 1), ('stall_repeat_min', 5)):
+                      ('stall_threshold_min', 1), ('stall_repeat_min', 5),
+                      ('feed_batch_limit', 1)):
             if k in b:
                 try:
                     v = int(b[k])
@@ -1215,6 +1455,12 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['finish_scope'] = b['finish_scope']
         if 'trigger_public_base' in b and isinstance(b['trigger_public_base'], str):
             SETTINGS['trigger_public_base'] = b['trigger_public_base'].strip().rstrip('/')
+        for k in ('feed_src_dir', 'feed_dst_dir'):
+            if k in b and isinstance(b[k], str) and b[k].strip():
+                SETTINGS[k] = b[k].strip()
+        if 'card_links' in b:               # v2.7（六）：卡片按钮列表，空/非法剔除
+            cl = _norm_card_links(b['card_links'])
+            SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
         try:
             settings_save()
         except Exception as e:
