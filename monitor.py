@@ -330,6 +330,29 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
     return ok_names, err
 
 
+def _watch_shell_run(rid: int, source: str) -> None:
+    """v2.7.3②：壳任务（手动整理网盘文件）监视——成功但 0 派生=疑似 115 配额受限，告警。
+    壳任务正常 1-3 秒结束；结束后 chain_runs 非空=已派生真实整理任务（正常，不推卡）。"""
+    def _watch():
+        try:
+            for _ in range(10):                 # 最多等 50 秒（壳 1-3 秒即终态）
+                time.sleep(5)
+                s, d = api_get(f'/api/workflows/{rid}')
+                if s != 200 or not isinstance(d, dict):
+                    continue
+                st = d.get('status')
+                if st in ('succeeded', 'failed', 'cancelled'):
+                    if st == 'succeeded' and not (d.get('chain_runs') or []):
+                        _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
+                            f'手动整理壳任务 #{rid} 提交成功，但未派生任何整理任务（引擎扫描 115 空转）',
+                            '待整理目录文件不会丢，全部原样等待',
+                            '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
+                    return
+        except Exception:
+            pass                                # 监视线程绝不影响主流程
+    threading.Thread(target=_watch, daemon=True).start()
+
+
 def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
     """v2.7.2①：转移成功后延迟 90 秒触发原生整理；③失败时识别 115 限流给重试指引。"""
     payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
@@ -339,6 +362,9 @@ def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
         _alert_push('feed', '自动喂料已触发整理', [
             f'本批 {moved_n} 夹 / {total_files} 文件已在待整理目录',
             '整理任务已提交，出结果后正常推清空提醒'], tcolor='green')
+        rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
+        if rid:
+            _watch_shell_run(int(rid), 'feed')  # v2.7.3②：空转监视
         return
     body = json.dumps(b, ensure_ascii=False) if isinstance(b, (dict, list)) else str(b or '')
     if ('访问上限' in body) or ('429' in body) or ('限流' in body) or ('Too Many' in body):
@@ -382,6 +408,10 @@ def _feed_run() -> None:
             return
         total_files = sum(c for _n, c in picks)
         moved, err = _feed_move_batch(src, dst, picks)
+        if moved:
+            # v2.7.3①：转移成功立即清扫描缓存——下次喂料强制重扫，
+            # 防止沿用旧计划误判「目标目录已存在同名文件夹」（02:18 误报实证）
+            _feed_scan_cache.update({'ts': 0.0, 'src': None, 'dirs': None})
         names_brief = '、'.join(n[:16] for n, _c in picks[:4]) + ('…' if len(picks) > 4 else '')
         if err or not moved:
             _alert_push('feed_err', '自动喂料转移失败', [
@@ -1414,7 +1444,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.7.2', 'readonly': False,
+                'version': 'v2.7.3', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1595,6 +1625,11 @@ class Handler(BaseHTTPRequestHandler):
             payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
                                       'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
             s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+            if s in (200, 201, 202) and isinstance(b, dict) and b.get('workflow_run_id'):
+                try:
+                    _watch_shell_run(int(b['workflow_run_id']), 'panel')  # v2.7.3②：空转监视
+                except Exception:
+                    pass
             return self._send(s if s > 0 else 502, json.dumps(
                 {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
         if p == '/api/run-task/generate-virtual-library-covers':
