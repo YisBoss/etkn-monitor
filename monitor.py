@@ -262,6 +262,7 @@ STALL_GRACE_MIN = 30          # 大文件宽限阈值（分钟）
 STALL_GRACE_RUNTIME_MIN = 60  # 触发宽限的运行时长下限（分钟）
 
 _organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_queued': 0,
+                   'last_clear_at': None, 'pending_clear': False,
                    'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
                              'm_ok': 0, 'm_bad': 0, 'started_at': None,
                              'last': None, 'last_ts': None}}
@@ -328,38 +329,11 @@ def check_organize_running(now=None):
     gone = [rid for rid in prev if rid not in cur]
 
     # ---- v2.5.4/5 批次累计 + 清空提醒（取代单任务完成即推） ----
+    # v2.5.5 统计漏项修复：快照差分只做「批开始/批结束」判据；任务/媒体统计改为
+    # 清空时按批时间窗（batch.started_at→now）从 ETKN 查询终态整理类任务累加，
+    # 不再依赖 running 快照捕获（快任务在两次检查之间完成/监控重启时旧机制必漏）。
     batch = _organize_state['batch']
-    for rid in gone[:50]:                     # 单轮最多回查 50 个离开 running 的任务
-        s2, b2 = api_get(f'/api/workflows/{rid}')
-        if s2 != 200 or not isinstance(b2, dict):
-            continue
-        st2 = (b2.get('status') or '?').lower()
-        if st2 == 'running':
-            continue                          # 父任务重开子链等场景，不算终态
-        if st2 in ('succeeded', 'partial'):
-            batch['done'] += 1
-        elif st2 == 'failed':
-            batch['failed'] += 1
-        elif st2 == 'cancelled':
-            batch['cancelled'] += 1
-        else:
-            continue
-        # 媒体口径（v2.5.5）：终态时各拉一次 /status 累加（任务级 succeeded/failed_count
-        # 即媒体数，与 p115 记录一致；一次只读请求，无高频新增）
-        s2b, b2b = api_get(f'/api/workflows/{rid}/status')
-        sm = b2b.get('summary') or {} if s2b == 200 and isinstance(b2b, dict) else {}
-        batch['m_ok'] += int(sm.get('succeeded') or 0)
-        batch['m_bad'] += int(sm.get('failed') or 0)
-        batch['active'] = True
-        if batch['started_at'] is None:
-            d0 = _parse_ts(b2.get('started_at')) or now   # 兜底=本轮时刻，防 None
-            batch['started_at'] = d0                      # 近似批开始（首个完成任务的开始时刻）
-        fin = _parse_ts(b2.get('finished_at'))
-        if fin and (batch['last_ts'] is None or fin > batch['last_ts']):
-            batch['last_ts'] = fin
-            dd0 = _parse_ts(b2.get('started_at'))
-            batch['last'] = {'id': rid, 'title': b2.get('display_title') or '',
-                             'min': max(1, round((fin - dd0).total_seconds() / 60)) if dd0 else 0}
+    any_final_seen = bool(gone)          # 本轮有快照任务离开 running（旧机制信号）
 
     if SETTINGS['push_enabled'] and SETTINGS['alert_finish_enabled']:
         nq = -1                               # -1=本轮排队数未知（未取/取失败）
@@ -372,7 +346,56 @@ def check_organize_running(now=None):
         total_prev = len(prev) + _organize_state['prev_queued']
         total_cur = len(cur) + max(nq, 0)
         known = bool(cur) or nq >= 0          # 排队数未知时不评估，防误报清空
-        if batch['active'] and known and total_prev > 0 and total_cur == 0:
+        if (batch['active'] and known and total_cur == 0
+                and (total_prev > 0 or _organize_state.get('pending_clear'))):
+            # ---- v2.5.5 统计漏项修复：权威口径=批时间窗查询（清空瞬间一次，低频） ----
+            # 任务/媒体不再依赖 running 快照捕获（快任务两轮检查间完成/重启会漏），
+            # 改为按 finished_at ∈ [批开始, now] 查全部终态整理类任务累加。
+            w0 = (batch['started_at'] or _organize_state.get('last_clear_at')
+                  or (now - timedelta(hours=24)))   # 批开始缺失→上次清空时刻→兜底24h
+            t_done = t_failed = t_cancelled = m_ok = m_bad = 0
+            last = None
+            last_fin = None
+            win_ok = False
+            for st in ('succeeded', 'partial', 'failed', 'cancelled'):
+                off = 0
+                while off < 500:                  # 上限 500 条，防异常爆量
+                    s4, b4 = api_get(f'/api/workflows?status={st}&limit={PAGE}&offset={off}')
+                    if s4 != 200 or not isinstance(b4, dict):
+                        win_ok = False            # 任一状态页失败=窗口数据不完整
+                        break
+                    win_ok = True
+                    its = b4.get('items') or []
+                    for t in its:
+                        fin = _parse_ts(t.get('finished_at'))
+                        if fin is None or fin < w0 or fin > now:
+                            continue
+                        if not (t.get('display_title') or '').startswith(ORGANIZE_PREFIXES):
+                            continue
+                        if st in ('succeeded', 'partial'):
+                            t_done += 1
+                        elif st == 'failed':
+                            t_failed += 1
+                        else:
+                            t_cancelled += 1
+                        m_ok += int(t.get('succeeded_count') or 0)
+                        m_bad += int(t.get('failed_count') or 0)
+                        if last_fin is None or fin > last_fin:
+                            last_fin = fin
+                            d0l = _parse_ts(t.get('started_at'))
+                            last = {'id': t['id'], 'title': t.get('display_title') or '',
+                                    'min': max(1, round((fin - d0l).total_seconds() / 60)) if d0l else 0}
+                    if len(its) < PAGE:
+                        break
+                    off += PAGE
+            if not win_ok:                        # 窗口查询失败：挂起重试（下轮窗口成功再推），
+                _organize_state['pending_clear'] = True   # 不推错误数据、不重置批次状态
+                return                            # 本轮到此为止（静止告警也不推：数据不明）
+            _organize_state['pending_clear'] = False
+            batch['done'], batch['failed'], batch['cancelled'] = t_done, t_failed, t_cancelled
+            batch['m_ok'], batch['m_bad'] = m_ok, m_bad
+            if last:
+                batch['last'] = last
             fast = _state.get('fast') or {}
             by = ((fast.get('active') or {}).get('by_kind') or {})
             def _k(k):                       # 全类型快照行（复用分类队列同源数据）
@@ -412,13 +435,19 @@ def check_organize_running(now=None):
             text = '\n'.join(lines)
             ok, err = feishu_push(text)
             record_push('clear', text, ok, err)
+            _organize_state['last_clear_at'] = now
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
                                         'cancelled': 0, 'm_ok': 0, 'm_bad': 0,
                                         'started_at': None, 'last': None, 'last_ts': None}
         elif total_cur > 0:
             batch['active'] = True            # 有整理任务在跑/在排=批次进行中
             if batch['started_at'] is None:
-                batch['started_at'] = now     # 批开始=第一个整理类任务入队时刻
+                # 批开始=最早任务（运行中∪排队中）开始时刻（回填：重启后仍覆盖重启前的任务）
+                d0s = [d for d in (_parse_ts(c.get('started_at')) for c in cur.values()) if d]
+                if not d0s and nq > 0:
+                    d0s = [d for d in (_parse_ts(t.get('started_at'))
+                                       for t in ((b3.get('items') or []) if s3 == 200 else [])) if d]
+                batch['started_at'] = min(d0s) if d0s else now
         if nq >= 0:                           # 评估完成后才更新排队快照（v2.5.5 修复：
             _organize_state['prev_queued'] = nq   # 原先提前覆盖导致纯排队批次清空永不触发）
 
