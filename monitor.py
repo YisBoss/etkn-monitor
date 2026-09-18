@@ -292,6 +292,11 @@ def _parse_ts(v):
 
 
 def _fmt_hhmm(v):
+    if isinstance(v, datetime):            # v2.5.5 修复：生产里 started_at 是 datetime 对象
+        try:                               # （原实现当字符串再解析→异常→恒 --:--）
+            return v.astimezone(TZ).strftime('%H:%M')
+        except Exception:                  # naive datetime 无时区，直接格式化
+            return v.strftime('%H:%M')
     d = _parse_ts(v)
     return d.strftime('%H:%M') if d else '--:--'
 
@@ -1038,7 +1043,7 @@ class Handler(BaseHTTPRequestHandler):
             valid = (SETTINGS['trigger_enabled'] and _trigger_token['val']
                      and tok_q == _trigger_token['val'] and time.time() < _trigger_token['exp'])
             if not valid:
-                return self._send(403, _TRIGGER_PAGE_BAD.encode())
+                return self._send(403, _TRIGGER_PAGE_BAD.encode(), 'text/html; charset=utf-8')
             fast = _state.get('fast') or {}
             by = ((fast.get('active') or {}).get('by_kind') or {})
             def _kk(k):
@@ -1047,7 +1052,8 @@ class Handler(BaseHTTPRequestHandler):
             snap_line = (f"刮削 {_kk('刮削入库')} · 网盘 {_kk('网盘整理')} · "
                          f"共享 {_kk('共享登记')} · 追剧 {_kk('追剧刷新')}")
             return self._send(200, _TRIGGER_PAGE.format(
-                token=tok_q, snap=snap_line, gen=secrets.token_hex(8)).encode())
+                token=tok_q, snap=snap_line, gen=secrets.token_hex(8)).encode(),
+                'text/html; charset=utf-8')
         if p == '/api/speed-history':
             return self._send(200, json.dumps({'items': list(_speed_hist)},
                                               ensure_ascii=False).encode())
