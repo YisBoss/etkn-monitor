@@ -262,6 +262,10 @@ def check_backlog(fast_snap):
 # ---------- v2.5.3 整理任务静止告警 + 完成提醒 ----------
 # 整理类按 display_title 前缀区分（共享登记/追剧刷新的 workflow_type 同为 manual_task，按类型筛会误伤）
 ORGANIZE_PREFIXES = ('网盘整理', '刮削入库', '手动整理网盘文件')
+# v2.5.5 口径修复：媒体入库语义任务（succeeded_count=真实入库媒体数）仅「刮削入库」；
+# 手动整理/网盘整理=流程任务（succeeded_count 恒 1=流程成功，取证 16/20 例全为 1）
+INGEST_PREFIXES = ('刮削入库',)
+FLOW_PREFIXES = ('手动整理网盘文件', '网盘整理')
 STALL_GRACE_MIN = 30          # 大文件宽限阈值（分钟）
 STALL_GRACE_RUNTIME_MIN = 60  # 触发宽限的运行时长下限（分钟）
 
@@ -269,7 +273,7 @@ _organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_q
                    'last_clear_at': None, 'pending_clear': False,
                    'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
                              'm_ok': 0, 'm_bad': 0, 'started_at': None,
-                             'last': None, 'last_ts': None}}
+                             'last': None, 'last_ts': None, 'flow': {}}}
 _trigger_lock = threading.Lock()          # 忙锁：整理下一批触发期间拒绝并发/连点
 _trigger_token = {'val': None, 'exp': 0}  # 一次性令牌（30 分钟有效，每次清空提醒轮换）
 
@@ -358,6 +362,7 @@ def check_organize_running(now=None):
             w0 = (batch['started_at'] or _organize_state.get('last_clear_at')
                   or (now - timedelta(hours=24)))   # 批开始缺失→上次清空时刻→兜底24h
             t_done = t_failed = t_cancelled = m_ok = m_bad = 0
+            flow_cnt = {}                         # 流程任务分列：{'手动': [d,f,c], '网盘': [d,f,c]}
             last = None
             last_fin = None
             win_ok = False
@@ -374,16 +379,29 @@ def check_organize_running(now=None):
                         fin = _parse_ts(t.get('finished_at'))
                         if fin is None or fin < w0 or fin > now:
                             continue
-                        if not (t.get('display_title') or '').startswith(ORGANIZE_PREFIXES):
+                        ttl = t.get('display_title') or ''
+                        if not ttl.startswith(ORGANIZE_PREFIXES):
                             continue
-                        if st in ('succeeded', 'partial'):
-                            t_done += 1
-                        elif st == 'failed':
-                            t_failed += 1
+                        # v2.5.5 口径修复：入库语义（刮削入库）才计任务/媒体；
+                        # 流程任务（手动/网盘整理，succ恒1=流程成功）单独计数不进媒体口径
+                        if ttl.startswith(INGEST_PREFIXES):
+                            if st in ('succeeded', 'partial'):
+                                t_done += 1
+                            elif st == 'failed':
+                                t_failed += 1
+                            else:
+                                t_cancelled += 1
+                            m_ok += int(t.get('succeeded_count') or 0)
+                            m_bad += int(t.get('failed_count') or 0)
                         else:
-                            t_cancelled += 1
-                        m_ok += int(t.get('succeeded_count') or 0)
-                        m_bad += int(t.get('failed_count') or 0)
+                            fk = '手动' if ttl.startswith('手动整理') else '网盘'
+                            fc = flow_cnt.setdefault(fk, [0, 0, 0])
+                            if st in ('succeeded', 'partial'):
+                                fc[0] += 1
+                            elif st == 'failed':
+                                fc[1] += 1
+                            else:
+                                fc[2] += 1
                         if last_fin is None or fin > last_fin:
                             last_fin = fin
                             d0l = _parse_ts(t.get('started_at'))
@@ -398,6 +416,7 @@ def check_organize_running(now=None):
             _organize_state['pending_clear'] = False
             batch['done'], batch['failed'], batch['cancelled'] = t_done, t_failed, t_cancelled
             batch['m_ok'], batch['m_bad'] = m_ok, m_bad
+            batch['flow'] = {k: tuple(v) for k, v in flow_cnt.items()}
             if last:
                 batch['last'] = last
             fast = _state.get('fast') or {}
@@ -416,7 +435,22 @@ def check_organize_running(now=None):
             media_part = f"媒体 完成{batch['m_ok']}·失败{batch['m_bad']}"
             if scope == 'ok':                # 仅成功范围：失败数值归零展示，隐藏失败细节行
                 media_part = f"媒体 完成{batch['m_ok']}·失败0"
-            lines.append(f'本批：{task_part} ｜ {media_part}')
+            # v2.5.5 口径：入库/媒体只含刮削入库；流程任务（手动/网盘整理）单独标注，
+            # 按类分列计数；全部为 0 则整行省略
+            def _fbit(name, d, f, c):
+                s = f'{name}{d}'
+                if f:
+                    s += f'·失败{f}'
+                if c:
+                    s += f'·取消{c}'
+                return s
+            flow_bits = [_fbit(k, v[0], v[1], v[2])
+                         for k, v in (('手动整理', batch['flow'].get('手动', (0, 0, 0))),
+                                      ('网盘整理', batch['flow'].get('网盘', (0, 0, 0))))
+                         if any(v)]
+            lines.append(f'本批：入库 {task_part} ｜ {media_part}')
+            if flow_bits:
+                lines.append('　　　流程 ' + ' · '.join(flow_bits))
             if batch['last']:
                 lines.append(f"最后任务：#{batch['last']['id']}「{batch['last']['title'][:40]}」"
                              f"· 耗时 {batch['last']['min']} 分钟")
@@ -442,7 +476,8 @@ def check_organize_running(now=None):
             _organize_state['last_clear_at'] = now
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
                                         'cancelled': 0, 'm_ok': 0, 'm_bad': 0,
-                                        'started_at': None, 'last': None, 'last_ts': None}
+                                        'started_at': None, 'last': None, 'last_ts': None,
+                                        'flow': {}}
         elif total_cur > 0:
             batch['active'] = True            # 有整理任务在跑/在排=批次进行中
             if batch['started_at'] is None:
