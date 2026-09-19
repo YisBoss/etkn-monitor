@@ -1061,6 +1061,7 @@ def check_organize_running(now=None):
                   or (now - timedelta(hours=24)))   # 批开始缺失→上次清空时刻→兜底24h
             t_done = t_failed = t_cancelled = m_ok = m_bad = 0
             flow_cnt = {}                         # 流程任务分列：{'手动': [d,f,c], '网盘': [d,f,c]}
+            fail_log = []                         # v2.8.13：本批失败明细（清空卡汇总展示）
             last = None
             last_fin = None
             win_ok = False
@@ -1087,6 +1088,10 @@ def check_organize_running(now=None):
                                 t_done += 1
                             elif st == 'failed':
                                 t_failed += 1
+                                # v2.8.13：失败明细（标题清洗+阶段+原因截断，卡片最多展开 5 条）
+                                fail_log.append({'title': _clean_dir_name(ttl)[:24],
+                                                 'stage': (t.get('failure_stage_title') or '')[:12],
+                                                 'err': (t.get('failure_summary') or '')[:60]})
                             else:
                                 t_cancelled += 1
                             m_ok += int(t.get('succeeded_count') or 0)
@@ -1115,6 +1120,7 @@ def check_organize_running(now=None):
             batch['done'], batch['failed'], batch['cancelled'] = t_done, t_failed, t_cancelled
             batch['m_ok'], batch['m_bad'] = m_ok, m_bad
             batch['flow'] = {k: tuple(v) for k, v in flow_cnt.items()}
+            batch['fail_log'] = fail_log          # v2.8.13：失败明细随批次窗口落定
             if last:
                 batch['last'] = last
             fast = _state.get('fast') or {}
@@ -1169,6 +1175,17 @@ def check_organize_running(now=None):
             lines.append(f'追剧 运行 {wr} / 排队 {wq}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
+                # v2.8.13：失败明细汇总进卡（≤5 条逐行「标题｜阶段｜原因」，超出折叠计数）
+                for fl in (batch.get('fail_log') or [])[:5]:
+                    _seg = fl['title']
+                    if fl.get('stage'):
+                        _seg += f"｜{fl['stage']}"
+                    if fl.get('err'):
+                        _seg += f"｜{fl['err']}"
+                    lines.append(f"· {_seg}")
+                _more = len(batch.get('fail_log') or []) - 5
+                if _more > 0:
+                    lines.append(f"· …等 {_more + 5} 条失败，详见面板任务统计页")
             btns = _card_buttons()
             if SETTINGS['trigger_enabled'] and not a_run and not a_que:
                 # v2.6 卡片按钮入口：一次性令牌 30 分钟；每次清空轮换，旧令牌作废
@@ -1416,6 +1433,8 @@ def collect_today_done(today_prefix: str):
                             'media': it.get('item_count') or 0,
                             'ok_media': it.get('succeeded_count') or 0,
                             'bad_media': it.get('failed_count') or 0,
+                            'err': (it.get('failure_summary') or '')[:60],
+                            'stage': (it.get('failure_stage_title') or '')[:12],
                             'finished_at': fin})
             if page_oldest < today_prefix:
                 break
@@ -1426,14 +1445,19 @@ def collect_today_done(today_prefix: str):
 
 
 def collect_records_day(today_prefix: str):
-    """今日媒体记录（p115/records）——全站统一媒体口径。"""
+    """今日媒体记录（p115/records）——全站统一媒体口径。
+    v2.8.13 修复：不再信 API 的 total 字段——ETKN records 列表 total 与实收条数严重
+    不符（实证 9/20：total=130 而实收 1299），改为一页 per_page=1000 实收 len() 计数
+    （今日千条量级一页可收全；深页 page=2 实测 0 条，无需翻页）。"""
     out = {}
-    for st in ('success', 'unrecognized'):
-        s, b = api_get(f'/api/p115/records?page=1&per_page=1&status={st}'
+    for st, key in (('success', 'success'), ('unrecognized', 'unrecognized')):
+        s, b = api_get(f'/api/p115/records?page=1&per_page=1000&status={st}'
                        f'&processed_from={urllib.parse.quote(today_prefix)}')
-        out['success' if st == 'success' else 'unrecognized'] = (b or {}).get('total', 0) if s == 200 else 0
-    s, b = api_get(f'/api/p115/records?page=1&per_page=1&processed_from={urllib.parse.quote(today_prefix)}')
-    out['total'] = (b or {}).get('total', 0) if s == 200 else 0
+        items = (b or {}).get('items') or [] if s == 200 else []
+        out[key] = len(items)
+    s, b = api_get(f'/api/p115/records?page=1&per_page=1000&processed_from={urllib.parse.quote(today_prefix)}')
+    items = (b or {}).get('items') or [] if s == 200 else []
+    out['total'] = len(items)
     return out
 
 
@@ -1673,13 +1697,22 @@ def poll_once():
                     'bad_media': sum(d['bad_media'] for d in done)}
     snap['records'] = collect_records_day(today_prefix)
     # v2.7.1：本周完成（口径=records success 累计值，与 ETKN 整理记录「本周处理」同源）
+    # v2.8.13：total 为坏值——翻页实收累计（per_page=1000，≤3 页保险上限）
     week_cut = (_now() - timedelta(days=7)).isoformat()
-    s, b = api_get(f'/api/p115/records?page=1&per_page=1&status=success'
-                   f'&processed_from={urllib.parse.quote(week_cut)}')
-    snap['week'] = {'media': (b or {}).get('total', 0) if s == 200 else None}
+    _wk = 0
+    for _pg in (1, 2, 3):
+        s, b = api_get(f'/api/p115/records?page={_pg}&per_page=1000&status=success'
+                       f'&processed_from={urllib.parse.quote(week_cut)}')
+        _its = (b or {}).get('items') or [] if s == 200 else []
+        _wk += len(_its)
+        if len(_its) < 1000:
+            break
+    snap['week'] = {'media': _wk}
     snap['failed_today'] = [
         {'id': d['id'], 'kind': d['kind'], 'wf': d['wf'], 'title': d['title'][:40],
-         'media': d['media'], 'bad_media': d['bad_media'], 'finished_at': d['finished_at'][:19]}
+         'media': d['media'], 'bad_media': d['bad_media'],
+         'err': d.get('err') or '', 'stage': d.get('stage') or '',
+         'finished_at': d['finished_at'][:19]}
         for d in done if d['status'] in ('failed', 'partial')][:50]
     # v2.8.11：喂料转移失败（monitor 自身动作，ETKN 无任务记录）也进「今日失败」——
     # 从推送史派生今日 feed_err 合成行（id=0、wf='feed' 不可重试；重启后随推送史清空）
@@ -1804,7 +1837,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.12', 'readonly': False,
+                'version': 'v2.8.13', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
