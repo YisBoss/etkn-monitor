@@ -171,10 +171,14 @@ input[type=number]{width:90px}
           <div style="flex:1"><div id="clList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button>
           <span class="sub" style="align-self:center">「整理下一批」固定带令牌，不在此配置</span></div></div></div>
-        <div class="setrow"><label>自动喂料（清空提醒后自动分批转移源目录→待整理目录）</label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
-        <div class="setrow"><label>喂料源目录（容器内路径）</label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/cloud115/自动整理入库"></div>
-        <div class="setrow"><label>喂料目标目录（容器内路径）</label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/cloud115/媒体库-ETKN/待整理目录"></div>
+        <div class="setrow"><label>自动喂料（清空提醒后自动分批转移源目录→待整理目录，经 CD2 WebDAV 通道）</label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
+        <div class="setrow"><label>CD2 WebDAV 地址</label><input type="text" id="cfgCd2Url" style="max-width:340px" placeholder="http://192.168.1.22:19798/dav"></div>
+        <div class="setrow"><label>CD2 账号</label><input type="text" id="cfgCd2User" style="max-width:260px" placeholder="CloudDrive2 登录邮箱"></div>
+        <div class="setrow"><label>CD2 密码</label><input type="password" id="cfgCd2Pass" style="max-width:260px" placeholder="留空=不修改"></div>
+        <div class="setrow"><label>喂料源目录（CD2 路径）</label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
+        <div class="setrow"><label>喂料目标目录（CD2 路径）</label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
         <div class="setrow"><label>每批媒体项上限（不拆剧；单剧超限则整批只转它）</label><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"></div>
+        <div class="setrow"><label>hosts 自动更新（每小时用 223.5.5.5 解析 shared.example.com，与 iStoreOS /etc/hosts 不一致则改行+重启 dnsmasq；解析失败只告警不改）</label><label class="switch"><input type="checkbox" id="cfgHosts"><span class="slider"></span></label></div>
         <div class="setrow"><label>静止告警自动重启 etkn（仅 restart；30分钟冷却+24小时≤2次；仅整理类；默认关）</label><label class="switch"><input type="checkbox" id="cfgAutoRst"><span class="slider"></span></label></div>
         <div class="ops"><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button></div>
         <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
@@ -443,9 +447,12 @@ async function cfgLoad(){
     document.getElementById('cfgTrgBase').value=d.trigger_public_base||'';
     clRender(Array.isArray(d.card_links)?d.card_links:[]);
     document.getElementById('cfgFeed').checked=!!d.feed_enabled;
+    document.getElementById('cfgCd2Url').value=d.cd2_dav_url||'';
+    document.getElementById('cfgCd2User').value=d.cd2_user||'';
     document.getElementById('cfgFeedSrc').value=d.feed_src_dir||'';
     document.getElementById('cfgFeedDst').value=d.feed_dst_dir||'';
     document.getElementById('cfgFeedLim').value=d.feed_batch_limit??500;
+    document.getElementById('cfgHosts').checked=!!d.hosts_enabled;
     document.getElementById('cfgAutoRst').checked=!!d.auto_restart_enabled;
   }catch(e){toast('读取设置失败：'+String(e).slice(0,60),'bad');}
 }
@@ -474,9 +481,13 @@ async function cfgSave(){
         trigger_public_base:document.getElementById('cfgTrgBase').value.trim(),
         card_links:clCollect(),
         feed_enabled:document.getElementById('cfgFeed').checked,
+        cd2_dav_url:document.getElementById('cfgCd2Url').value.trim(),
+        cd2_user:document.getElementById('cfgCd2User').value.trim(),
+        cd2_pass:document.getElementById('cfgCd2Pass').value||undefined,
         feed_src_dir:document.getElementById('cfgFeedSrc').value.trim(),
         feed_dst_dir:document.getElementById('cfgFeedDst').value.trim(),
         feed_batch_limit:+document.getElementById('cfgFeedLim').value||500,
+        hosts_enabled:document.getElementById('cfgHosts').checked,
         auto_restart_enabled:document.getElementById('cfgAutoRst').checked})});
     const d=await r.json();
     if(r.ok){document.getElementById('cfgUrl').value=d.webhook_url||'';document.getElementById('cfgUrl').placeholder=d.webhook_masked||'…';toast('设置已保存（重启后仍生效）','ok');}

@@ -20,6 +20,7 @@ v2.3.1 说明（滞后修复）：
   - 深翻页提前停机：succeeded 首页最旧记录早于今日 0 点且已含窗口外数据时停止（今日口径不变）。
 v2.1/v2.2/v2.3 功能（重试收敛/手动整理/异常明细/手动操作卡/主题）不变。
 """
+import base64
 import json
 import os
 import re
@@ -33,6 +34,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -90,9 +92,15 @@ SETTINGS_DEFAULTS = {
     'trigger_public_base': '',     # 外网基础地址（如 https://etknjk.example.com），空=内网地址
     # ---- v2.7 自动喂料（清空后源目录→待整理目录自动分批转移） ----
     'feed_enabled': False,         # 自动喂料开关（默认关）
-    'feed_src_dir': '/cloud115/自动整理入库',                              # 源目录（容器内路径）
-    'feed_dst_dir': '/cloud115/媒体库-ETKN/待整理目录',                    # 目标目录（容器内路径）
-    'feed_batch_limit': 500,       # 每批媒体项（文件数）上限；不拆剧
+    'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
+    'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
+    'feed_batch_limit': 500,       # 每批上限；不拆剧（v2.8 WebDAV 通道按夹计，不做文件数精算）
+    # ---- v2.8 喂料通道：CloudDrive2 WebDAV（不碰 fuse，凭据存设置不硬编码） ----
+    'cd2_dav_url': 'http://192.168.1.22:19798/dav',
+    'cd2_user': '',
+    'cd2_pass': '',
+    # ---- v2.8 hosts 自动更新（shared 域名漂移自愈） ----
+    'hosts_enabled': False,        # hosts 自动巡检开关（默认关）
     # ---- v2.7 静止告警自动处置（只 restart，禁重建） ----
     'auto_restart_enabled': False, # 自动重启开关（默认关）
     # ---- v2.7 卡片按钮可配置（六）：[{'text','url'}]，空/非法剔除，≤6 个 ----
@@ -241,6 +249,73 @@ def _alert_push(kind: str, kind_line: str, detail_lines: list, buttons: list = N
     return ok, err
 
 
+# ================= v2.8 CD2 WebDAV 客户端（喂料通道） =================
+def _cd2_dav(method: str, path: str, dest: str = None, data: bytes = None,
+             depth: str = None) -> tuple:
+    """CloudDrive2 WebDAV 调用（Basic 认证）。返回 (status, body)。凭据读设置，不落日志。"""
+    from urllib.parse import quote
+    user = SETTINGS.get('cd2_user') or ''
+    pwd = SETTINGS.get('cd2_pass') or ''
+    base = (SETTINGS.get('cd2_dav_url') or '').rstrip('/')
+    if not base:
+        return 0, '未配置 cd2_dav_url'.encode('utf-8')
+    token = base64.b64encode(f'{user}:{pwd}'.encode()).decode()
+    h = {'Authorization': 'Basic ' + token}
+    if depth:
+        h['Depth'] = depth
+    if dest:
+        h['Destination'] = base + quote(dest)
+    req = urllib.request.Request(base + quote(path), method=method, headers=h, data=data)
+    try:
+        r = urllib.request.urlopen(req, timeout=60)
+        return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception as e:
+        return 0, str(e).encode()
+
+
+_NS_DAV = '{DAV:}'
+
+
+def _cd2_list_dirs(dav_dir: str) -> list:
+    """WebDAV 列目录（Depth=1），返回 [(夹名, )]（只留目录条目，按 href 顺序=CD2 返回序）。"""
+    s, b = _cd2_dav('PROPFIND', dav_dir, depth='1')
+    if s != 207:
+        return None
+    try:
+        root = ET.fromstring(b)
+    except ET.ParseError:
+        return None
+    out = []
+    for resp in root.iter(_NS_DAV + 'response'):
+        href = resp.findtext(_NS_DAV + 'href') or ''
+        gt = resp.findtext(_NS_DAV + 'propstat/' + _NS_DAV + 'prop/' +
+                           _NS_DAV + 'getcontenttype') or ''
+        if 'unix-directory' in gt:
+            name = urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1])
+            # 排除目录自身条目（PROPFIND Depth=1 首条=目录本身，其 href 末段=目录名）
+            if name and name != urllib.parse.unquote(dav_dir.rstrip('/').rsplit('/', 1)[-1]):
+                out.append(name)
+    return out
+
+
+def _cd2_move(src_dir: str, dst_dir: str, name: str) -> tuple:
+    """WebDAV MOVE 整夹移动（CD2 同挂载=115 秒级移动）。返回 (ok, err)。"""
+    src = src_dir.rstrip('/') + '/' + name
+    dst = dst_dir.rstrip('/') + '/' + name
+    s, b = _cd2_dav('MOVE', src, dest=dst)
+    if s in (201, 204, 250):
+        return True, ''
+    return False, f'{name[:40]}：HTTP {s} {(b or b"")[:60].decode(errors="replace", ).strip()}'
+
+
+def _cd2_exists(dst_dir: str, name: str) -> bool:
+    """目标同名夹探测（PROPFIND Depth=0）。"""
+    s, _b = _cd2_dav('PROPFIND', dst_dir.rstrip('/') + '/' + name, depth='0')
+    return s in (207, 200)
+
+
 # ================= v2.7 自动喂料（清空提醒后自动分批转移） =================
 _feed_lock = threading.Lock()          # 忙锁：防并发喂料
 _feed_state = {'last_run': 0.0, 'moving': False}
@@ -249,48 +324,20 @@ _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时
 
 
 def _feed_scan_dirs(src: str) -> list:
-    """扫描源目录：[(文件夹名, 文件数)]，仅一级目录（一夹=一剧/一影），旧→新排序。
+    """扫描源目录（v2.8：经 CD2 WebDAV，不碰 fuse）：[(夹名, 0)]，保持旧→新排序由 CD2 返回序决定。
 
-    v2.7.2②：只数到第二层（剧夹→子目录/文件一层），不再全深递归——
-    全深 os.walk 每夹多次列目录调用，上千夹会把 115 接口配额烧光
-    （首跑实证：21:22 扫描烧配额→21:27 整理扫描即撞「已达到当前访问上限」）。
-    层级口径：剧夹直属文件 + 各子目录直属文件（Season1/ep01.mkv 算 1 个），
-    不再往下钻 Season1/子目录/更深。计数为选批参考，非精确值（整理引擎不受影响）。
-    v2.7.2④：10 分钟缓存（重复清空窗口内不重扫，mtime 排序结果同窗内视为稳定）。
+    ②只列一层（Depth=1）零递归——不数文件数（省配额；计数口径由 WebDAV 列目录一次完成）。
+    返回 None=源目录不可达。10 分钟缓存沿用（v2.7.2④）。
     """
     now = time.time()
     if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
             and now - _feed_scan_cache['ts'] < 600):
         return _feed_scan_cache['dirs']
-    try:
-        names = sorted(os.listdir(src), key=lambda n: os.path.getmtime(
-            os.path.join(src, n)) if os.path.exists(os.path.join(src, n)) else 0)
-    except FileNotFoundError:
-        return None                    # 源目录不存在（挂载未生效等）
-    out = []
-    for n in names:
-        p = os.path.join(src, n)
-        if not os.path.isdir(p):
-            continue
-        try:
-            entries = os.listdir(p)    # 第二层：只列一次
-        except OSError:
-            entries = []
-        cnt = 0
-        for e in entries:
-            ep = os.path.join(p, e)
-            if os.path.isfile(ep):
-                cnt += 1
-            elif os.path.isdir(ep):
-                try:                   # 第三层只数直属文件数，不再下钻
-                    cnt += sum(1 for x in os.listdir(ep)
-                               if os.path.isfile(os.path.join(ep, x)))
-                except OSError:
-                    pass
-            if cnt > 100000:           # 防异常爆量
-                break
-        out.append((n, cnt))
-    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})
+    dirs = _cd2_list_dirs(src)
+    if dirs is None:
+        return None
+    out = [(n, 1) for n in dirs]      # v2.8：不递归数文件（省配额），一剧夹计 1 项；
+    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})   # 上限语义=每批最多 N 夹
     return out
 
 
@@ -313,41 +360,47 @@ def _feed_plan(dirs: list, limit: int) -> list:
 
 
 def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
-    """整夹剪切 src→dst（fuse 同挂载 os.rename=115 秒级移动）；任一失败即停并回报。
-    返回 (成功夹名列表, 失败描述或 '')。只单向 src→dst，禁反向/删除。"""
+    """整夹剪切 src→dst（v2.8：经 CD2 WebDAV MOVE，同挂载=115 秒级移动）；任一失败即停并回报。
+    返回 (成功夹名列表, 失败描述或 '')。只单向 src→dst，禁反向/删除；目标同名不覆盖。"""
     ok_names, err = [], ''
     for name, _cnt in picks:
-        s, d = os.path.join(src, name), os.path.join(dst, name)
-        try:
-            if os.path.exists(d):      # 目标同名已存在：不覆盖（防数据破坏）
-                err = f'{name[:40]}：目标目录已存在同名文件夹'
-                break
-            os.rename(s, d)            # 同 fuse 挂载 → 原子改名（0.2s 级，无真复制）
-            ok_names.append(name)
-        except OSError as e:
-            err = f'{name[:40]}：{e.strerror or e}'
+        if _cd2_exists(dst, name):   # 目标同名已存在：不覆盖（防数据破坏）
+            err = f'{name[:40]}：目标目录已存在同名文件夹'
             break
+        ok, e2 = _cd2_move(src, dst, name)
+        if not ok:
+            err = e2 or f'{name[:40]}：移动失败'
+            break
+        ok_names.append(name)
     return ok_names, err
 
 
 def _watch_shell_run(rid: int, source: str) -> None:
-    """v2.7.3②：壳任务（手动整理网盘文件）监视——成功但 0 派生=疑似 115 配额受限，告警。
-    壳任务正常 1-3 秒结束；结束后 chain_runs 非空=已派生真实整理任务（正常，不推卡）。"""
+    """v2.8：壳任务（手动整理网盘文件）监视——succeeded 后 chain_runs 迟迟为空才告警。
+    节奏：每 10 秒一查（有派生立即静默返回）；累计满 180 秒（18 轮）仍空
+    才告警「疑似 115 配额受限」。50 秒版误报实证：派生真实任务需要更长时间。
+    时间按「轮询次数 × 10 秒」计（虚拟时钟），生产语义等价且可回归快进。"""
     def _watch():
+        waited = 0
         try:
-            for _ in range(10):                 # 最多等 50 秒（壳 1-3 秒即终态）
-                time.sleep(5)
+            while True:
+                time.sleep(10)
+                waited += 10
                 s, d = api_get(f'/api/workflows/{rid}')
-                if s != 200 or not isinstance(d, dict):
-                    continue
-                st = d.get('status')
-                if st in ('succeeded', 'failed', 'cancelled'):
-                    if st == 'succeeded' and not (d.get('chain_runs') or []):
+                if s == 200 and isinstance(d, dict):
+                    st = d.get('status')
+                    if st in ('failed', 'cancelled'):
+                        return                        # 失败/取消：静默（另有失败卡）
+                    if st == 'succeeded' and (d.get('chain_runs') or []):
+                        return                        # 已派生真实整理：静默
+                    # succeeded 且 0 派生：继续轮询等派生，满 180 秒仍空才告警
+                    if waited >= 180:
                         _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
-                            f'手动整理壳任务 #{rid} 提交成功，但未派生任何整理任务（引擎扫描 115 空转）',
+                            f'手动整理壳任务 #{rid} 成功，但 3 分钟内未派生任何整理任务（引擎扫描 115 空转）',
                             '待整理目录文件不会丢，全部原样等待',
                             '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
-                    return
+                        return
+                # 查询失败（非 200/非 dict）：继续轮询直到满 180 秒
         except Exception:
             pass                                # 监视线程绝不影响主流程
     threading.Thread(target=_watch, daemon=True).start()
@@ -515,6 +568,121 @@ def _auto_stall_handler(rid, c) -> None:
     else:
         _alert_push('stall', '自动重启 etkn 失败，需人工介入', [
             f'任务 #{rid} 触发自动处置，但执行失败', f'错误：{out}'])
+
+
+# ============ v2.8 hosts 自动更新（shared.example.com 漂移自愈） ============
+_HOSTS_DOMAIN = 'shared.example.com'
+_HOSTS_MARKER = '# etkn-monitor-managed'   # 我们负责的行的标记，其他行绝不碰
+_hosts_state = {'last_run': 0.0, 'timer': None}
+
+
+def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
+    """用指定 DNS 服务器解析 A 记录（UDP 53 直连指定服务器，绕过本机 DNS/劫持）。
+    返回首个 A 记录字符串；失败返回 ''。socket/struct 用模块级导入（可 monkeypatch 测试）。"""
+    import struct as _s
+    q = b''.join([b'\x12\x34', b'\x01\x00', b'\x00\x01\x00\x00\x00\x00\x00\x00',
+                  bytes([len(x) for x in name.split('.')]), b''.join(
+                      x.encode() for x in name.split('.')), b'\x00', b'\x00\x01\x00\x01'])
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(8)
+        s.sendto(q, (server, 53))
+        d, _a = s.recvfrom(1024)
+        s.close()
+        # 跳 header(12B) + question（扫到 0x00 结束）
+        i = 12
+        while d[i]:
+            i += d[i] + 1
+        i += 5                          # 0x00(qname 结尾) + qtype(2) + qclass(2)
+        while i + 12 <= len(d):
+            # answer 记录：name(2 压缩指针) type(2) class(2) ttl(4) rdlen(2)
+            typ = _s.unpack('>H', d[i+2:i+4])[0]
+            rdl = _s.unpack('>H', d[i+10:i+12])[0]
+            if typ == 1 and rdl == 4:
+                return '.'.join(str(x) for x in d[i+12:i+16])
+            i += 12 + rdl
+    except Exception:
+        pass
+    return ''
+
+
+def _ssh_router(cmd: str, timeout: int = 30) -> str:
+    """在路由器 192.168.1.1（iStoreOS, root）上执行命令，返回 stdout。凭据=clash_action 同源。"""
+    auth = ''
+    try:
+        with open('/vol1/@appdata/trim.hermes/workspace/etkn_logs/clash_action.py',
+                  encoding='utf-8') as f:
+            for ln in f:
+                if ln.startswith('AUTH = '):
+                    auth = ln.split('= ')[1].strip().strip('"')
+                    break
+    except OSError:
+        return ''
+    env = dict(os.environ)
+    env['SSHPASS'] = auth
+    r = subprocess.run(['sshpass', '-e', 'ssh', '-o', 'StrictHostKeyChecking=no',
+                        '-o', 'UserKnownHostsFile=/dev/null', '-o', 'ConnectTimeout=10',
+                        'root@192.168.1.1', cmd],
+                       capture_output=True, env=env, timeout=timeout)
+    return (r.stdout + r.stderr).replace(b'\x00', b'').decode('utf-8', errors='replace')
+
+
+def _hosts_check_once() -> None:
+    """单次巡检：公共 DNS 解析 → 对比 /etc/hosts → 不同则原子更新该行+重启 dnsmasq+推送。
+    解析失败=域名挂了：不更新 hosts，只推告警。只动带标记的那一行。"""
+    now = time.time()
+    _hosts_state['last_run'] = now
+    ip = _resolve_public(_HOSTS_DOMAIN)
+    if not ip:
+        _alert_push('hosts_err', 'shared 域名解析失败（hosts 未改动）', [
+            f'223.5.5.5 解析 {_HOSTS_DOMAIN} 无 A 记录——可能域名/源站故障',
+            '/etc/hosts 保持原值，业务暂按旧 IP 走，请人工确认'])
+        return
+    cur = _ssh_router(f"grep -n '{_HOSTS_DOMAIN}' /etc/hosts || true")
+    found = []                       # (行号, 行内容)
+    for ln in cur.splitlines():
+        if _HOSTS_DOMAIN in ln:
+            no, _, rest = ln.partition(':')
+            if no.isdigit() and rest.strip():
+                found.append((int(no), rest))
+    mark = [x for x in found if _HOSTS_MARKER in x[1]]      # 优先我们管理的行
+    pick = mark[0] if mark else next(
+        (x for x in found if len(x[1].split()) >= 2), None)
+    if not pick:
+        _alert_push('hosts_err', 'hosts 未找到绑定行（未改动）', [
+            f'{_HOSTS_DOMAIN} 在 iStoreOS /etc/hosts 无独立行（或行格式异常），请人工核对'])
+        return
+    line_no, rest = pick
+    old_ip = rest.split()[0]
+    if old_ip == ip:
+        return                          # 一致：静默
+    # 原子更新：替换该行 + 追加标记注释
+    new_line = f"{ip} {_HOSTS_DOMAIN} {_HOSTS_MARKER}"
+    esc = new_line.replace('/', r'\/')
+    script = (f"cp /etc/hosts /etc/hosts.bak-monitor && "
+              f"sed -i '{line_no}s/.*/{esc}/' /etc/hosts && "
+              f"/etc/init.d/dnsmasq restart >/dev/null 2>&1; "
+              f"grep -n '{_HOSTS_DOMAIN}' /etc/hosts")
+    out = _ssh_router(script, timeout=45)
+    ok = f'{ip} {_HOSTS_DOMAIN}' in out
+    if ok:
+        _alert_push('hosts', f'{_HOSTS_DOMAIN} IP 已更新：{old_ip} → {ip}', [
+            '223.5.5.5 公网解析与 hosts 不一致，已按公网真相更新并重启 dnsmasq',
+            '原行已备份 /etc/hosts.bak-monitor'], tcolor='green')
+    else:
+        _alert_push('hosts_err', 'hosts 更新失败（未生效）', [
+            f'期望改到 {ip}，路由器回执异常', f'回执：{(out or "(空)")[:100]}'])
+
+
+def _hosts_loop() -> None:
+    """每小时巡检线程（守护，绝不影响主流程）。"""
+    while True:
+        try:
+            if SETTINGS['push_enabled'] and SETTINGS.get('hosts_enabled'):
+                _hosts_check_once()
+        except Exception:
+            pass
+        time.sleep(3600)
 
 
 def _panel_base() -> str:
@@ -1444,7 +1612,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.7.3', 'readonly': False,
+                'version': 'v2.8.0', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1510,6 +1678,7 @@ class Handler(BaseHTTPRequestHandler):
             d['webhook_masked'] = (m.group(1) + '***' + m.group(2)[-4:]) if m else '***'
         else:
             d['webhook_masked'] = ''
+        d.pop('cd2_pass', None)         # v2.8：CD2 密码永不回传前端（留空=不修改）
         d['settings_path'] = SETTINGS_PATH
         return self._send(200, json.dumps(d, ensure_ascii=False).encode())
 
@@ -1521,7 +1690,7 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
         for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-                  'trigger_enabled', 'feed_enabled', 'auto_restart_enabled'):
+                  'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled'):
             if k in b:
                 SETTINGS[k] = bool(b[k])
         for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
@@ -1543,6 +1712,14 @@ class Handler(BaseHTTPRequestHandler):
         for k in ('feed_src_dir', 'feed_dst_dir'):
             if k in b and isinstance(b[k], str) and b[k].strip():
                 SETTINGS[k] = b[k].strip()
+        if 'cd2_dav_url' in b and isinstance(b['cd2_dav_url'], str):   # v2.8 CD2 WebDAV
+            u = b['cd2_dav_url'].strip().rstrip('/')
+            if u and (u.startswith('http://') or u.startswith('https://')):
+                SETTINGS['cd2_dav_url'] = u
+        if 'cd2_user' in b and isinstance(b['cd2_user'], str):
+            SETTINGS['cd2_user'] = b['cd2_user'].strip()
+        if b.get('cd2_pass'):               # 密码：留空=不修改（前端 undefined 则整个键缺失）
+            SETTINGS['cd2_pass'] = str(b['cd2_pass'])
         if 'card_links' in b:               # v2.7（六）：卡片按钮列表，空/非法剔除
             cl = _norm_card_links(b['card_links'])
             SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
@@ -1680,11 +1857,12 @@ def main():
     threading.Thread(target=poll_loop, daemon=True).start()
     threading.Thread(target=fast_loop, daemon=True).start()
     threading.Thread(target=alarm_loop, daemon=True).start()
+    threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.5.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
-          f'测速/重试/手动整理=手动', flush=True)
+          f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
 
 
