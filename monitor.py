@@ -337,8 +337,9 @@ def _cd2_dav(method: str, path: str, dest: str = None, data: bytes = None,
 _NS_DAV = '{DAV:}'
 
 
-def _cd2_list_dirs(dav_dir: str) -> list:
-    """WebDAV 列目录（Depth=1），返回 [(夹名, )]（只留目录条目，按 href 顺序=CD2 返回序）。"""
+def _cd2_list_entries(dav_dir: str):
+    """WebDAV 列第一层（Depth=1，一次请求），返回 (夹名列表, 散文件名列表)。
+    v2.8.12：散视频文件与夹同权参与喂料——按 href 顺序分两类收集（CD2 返回序）。"""
     s, b = _cd2_dav('PROPFIND', dav_dir, depth='1')
     if s != 207:
         return None
@@ -346,17 +347,26 @@ def _cd2_list_dirs(dav_dir: str) -> list:
         root = ET.fromstring(b)
     except ET.ParseError:
         return None
-    out = []
+    dirs, files = [], []
+    self_seg = urllib.parse.unquote(dav_dir.rstrip('/').rsplit('/', 1)[-1])
     for resp in root.iter(_NS_DAV + 'response'):
         href = resp.findtext(_NS_DAV + 'href') or ''
         gt = resp.findtext(_NS_DAV + 'propstat/' + _NS_DAV + 'prop/' +
                            _NS_DAV + 'getcontenttype') or ''
+        name = urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1])
+        if not name or name == self_seg:
+            continue                     # 排除目录自身条目（首条=目录本身）
         if 'unix-directory' in gt:
-            name = urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1])
-            # 排除目录自身条目（PROPFIND Depth=1 首条=目录本身，其 href 末段=目录名）
-            if name and name != urllib.parse.unquote(dav_dir.rstrip('/').rsplit('/', 1)[-1]):
-                out.append(name)
-    return out
+            dirs.append(name)
+        else:
+            files.append(name)
+    return dirs, files
+
+
+def _cd2_list_dirs(dav_dir: str) -> list:
+    """v2.8.12 起为兼容包装：只返回夹列表。"""
+    r = _cd2_list_entries(dav_dir)
+    return None if r is None else r[0]
 
 
 def _cd2_move(src_dir: str, dst_dir: str, name: str) -> tuple:
@@ -366,7 +376,7 @@ def _cd2_move(src_dir: str, dst_dir: str, name: str) -> tuple:
     s, b = _cd2_dav('MOVE', src, dest=dst)
     if s in (201, 204, 250):
         return True, ''
-    return False, f'{name[:40]}：HTTP {s} {(b or b"")[:60].decode(errors="replace", ).strip()}'
+    return False, f'{_clean_dir_name(name)[:40]}：HTTP {s} {(b or b"")[:60].decode(errors="replace", ).strip()}'
 
 
 def _cd2_exists(dst_dir: str, name: str) -> bool:
@@ -385,21 +395,27 @@ FEED_TREE_TTL = 600                    # v2.8.6：回到短缓存（v2.8.4/v2.8.
                                        # 每次喂料只打 1 次列目录请求，无需 24h 树缓存）
 
 
-def _feed_scan_dirs(src: str) -> list:
-    """扫描源目录（v2.8.6：经 CD2 WebDAV，不碰 fuse）：[夹名]（一个剧夹=1 项），
-    保持旧→新排序由 CD2 返回序决定。
-    v2.8.6：撤销 v2.8.4/v2.8.5 的逐夹 Depth=1 数真实项数与 24h 树缓存——那会让
-    每次喂料打 1000+ 次请求（1063 夹规模打满 115 配额）。现在只列第一层一次，
-    每次喂料只打 1 次列目录请求；短缓存 10min 保留（防抖动）。"""
+def _feed_scan_entries(src: str):
+    """v2.8.12：扫描源目录（经 CD2 WebDAV，不碰 fuse），一次 PROPFIND 同时返回
+    （夹列表, 散文件列表）——散视频文件与剧夹同权参与喂料（用户 9/19 晚定案）。
+    排序保持 CD2 返回序（旧→新）；扫描失败返回 None。短缓存 10min 保留（防抖动）。
+    缓存兼容：旧缓存条目 dirs 非 None 时视为 (dirs, [])（升级窗口内不重复打请求）。"""
     now = time.time()
     if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
             and now - _feed_scan_cache['ts'] < FEED_TREE_TTL):
-        return _feed_scan_cache['dirs']
-    dirs = _cd2_list_dirs(src)
-    if dirs is None:
+        return _feed_scan_cache['dirs'], _feed_scan_cache.get('files') or []
+    r = _cd2_list_entries(src)
+    if r is None:
         return None
-    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': dirs})
-    return dirs
+    dirs, files = r
+    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': dirs, 'files': files})
+    return dirs, files
+
+
+def _feed_scan_dirs(src: str) -> list:
+    """v2.8.12 起为兼容包装：只返回夹列表（面板/回归旧调用点用）。"""
+    r = _feed_scan_entries(src)
+    return None if r is None else r[0]
 
 
 def _clean_dir_name(name: str) -> str:
@@ -433,11 +449,12 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
     ok_names, err = [], ''
     for name in picks:
         if _cd2_exists(dst, name):   # 目标同名已存在：不覆盖（防数据破坏）
-            err = f'{name[:40]}：目标目录已存在同名文件夹'
+            # v2.8.11a：错误文案用清洗后主名（剥 {tmdb-xxx} 后缀），失败卡不再出现刮削残渣
+            err = f'{_clean_dir_name(name)[:40]}：目标目录已存在同名文件夹'
             break
         ok, e2 = _cd2_move(src, dst, name)
         if not ok:
-            err = e2 or f'{name[:40]}：移动失败'
+            err = e2 or f'{_clean_dir_name(name)[:40]}：移动失败'
             break
         ok_names.append(name)
     return ok_names, err
@@ -503,15 +520,29 @@ def _watch_shell_run(rid: int, source: str) -> None:
     threading.Thread(target=_watch, daemon=True).start()
 
 
-def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
-    """v2.7.2①：转移成功后延迟 90 秒触发原生整理；③失败时识别 115 限流给重试指引。"""
+def _feed_err_partial(picks_dirs: list, picks_files: list, moved_dirs: list,
+                      moved_files: list, total_items: int, err: str) -> None:
+    """v2.8.12：转移失败卡（夹/散文件分列，已完成=夹+散合计；夹名清洗沿用 _clean_dir_name）。"""
+    done = len(moved_dirs or []) + len(moved_files or [])
+    names = [_clean_dir_name(n)[:20] for n in (list(picks_dirs[:3]) + list(picks_files[:2]))]
+    brief = '、'.join(names) + ('…' if total_items > 5 else '')
+    _alert_push('feed_err', '自动喂料转移失败', [
+        f'本批计划：{total_items} 项（剧夹 {len(picks_dirs)} + 散文件 {len(picks_files)}，{brief}）',
+        f'已完成 {done} 项后中止：{err[:80]}',
+        '已转移部分保留在目标目录，可在面板手动触发整理'])
+
+def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_files: int = 0) -> None:
+    """v2.7.2①：转移成功后延迟触发原生整理；③失败时识别 115 限流给重试指引。
+    v2.8.12：n_dirs/n_files=本批夹/散文件数（话术分列，散文件 0 时保持原句式）。"""
     payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
                               'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
     s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
     if s in (200, 201, 202):
-        # v2.8.11：话术简短化（不重复任务名，一句话说清去向）
+        _batch_line = ('本批 ' + (f'{n_dirs} 个剧夹' if n_dirs else '') +
+                       (' + ' if n_dirs and n_files else '') +
+                       (f'{n_files} 个散文件' if n_files else '') + '已进入整理队列')
         _alert_push('feed', '自动喂料已触发整理', [
-            f'本批 {moved_n} 个剧夹已进入整理队列',
+            _batch_line,
             '出结果后正常推清空提醒'],
             buttons=_card_buttons(), tcolor='green')
         rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
@@ -521,12 +552,12 @@ def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
     body = json.dumps(b, ensure_ascii=False) if isinstance(b, (dict, list)) else str(b or '')
     if ('访问上限' in body) or ('429' in body) or ('限流' in body) or ('Too Many' in body):
         _alert_push('feed_err', '自动喂料触发整理失败（115 限流）', [
-            f'本批 {moved_n} 夹 / {total_files} 文件已转移成功，但整理触发撞 115 访问上限',
+            f'本批 {moved_n} 项（剧夹+散文件）已转移成功，但整理触发撞 115 访问上限',
             '文件不会丢：全部在待整理目录等待', '稍后（约 10-30 分钟）到面板点「整理下一批」即可',
             f'错误：{body[:90]}'])
     else:
         _alert_push('feed_err', '自动喂料触发整理失败', [
-            f'转移 {moved_n} 夹 / {total_files} 文件已成功，但整理触发失败（HTTP {s}）',
+            f'转移 {moved_n} 项（剧夹+散文件）已成功，但整理触发失败（HTTP {s}）',
             body[:100], '请到面板手动触发「手动整理网盘文件」'])
 
 
@@ -545,48 +576,49 @@ def _feed_run() -> None:
         src = SETTINGS['feed_src_dir'].rstrip('/')
         dst = SETTINGS['feed_dst_dir'].rstrip('/')
         limit = max(1, int(SETTINGS['feed_batch_limit'] or 500))   # v2.8.6：每批文件夹数
-        dirs = _feed_scan_dirs(src)
-        if dirs is None:
+        scanned = _feed_scan_entries(src)
+        if scanned is None:
             _alert_push('feed_err', '自动喂料失败', [
                 f'源目录不可读：{src}', '多半是 /cloud115 挂载未生效或权限变化，请检查容器挂载'])
             return
-        if not dirs:
+        dirs, loose = scanned
+        # v2.8.12：夹+散文件都空才算「源目录已空」（用户 9/19 晚定案：散文件参与转移）
+        if not dirs and not loose:
             _alert_push('feed_empty', '源目录已空，可放新文件', [
                 f'{src} 当前没有待整理文件夹', '放入新剧/电影后，下次清空提醒会自动喂料'],
                 buttons=_card_buttons(), tcolor='blue')
             return
-        picks = _feed_plan(dirs, limit)
-        if not picks:
+        # v2.8.12 计划：夹优先、散文件补足配额，合计 ≤ limit（按个数累加，一个夹=1 项=一个散文件）
+        picks_dirs = dirs[:limit]
+        picks_files = loose[:max(0, limit - len(picks_dirs))]
+        total_items = len(picks_dirs) + len(picks_files)
+        # 转移顺序：先夹后散文件（同一 MOVE 通道，任一失败即停并回报）
+        moved_dirs, err = _feed_move_batch(src, dst, picks_dirs)
+        if err:
+            _feed_err_partial(picks_dirs, picks_files, moved_dirs, [], total_items, err)
             return
-        total_files = len(picks)       # v2.8.6：口径=文件夹数（一个剧夹=1 项）
-        moved, err = _feed_move_batch(src, dst, picks)
-        if moved:
-            # 转移成功后从缓存剔除已转夹（防同名误报目的不变：已转夹不再出现在计划里）
-            _feed_cache_drop([n for n in moved])
-        # v2.8.7：夹名先剥 {tmdb-xxx}/{tmd…} 刮削后缀再截断——旧写法直接切 16 字
-        # 会把「圣诞雪人 (1998) {tmd…」这种半截花括号推进卡片（用户报「{tmd 乱码」根因）
-        names_brief = '、'.join(_clean_dir_name(n)[:20] for n in picks[:4]) + \
-            ('…' if len(picks) > 4 else '')
-        if err or not moved:
-            _alert_push('feed_err', '自动喂料转移失败', [
-                f'本批计划：{total_files} 个剧夹（{names_brief}）',
-                f'已完成 {len(moved)} 夹后中止：{err[:80]}',
-                '已转移部分保留在目标目录，可在面板手动触发整理'])
+        moved_files, err = _feed_move_batch(src, dst, picks_files)
+        if err or (moved_dirs or moved_files) == []:
+            _feed_err_partial(picks_dirs, picks_files, moved_dirs, moved_files, total_items, err)
             return
-        # 转移全部成功 → 触发原生「手动整理网盘文件」（与面板/卡片按钮同源载荷）
-        # v2.7.2①：转移刚消耗 115 接口调用，立即触发整理会撞「已达到当前访问上限」
-        # （首跑 #21354 实证）——v2.8.8 起延迟秒数可配置（默认 10，0=立即）
+        if moved_dirs:
+            _feed_cache_drop(list(moved_dirs))   # 已转夹剔除缓存（防同名误报）
+        # v2.8.12 话术：散文件单独计数（Y=0 时保持原句式）
         _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
-        # v2.8.11：话术简短化（不列夹名，夹名只在失败卡出现）
+        _n_d, _n_f = len(moved_dirs), len(moved_files)
+        _moved_line = ('已转移 ' + (f'{_n_d} 个剧夹' if _n_d else '') +
+                       (' + ' if _n_d and _n_f else '') +
+                       (f'{_n_f} 个散文件' if _n_f else '') + '到待整理目录')
         _alert_push('feed', '自动喂料完成', [
-            f'已转移 {total_files} 个剧夹到待整理目录',
+            _moved_line,
             ('立即自动触发整理' if _delay <= 0
              else f'{_delay} 秒后自动触发整理')],
             buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
         if old:
             old.cancel()
-        t = threading.Timer(float(_delay), _feed_delayed_trigger, args=(len(moved), total_files))
+        t = threading.Timer(float(_delay), _feed_delayed_trigger,
+                            args=(_n_d + _n_f, total_items, _n_d, _n_f))
         t.daemon = True
         _feed_trigger['timer'] = t
         t.start()
@@ -1772,7 +1804,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.11', 'readonly': False,
+                'version': 'v2.8.12', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
