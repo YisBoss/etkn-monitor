@@ -533,18 +533,11 @@ def _feed_err_partial(picks_dirs: list, picks_files: list, moved_dirs: list,
 
 def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_files: int = 0) -> None:
     """v2.7.2①：转移成功后延迟触发原生整理；③失败时识别 115 限流给重试指引。
-    v2.8.12：n_dirs/n_files=本批夹/散文件数（话术分列，散文件 0 时保持原句式）。"""
+    v2.8.14：成功不再单独推卡（合并进「自动喂料完成」单卡）；n_dirs/n_files 仅留签名兼容。"""
     payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
                               'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
     s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
     if s in (200, 201, 202):
-        _batch_line = ('本批 ' + (f'{n_dirs} 个剧夹' if n_dirs else '') +
-                       (' + ' if n_dirs and n_files else '') +
-                       (f'{n_files} 个散文件' if n_files else '') + '已进入整理队列')
-        _alert_push('feed', '自动喂料已触发整理', [
-            _batch_line,
-            '出结果后正常推清空提醒'],
-            buttons=_card_buttons(), tcolor='green')
         rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
         if rid:
             _watch_shell_run(int(rid), 'feed')  # v2.7.3②：空转监视
@@ -603,17 +596,16 @@ def _feed_run() -> None:
             return
         if moved_dirs:
             _feed_cache_drop(list(moved_dirs))   # 已转夹剔除缓存（防同名误报）
-        # v2.8.12 话术：散文件单独计数（Y=0 时保持原句式）
+        # v2.8.14：喂料合并单卡——转移完成+触发整理合一推送，不再连发两张卡
         _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
         _n_d, _n_f = len(moved_dirs), len(moved_files)
         _moved_line = ('已转移 ' + (f'{_n_d} 个剧夹' if _n_d else '') +
                        (' + ' if _n_d and _n_f else '') +
-                       (f'{_n_f} 个散文件' if _n_f else '') + '到待整理目录')
-        _alert_push('feed', '自动喂料完成', [
-            _moved_line,
-            ('立即自动触发整理' if _delay <= 0
-             else f'{_delay} 秒后自动触发整理')],
-            buttons=_card_buttons(), tcolor='green')
+                       (f'{_n_f} 个散文件' if _n_f else '') + '到待整理目录，' +
+                       ('整理已自动提交' if _delay <= 0
+                        else f'{_delay} 秒后自动提交整理') + '，完成后推清空提醒')
+        _alert_push('feed', '自动喂料完成', [_moved_line],
+                    buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
         if old:
             old.cancel()
@@ -1160,19 +1152,14 @@ def check_organize_running(now=None):
             lines.append(f'本批入库：{batch["done"]} 任务 · {batch["m_ok"]} 媒体 · {_fail_bits}')
             if flow_bits:
                 lines.append('流程任务：' + ' · '.join(flow_bits))
-            if batch['last']:
-                lines.append(f"最后任务：#{batch['last']['id']} "
-                             f"{_clean_dir_name(batch['last']['title'])[:32]}"
-                             f"（耗时 {batch['last']['min']} 分钟）")
             if batch['started_at']:
                 tmin = max(1, round((now - batch['started_at']).total_seconds() / 60))
                 lines.append(f'本批耗时：{tmin} 分钟'
                              f'（{_fmt_hhmm(batch["started_at"])} → {_fmt_hhmm(now)}）')
-            lines.append('当前队列：')
-            lines.append(f'刮削 运行 {qr} / 排队 {qq}')
-            lines.append(f'网盘 运行 {nr} / 排队 {nq2}')
-            lines.append(f'共享 运行 {sr} / 排队 {sq}')
-            lines.append(f'追剧 运行 {wr} / 排队 {wq}')
+            lines.append('当前队列：'
+                         f'刮削 {qr}/{qq} · 网盘 {nr}/{nq2}')
+            lines.append(f'　　　'
+                         f'共享 {sr}/{sq} · 追剧 {wr}/{wq}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
                 # v2.8.13：失败明细汇总进卡（≤5 条逐行「标题｜阶段｜原因」，超出折叠计数）
@@ -1837,7 +1824,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.13', 'readonly': False,
+                'version': 'v2.8.14', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
