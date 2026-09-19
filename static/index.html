@@ -98,7 +98,7 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
 #modal .btns button{flex:1;min-height:44px;border-radius:10px;font-size:14px;border:1px solid var(--line);background:transparent;color:var(--tx)}
 #modal .btns button.go{border-color:var(--warn);color:var(--warn);font-weight:600}
 /* ---- 设置页（v2.5）：行式布局+开关，主题全走变量 ---- */
-.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.setgroup{margin:14px 0 2px;font-size:13px;font-weight:700;color:var(--tx);opacity:.85;border-left:3px solid var(--acc,#4f8ef7);padding-left:8px}.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.setrow .why{font-size:11px;opacity:.6;margin-left:6px;font-weight:400}.fourrow{display:grid;grid-template-columns:1.2fr .7fr .9fr 1.1fr;gap:8px}.fourrow label{font-size:11px;opacity:.65;display:block;margin-bottom:3px}.fourrow input{width:100%;min-width:0;min-height:38px;padding:6px 8px;font-size:13px}@media(max-width:640px){.fourrow{grid-template-columns:1fr 1fr}}
 .setrow:last-of-type{border-bottom:none}
 .setrow>label:first-child{font-size:14px}
 .setbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -115,7 +115,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.12</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.13</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -162,43 +162,48 @@ input[type=number]{width:90px}
         <button id="cfgTab3" onclick="swCfg(3)">测速历史</button>
       </div>
       <div id="cfgForm">
-        <div class="setrow"><label>飞书 Webhook 地址</label></div>
+        <div class="setgroup">【推送】</div>
+        <div class="setrow"><label>飞书 Webhook 地址<span class="why">机器人 Incoming 地址</span></label></div>
         <div class="setrow"><input type="text" id="cfgUrl" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"></div>
-        <div class="setrow"><label>推送总开关（关闭则全部静默）</label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
-        <div class="setrow"><label>TMDB HTTP 500 检测告警</label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
-        <div class="setrow"><label>定时测速（异常才推送）</label><div class="setbox"><select id="cfgISp"><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 60 分钟</option><option value="120">每 120 分钟</option></select><label class="switch"><input type="checkbox" id="cfgASp"><span class="slider"></span></label></div></div>
-        <div class="setrow"><label>队列积压告警</label><div class="setbox"><span class="sub">任一类型排队 ≥</span><input type="number" id="cfgTbl" min="1"><span class="sub">推送</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
-        <div class="setrow"><label>500 命中阈值（今日条数）</label><input type="number" id="cfgT500" min="1"></div>
-        <div class="setrow"><label>测速异常阈值（总耗时毫秒）</label><input type="number" id="cfgTsp" min="1000"></div>
-        <div class="setrow"><label>测速目标（≤12 项；域名必填，备注/代理可选）</label>
+        <div class="setrow"><label>推送总开关<span class="why">关闭则全部静默</span></label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
+        <div class="setrow"><label>卡片按钮（链接≤6 个）<span class="why">「整理下一批」固定带令牌不在此配</span></label>
+          <div style="flex:1"><div id="clList"></div>
+          <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button></div></div></div>
+        <div class="setrow"><label>外网面板地址<span class="why">空=内网 192.168.1.22:8620</span></label><input type="text" id="cfgTrgBase" placeholder="https://etknjk.example.com" style="max-width:260px"></div>
+        <div class="setgroup">【告警】</div>
+        <div class="setrow"><label>TMDB HTTP 500 检测<span class="why">频率+异常才推送</span></label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
+        <div class="setrow"><label>队列积压告警<span class="why">任一类型排队 ≥ N 推送</span></label><div class="setbox"><input type="number" id="cfgTbl" min="1"><span class="sub">条</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>500 命中阈值<span class="why">今日条数</span></label><input type="number" id="cfgT500" min="1"></div>
+        <div class="setrow"><label>整理任务静止告警<span class="why">静止 ≥ N 分推送，重复间隔 M 分</span></label><div class="setbox"><input type="number" id="cfgTStall" min="1"><span class="sub">分 / 重复</span><input type="number" id="cfgRStall" min="5"><span class="sub">分</span><label class="switch"><input type="checkbox" id="cfgAStall"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>大文件宽限<span class="why">运行超1小时阈值放宽到30分钟</span></label><label class="switch"><input type="checkbox" id="cfgGrace"><span class="slider"></span></label></div>
+        <div class="setrow"><label>整理任务清空提醒<span class="why">汇总含/隐藏失败行</span></label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>一键整理入口<span class="why">清空提醒附「整理下一批」，令牌30分钟一次性</span></label><label class="switch"><input type="checkbox" id="cfgTrg"><span class="slider"></span></label></div>
+        <div class="setrow"><label>静止告警自动重启 etkn<span class="why">仅 restart；30分钟冷却+24小时≤2次；默认关</span></label><label class="switch"><input type="checkbox" id="cfgAutoRst"><span class="slider"></span></label></div>
+        <div class="setgroup">【测速】</div>
+        <div class="setrow"><label>定时测速<span class="why">异常才推送</span></label><div class="setbox"><select id="cfgISp"><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 60 分钟</option><option value="120">每 120 分钟</option></select><label class="switch"><input type="checkbox" id="cfgASp"><span class="slider"></span></label></div></div>
+        <div class="setrow"><label>测速异常阈值<span class="why">总耗时毫秒</span></label><input type="number" id="cfgTsp" min="1000"></div>
+        <div class="setrow"><label>测速目标<span class="why">≤12 项；域名必填，备注/代理可选</span></label>
           <div style="flex:1"><div id="stList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="stAdd()">＋新增测速目标</button>
           <span class="sub" style="align-self:center">列表为空=不测速不推送；代理留空=直连</span></div></div></div>
-        <div class="setrow"><label>整理任务静止告警</label><div class="setbox"><span class="sub">静止 ≥</span><input type="number" id="cfgTStall" min="1"><span class="sub">分钟推送，重复间隔</span><input type="number" id="cfgRStall" min="5"><span class="sub">分钟</span><label class="switch"><input type="checkbox" id="cfgAStall"><span class="slider"></span></label></div></div>
-        <div class="setrow"><label>大文件宽限（运行超1小时阈值放宽到30分钟）</label><label class="switch"><input type="checkbox" id="cfgGrace"><span class="slider"></span></label></div>
-        <div class="setrow"><label>整理任务清空提醒</label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
-        <div class="setrow"><label>一键整理入口（清空提醒附「整理下一批」按钮，令牌30分钟一次性）</label><label class="switch"><input type="checkbox" id="cfgTrg"><span class="slider"></span></label></div>
-        <div class="setrow"><label>外网面板地址（空=内网 192.168.1.22:8620）</label><input type="text" id="cfgTrgBase" placeholder="https://etknjk.example.com" style="max-width:260px"></div>
-        <div class="setrow"><label>卡片按钮（推送卡片链接，≤6 个；名称+URL，空/非法自动剔除）</label>
-          <div style="flex:1"><div id="clList"></div>
-          <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button>
-          <span class="sub" style="align-self:center">「整理下一批」固定带令牌，不在此配置</span></div></div></div>
-        <div class="setrow"><label>自动喂料（清空提醒后自动分批转移源目录→待整理目录，经 CD2 WebDAV 通道）</label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
-        <div class="setrow"><label>CD2 WebDAV 地址</label><input type="text" id="cfgCd2Url" style="max-width:340px" placeholder="http://192.168.1.22:19798/dav"></div>
-        <div class="setrow"><label>CD2 账号</label><input type="text" id="cfgCd2User" style="max-width:260px" placeholder="CloudDrive2 登录邮箱"></div>
-        <div class="setrow"><label>CD2 密码</label><input type="password" id="cfgCd2Pass" style="max-width:260px" placeholder="留空=不修改"></div>
-        <div class="setrow"><label>喂料源目录（CD2 路径）</label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
-        <div class="setrow"><label>喂料目标目录（CD2 路径）</label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
-        <div class="setrow"><label>每批文件夹上限（整夹转移，一次最多转 N 个剧夹）</label><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"></div>
-        <div class="setrow"><label>喂料转移后延迟秒数（隔 N 秒触发整理，0=立即）</label><input type="number" id="cfgFeedDelay" min="0" style="max-width:120px"></div>
-        <div class="setrow"><label>hosts 监控域名（每小时用 223.5.5.5 解析并与路由器 /etc/hosts 比对，不一致改行+重启 dnsmasq；解析失败只告警；留空=不监控）</label><input type="text" id="cfgHostsDomain" placeholder="example.com" style="max-width:260px"></div>
-        <div class="setrow"><label>路由器 /etc/hosts 巡检连接（公版配置：IP+端口+用户名+密码，全部本机保存；留空=巡检跳过不告警）</label></div>
-        <div class="setrow"><label>├ 软路由 IP</label><input type="text" id="cfgRtrIp" placeholder="192.168.x.1" style="max-width:180px"></div>
-        <div class="setrow"><label>├ SSH 端口</label><input type="number" id="cfgRtrPort" min="1" max="65535" placeholder="22" style="max-width:100px"></div>
-        <div class="setrow"><label>├ SSH 用户名</label><input type="text" id="cfgRtrUser" placeholder="root" style="max-width:180px"></div>
-        <div class="setrow"><label>└ SSH 密码</label><input type="password" id="cfgRtrPass" style="max-width:220px" placeholder="留空=不修改"></div>
-        <div class="setrow"><label>hosts 自动更新开关</label><label class="switch"><input type="checkbox" id="cfgHosts"><span class="slider"></span></label></div>
-        <div class="setrow"><label>静止告警自动重启 etkn（仅 restart；30分钟冷却+24小时≤2次；仅整理类；默认关）</label><label class="switch"><input type="checkbox" id="cfgAutoRst"><span class="slider"></span></label></div>
+        <div class="setgroup">【喂料】</div>
+        <div class="setrow"><label>自动喂料<span class="why">清空提醒后自动分批转移，经 CD2 WebDAV 通道</span></label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
+        <div class="setrow"><label>喂料源目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
+        <div class="setrow"><label>喂料目标目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
+        <div class="setrow"><label>每批上限<span class="why">剧夹与散文件按个数累加</span></label><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"></div>
+        <div class="setrow"><label>喂料转移后延迟秒数<span class="why">隔 N 秒触发整理，0=立即</span></label><input type="number" id="cfgFeedDelay" min="0" style="max-width:120px"></div>
+        <div class="setrow"><label>CD2 WebDAV 地址<span class="why">CloudDrive2 挂载通道</span></label><input type="text" id="cfgCd2Url" style="max-width:340px" placeholder="http://192.168.1.22:19798/dav"></div>
+        <div class="setrow"><label>CD2 账号 / 密码<span class="why">密码留空=不修改</span></label><div class="setbox"><input type="text" id="cfgCd2User" style="max-width:220px" placeholder="CloudDrive2 登录邮箱"><input type="password" id="cfgCd2Pass" style="max-width:200px" placeholder="留空=不修改"></div></div>
+        <div class="setgroup">【hosts】</div>
+        <div class="setrow"><label>监控域名<span class="why">留空=不监控；解析比对路由器 /etc/hosts，漂移改行+重启 dnsmasq</span></label><input type="text" id="cfgHostsDomain" placeholder="example.com" style="max-width:260px"></div>
+        <div class="setrow"><label>路由器连接<span class="why">公版配置本机保存；留空=巡检跳过不告警</span></label>
+          <div class="fourrow">
+            <div><label>软路由 IP</label><input type="text" id="cfgRtrIp" placeholder="192.168.x.1"></div>
+            <div><label>SSH 端口</label><input type="number" id="cfgRtrPort" min="1" max="65535" placeholder="22"></div>
+            <div><label>SSH 用户名</label><input type="text" id="cfgRtrUser" placeholder="root"></div>
+            <div><label>SSH 密码</label><input type="password" id="cfgRtrPass" placeholder="留空=不修改"></div>
+          </div></div>
+        <div class="setrow"><label>hosts 自动更新<span class="why">漂移时改行+重启 dnsmasq</span></label><label class="switch"><input type="checkbox" id="cfgHosts"><span class="slider"></span></label></div>
         <div class="ops"><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button></div>
         <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
       </div>
@@ -610,7 +615,7 @@ async function cfgLoadSpeed(){
   }catch(e){toast('读取测速历史失败','bad');}
 }
 /* ---- 主刷新 ---- */
-let _spNote={};                       // host→备注（测速历史表头显示用，v2.8.12）
+let _spNote={};                       // host→备注（测速历史表头显示用，v2.8.13）
 let lastOkTs=null;                    // 最近一次成功取数的真实时间
 async function refresh(){
   try{
@@ -673,8 +678,9 @@ async function refresh(){
       const btn=canRetry(x)
         ?`<button class="act" onclick="retryTask(${x.id},'${(x.title||'').replace(/'/g,'')}')">重试</button>`
         :`<span class="sub" style="font-size:11px">不支持</span>`;
+      const _err=[x.stage,x.err].filter(Boolean).join('：');
       tf.insertAdjacentHTML('beforeend',
-        `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td class="ttl" title="${(x.title||'').replace(/"/g,'&quot;')}">${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td class="num" style="text-align:right">${btn}</td></tr>`)});
+        `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td class="ttl" title="${((_err?_err+' ⏎ ':'')+(x.title||'')).replace(/"/g,'&quot;')}">${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td class="num" style="text-align:right">${btn}</td></tr>`)});
     const d=s.diag||{};
     document.getElementById('kDiag').innerHTML=Object.keys(d).length?
       `<div class="row"><span>全局运行</span><span class="sub">队列${d.queued_runs||0} · 运行${d.running_runs||0}</span></div>
