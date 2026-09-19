@@ -238,27 +238,23 @@ def feishu_push(text: str, buttons: list = None, title: str = '', tcolor: str = 
         return False, '未配置 Webhook URL'
     ts_line = _now().strftime('%Y-%m-%d %H:%M:%S')
     if buttons:
-        # 卡片：header 标题 + markdown 正文（原文全量）+ 时间戳小字 + 按钮行
+        # 卡片：header 标题 + markdown 正文（原文全量）+ 链接行 + 时间戳小字
         first, _, rest = text.partition('\n')
         body = rest.strip() or first
         if not title:
             title = first
+        # v2.8.9：按钮行退役（webhook 通道按钮只能竖排，9-19 四结构实证），
+        # buttons 转为正文最底部一行 markdown 链接（与正文空一行独立，紧凑不占高度）。
+        # 链接来源=buttons 参数（_card_buttons() 从设置 card_links 生成，令牌按钮首位），
+        # 功能不丢：令牌一键整理也变成可点链接。
+        link_line = ' · '.join(
+            f"[{b.get('text', '打开')}]({b['url']})" for b in buttons if b.get('url'))
+        if link_line:
+            body = f"{body}\n\n{link_line}"
         elements = [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': body}}]
         # v2.8.2⑤：正文最末尾小字时间戳（note 元素，灰色小号）
         elements.append({'tag': 'note', 'elements': [
             {'tag': 'plain_text', 'content': f'推送时间 {ts_line}'}]})
-        # v2.8.7⑧ 按钮横排紧凑；v2.8.8② 一行最多 4 个（stretch=权重铺满，4 列均分；
-        # >4 个自动换行下一行）。按钮宽度随文字、horizontal_spacing 小间距
-        btns = [{'tag': 'button', 'text': {'tag': 'plain_text', 'content': b.get('text', '打开')},
-                 'type': b.get('type', 'default'), 'url': b['url']} for b in buttons]
-        if len(btns) == 1:
-            elements.append({'tag': 'action', 'actions': btns})
-        else:
-            cols = [{'tag': 'column', 'elements': [bt], 'flex_weight': 1,
-                     'vertical_align': 'top'} for bt in btns]
-            elements.append({'tag': 'column_set', 'flex_mode': 'stretch',
-                             'background_style': 'default', 'columns': cols,
-                             'horizontal_spacing': '8px'})
         payload = {'msg_type': 'interactive', 'card': {
             'header': {'template': tcolor, 'title': {'tag': 'plain_text', 'content': title}},
             'elements': elements}}
@@ -1733,7 +1729,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.8', 'readonly': False,
+                'version': 'v2.8.9', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1987,7 +1983,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.8，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.9，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
