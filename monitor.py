@@ -94,7 +94,7 @@ SETTINGS_DEFAULTS = {
     'feed_enabled': False,         # 自动喂料开关（默认关）
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
-    'feed_batch_limit': 500,       # 每批上限；不拆剧（v2.8 WebDAV 通道按夹计，不做文件数精算）
+    'feed_batch_limit': 500,       # 每批真实媒体项上限（v2.8.4：按剧夹第一层子项数累加，不拆剧）
     # ---- v2.8 喂料通道：CloudDrive2 WebDAV（不碰 fuse，凭据存设置不硬编码） ----
     'cd2_dav_url': 'http://192.168.1.22:19798/dav',
     'cd2_user': '',
@@ -306,6 +306,28 @@ def _cd2_list_dirs(dav_dir: str) -> list:
     return out
 
 
+def _cd2_count_items(dav_dir: str, name: str) -> int:
+    """v2.8.4：统计单个剧夹的真实媒体项数（PROPFIND Depth=1 列子项一次，不递归不烧 115 配额）。
+    口径=该夹第一层的非目录条目数（视频/字幕等文件）+直属子夹数（季/电影文件夹都算待整理项）。
+    列取失败（超时/非 207）返回 0——喂料分批按 0 处理（不独占），移动时该夹照常整夹转。"""
+    s, b = _cd2_dav('PROPFIND', dav_dir.rstrip('/') + '/' + name, depth='1')
+    if s != 207:
+        return 0
+    try:
+        root = ET.fromstring(b)
+    except ET.ParseError:
+        return 0
+    base = urllib.parse.unquote(dav_dir.rstrip('/').rsplit('/', 1)[-1])
+    n = 0
+    for resp in root.iter(_NS_DAV + 'response'):
+        href = resp.findtext(_NS_DAV + 'href') or ''
+        child = urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1])
+        if not child or child == name or child == base:
+            continue                      # 排除剧夹自身条目
+        n += 1                            # 文件与子夹都计为待整理项
+    return n
+
+
 def _cd2_move(src_dir: str, dst_dir: str, name: str) -> tuple:
     """WebDAV MOVE 整夹移动（CD2 同挂载=115 秒级移动）。返回 (ok, err)。"""
     src = src_dir.rstrip('/') + '/' + name
@@ -330,11 +352,11 @@ _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时
 
 
 def _feed_scan_dirs(src: str) -> list:
-    """扫描源目录（v2.8：经 CD2 WebDAV，不碰 fuse）：[(夹名, 0)]，保持旧→新排序由 CD2 返回序决定。
-
-    ②只列一层（Depth=1）零递归——不数文件数（省配额；计数口径由 WebDAV 列目录一次完成）。
-    返回 None=源目录不可达。10 分钟缓存沿用（v2.7.2④）。
-    """
+    """扫描源目录（v2.8.4：经 CD2 WebDAV，不碰 fuse）：[(夹名, 真实媒体项数)]，
+    保持旧→新排序由 CD2 返回序决定。
+    v2.8.4：对每个剧夹调 _cd2_count_items 统计第一层子项数（走 WebDAV 列目录，
+    不烧 115 配额）——上限语义=每批真实媒体项数（不再是夹数）。
+    单夹计数失败（返回 0）不影响其他夹。10 分钟缓存沿用（v2.7.2④）。"""
     now = time.time()
     if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
             and now - _feed_scan_cache['ts'] < 600):
@@ -342,16 +364,17 @@ def _feed_scan_dirs(src: str) -> list:
     dirs = _cd2_list_dirs(src)
     if dirs is None:
         return None
-    out = [(n, 1) for n in dirs]      # v2.8：不递归数文件（省配额），一剧夹计 1 项；
-    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})   # 上限语义=每批最多 N 夹
+    out = [(n, _cd2_count_items(src, n)) for n in dirs]
+    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})
     return out
 
 
 def _feed_plan(dirs: list, limit: int) -> list:
-    """分批规则（纯函数，回归用）：
-    正常：按顺序累加，整夹文件数 ≤ 上限就继续；加下一个会超 → 停（不拆剧）。
-    单剧超限：某夹文件数本身 > 上限 → 本批只转这一个（整批仅它，虽超不拆）。
-    返回 [(名称, 文件数)]；空列表=源目录无剧。"""
+    """分批规则（v2.8.4 口径=真实媒体项数；纯函数，回归用）：
+    正常：按顺序贪心累加真实项数，≤上限就继续；加下一个会超 → 停（不拆剧）。
+    单剧超限：某夹项数本身 > 上限 → 本批只转这一个（独占本批，虽超不拆）；
+    若已有累积 → 先出本批，它留给下一批独占。
+    返回 [(名称, 项数)]；空列表=源目录无剧。"""
     picked, total = [], 0
     for name, cnt in dirs:
         if cnt > limit:                # 单剧超限：本批还没选 → 独占本批（虽超不拆）；
@@ -1652,7 +1675,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.3', 'readonly': False,
+                'version': 'v2.8.4', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
