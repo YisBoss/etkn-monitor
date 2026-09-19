@@ -1923,7 +1923,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.4，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
