@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""v2.8.3② 部署收尾自动发版：解析部署脚本传入的版本号→写摘要→git commit/push→推 Release(Latest)。
+供 deploy 脚本末尾调用：python3 auto_release.py <版本号，如 v2.8.3>
+摘要=git 上一发版 tag 到 HEAD 的提交说明汇总（写清改动）。"""
+import subprocess, sys, os
+
+GIT_DIR = '/vol1/@appdata/trim.hermes/workspace/etkn-monitor'
+SCRIPT = '/vol1/@appdata/trim.hermes/workspace/etkn-monitor/scripts/release_upload.py'
+
+
+def git(*args):
+    return subprocess.run(['git', '-C', GIT_DIR] + list(args),
+                          capture_output=True, text=True).stdout.strip()
+
+
+def main():
+    tag = sys.argv[1] if len(sys.argv) > 1 else ''
+    if not tag.startswith('v'):
+        print('用法: auto_release.py v2.8.3')
+        return 1
+    # 上一个 tag（语义化排序）
+    tags = sorted([t for t in git('tag', '--list').splitlines() if t.startswith('v')],
+                  key=lambda t: [int(x) for x in t.lstrip('v').split('.')])
+    prev = tags[-1] if (tags and tags[-1] != tag) else None
+    rng = f'{prev}..HEAD' if prev else 'HEAD~5..HEAD'
+    log = git('log', '--format=- %s', rng)
+    if not log:
+        log = '- 见提交记录'
+    body = f'{tag} 自动发版\n\n**改动摘要**（自 {prev or "起点"} 以来的提交）：\n{log}\n'
+    body += '\n部署方式：docker compose restart etkn-monitor（NAS 本地部署，本仓库为源码存档与版本记录）。\n'
+    body_file = f'/tmp/release_{tag}.md'
+    open(body_file, 'w', encoding='utf-8').write(body)
+    # 确保 git 已提交干净
+    dirty = git('status', '--porcelain')
+    if dirty:
+        subprocess.run(['git', '-C', GIT_DIR, 'add', '-A'], check=True)
+        subprocess.run(['git', '-C', GIT_DIR, 'commit', '-m', f'{tag}: 自动发版收尾'],
+                       capture_output=True)
+    # 推 main
+    r = subprocess.run(['git', '-C', GIT_DIR, 'push', 'origin', 'main'],
+                       capture_output=True, text=True, timeout=120)
+    print('git push:', (r.stdout or r.stderr).strip()[-120:])
+    # 推 Release
+    r = subprocess.run(['python3', SCRIPT, tag, tag, body_file, '--latest'],
+                       capture_output=True, text=True, timeout=120)
+    print(r.stdout.strip())
+    return r.returncode
+
+
+if __name__ == '__main__':
+    sys.exit(main())

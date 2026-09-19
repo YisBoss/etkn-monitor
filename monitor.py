@@ -614,11 +614,13 @@ _hosts_state = {'last_run': 0.0, 'timer': None}
 
 def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
     """用指定 DNS 服务器解析 A 记录（UDP 53 直连指定服务器，绕过本机 DNS/劫持）。
-    返回首个 A 记录字符串；失败返回 ''。socket/struct 用模块级导入（可 monkeypatch 测试）。"""
+    返回首个 A 记录字符串；失败返回 ''。socket/struct 用模块级导入（可 monkeypatch 测试）。
+    v2.8.3：修复 qname 构造 bug——旧写法 bytes([len(x)…])+b''.join(标签) 会把所有
+    长度字节集中放在最前（06 08 03 shared'example'xyz=畸形报文，服务器不回→超时），
+    必须逐段交错：\\x06shared\\x08example\\x03xyz\\x00。10:42 hosts_err 每小时误报实证。"""
     import struct as _s
-    q = b''.join([b'\x12\x34', b'\x01\x00', b'\x00\x01\x00\x00\x00\x00\x00\x00',
-                  bytes([len(x) for x in name.split('.')]), b''.join(
-                      x.encode() for x in name.split('.')), b'\x00', b'\x00\x01\x00\x01'])
+    qname = b''.join(bytes([len(p)]) + p.encode() for p in name.split('.')) + b'\x00'
+    q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00' + qname + b'\x00\x01\x00\x01'
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(8)
@@ -702,9 +704,11 @@ def _hosts_check_once() -> None:
     out = _ssh_router(script, timeout=45)
     ok = f'{ip} {_HOSTS_DOMAIN}' in out
     if ok:
-        _alert_push('hosts', f'{_HOSTS_DOMAIN} IP 已更新：{old_ip} → {ip}', [
-            '223.5.5.5 公网解析与 hosts 不一致，已按公网真相更新并重启 dnsmasq',
-            '原行已备份 /etc/hosts.bak-monitor'], tcolor='green')
+        # v2.8.3①：只在 hosts 真改了才推送，卡片写清具体改动（旧IP → 新IP）
+        _alert_push('hosts', f'{_HOSTS_DOMAIN}：{old_ip} → {ip}，hosts 已更新', [
+            f'223.5.5.5 公网解析与 hosts 绑定不一致，已将该行改为 {ip} 并重启 dnsmasq',
+            '原行已备份 /etc/hosts.bak-monitor'],
+            buttons=_card_buttons(), tcolor='green')
     else:
         _alert_push('hosts_err', 'hosts 更新失败（未生效）', [
             f'期望改到 {ip}，路由器回执异常', f'回执：{(out or "(空)")[:100]}'])
@@ -1648,7 +1652,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.2', 'readonly': False,
+                'version': 'v2.8.3', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
