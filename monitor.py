@@ -94,7 +94,7 @@ SETTINGS_DEFAULTS = {
     'feed_enabled': False,         # 自动喂料开关（默认关）
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
-    'feed_batch_limit': 500,       # 每批真实媒体项上限（v2.8.4：按剧夹第一层子项数累加，不拆剧）
+    'feed_batch_limit': 500,       # 每批文件夹上限（v2.8.6：一个剧夹=1 项，整夹转移）
     # ---- v2.8 喂料通道：CloudDrive2 WebDAV（不碰 fuse，凭据存设置不硬编码） ----
     'cd2_dav_url': 'http://192.168.1.22:19798/dav',
     'cd2_user': '',
@@ -306,28 +306,6 @@ def _cd2_list_dirs(dav_dir: str) -> list:
     return out
 
 
-def _cd2_count_items(dav_dir: str, name: str) -> int:
-    """v2.8.4：统计单个剧夹的真实媒体项数（PROPFIND Depth=1 列子项一次，不递归不烧 115 配额）。
-    口径=该夹第一层的非目录条目数（视频/字幕等文件）+直属子夹数（季/电影文件夹都算待整理项）。
-    列取失败（超时/非 207）返回 0——喂料分批按 0 处理（不独占），移动时该夹照常整夹转。"""
-    s, b = _cd2_dav('PROPFIND', dav_dir.rstrip('/') + '/' + name, depth='1')
-    if s != 207:
-        return 0
-    try:
-        root = ET.fromstring(b)
-    except ET.ParseError:
-        return 0
-    base = urllib.parse.unquote(dav_dir.rstrip('/').rsplit('/', 1)[-1])
-    n = 0
-    for resp in root.iter(_NS_DAV + 'response'):
-        href = resp.findtext(_NS_DAV + 'href') or ''
-        child = urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1])
-        if not child or child == name or child == base:
-            continue                      # 排除剧夹自身条目
-        n += 1                            # 文件与子夹都计为待整理项
-    return n
-
-
 def _cd2_move(src_dir: str, dst_dir: str, name: str) -> tuple:
     """WebDAV MOVE 整夹移动（CD2 同挂载=115 秒级移动）。返回 (ok, err)。"""
     src = src_dir.rstrip('/') + '/' + name
@@ -347,21 +325,19 @@ def _cd2_exists(dst_dir: str, name: str) -> bool:
 # ================= v2.7 自动喂料（清空提醒后自动分批转移） =================
 _feed_lock = threading.Lock()          # 忙锁：防并发喂料
 _feed_state = {'last_run': 0.0, 'moving': False}
-_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # v2.8.5：全量树缓存（24 小时）
+_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # 短缓存（防抖动，10 分钟）
 _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时器
 
-FEED_TREE_TTL = 86400                  # v2.8.5：全量树缓存 24h——一天只数一次（每次喂料
-                                       # 重数 1063 夹=每次 1000+ 次 115 调用会打满配额）
+FEED_TREE_TTL = 600                    # v2.8.6：回到短缓存（v2.8.4/v2.8.5 逐夹计数已撤销——
+                                       # 每次喂料只打 1 次列目录请求，无需 24h 树缓存）
 
 
 def _feed_scan_dirs(src: str) -> list:
-    """扫描源目录（v2.8.5：经 CD2 WebDAV，不碰 fuse）：[(夹名, 真实媒体项数)]，
+    """扫描源目录（v2.8.6：经 CD2 WebDAV，不碰 fuse）：[夹名]（一个剧夹=1 项），
     保持旧→新排序由 CD2 返回序决定。
-    v2.8.5：全量树缓存 TTL 10min→24h（一天只数一次）——v2.8.4 逐夹 Depth=1 数数
-    在 1063 夹规模=每次喂料 1000+ 次 115 调用（CD2 背后逐夹拉 115）打满配额。
-    方案 2（Depth=infinity 一次拿全量树）已实测被 CD2 拒绝（403 propfind-finite-depth，
-    REPORT=501），CD2 只允许有限深度，故长缓存是唯一解。
-    转移成功后不再全清缓存，改外科手术式剔除已转夹（_feed_cache_drop）。"""
+    v2.8.6：撤销 v2.8.4/v2.8.5 的逐夹 Depth=1 数真实项数与 24h 树缓存——那会让
+    每次喂料打 1000+ 次请求（1063 夹规模打满 115 配额）。现在只列第一层一次，
+    每次喂料只打 1 次列目录请求；短缓存 10min 保留（防抖动）。"""
     now = time.time()
     if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
             and now - _feed_scan_cache['ts'] < FEED_TREE_TTL):
@@ -369,46 +345,32 @@ def _feed_scan_dirs(src: str) -> list:
     dirs = _cd2_list_dirs(src)
     if dirs is None:
         return None
-    out = [(n, _cd2_count_items(src, n)) for n in dirs]
-    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})
-    return out
+    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': dirs})
+    return dirs
 
 
 def _feed_cache_drop(moved_names: list) -> None:
-    """v2.8.5：转移成功后从缓存里剔除已转走的夹（外科手术，不重扫不烧配额）。
-    背景：v2.7.3① 曾全清缓存防同名误报——24h 缓存下全清=每次喂料都全量重数（打回原形）。
-    剔除已转夹即可达成同目的：源目录里它们已不在，留在缓存里反而会让下次喂料
-    重试已转移的夹（幂等靠 _cd2_exists 挡，但会白跑）。"""
+    """转移成功后从缓存里剔除已转走的夹（防「目标同名误报」：已转夹不再出现在计划里）。
+    v2.8.6：剔除逻辑保留（配合 10min 短缓存仍有意义——同窗口二次喂料不再重试已转夹）。"""
     if _feed_scan_cache['dirs'] is None:
         return
     gone = set(moved_names)
-    _feed_scan_cache['dirs'] = [(n, c) for n, c in _feed_scan_cache['dirs'] if n not in gone]
+    _feed_scan_cache['dirs'] = [n for n in _feed_scan_cache['dirs'] if n not in gone]
 
 
 def _feed_plan(dirs: list, limit: int) -> list:
-    """分批规则（v2.8.4 口径=真实媒体项数；纯函数，回归用）：
-    正常：按顺序贪心累加真实项数，≤上限就继续；加下一个会超 → 停（不拆剧）。
-    单剧超限：某夹项数本身 > 上限 → 本批只转这一个（独占本批，虽超不拆）；
-    若已有累积 → 先出本批，它留给下一批独占。
-    返回 [(名称, 项数)]；空列表=源目录无剧。"""
-    picked, total = [], 0
-    for name, cnt in dirs:
-        if cnt > limit:                # 单剧超限：本批还没选 → 独占本批（虽超不拆）；
-            if not picked:
-                return [(name, cnt)]   # 已有累积 → 先出本批，它留给下一批独占
-            break
-        if total + cnt > limit:        # 加上会超上限 → 停（不拆剧）
-            break
-        picked.append((name, cnt))
-        total += cnt
-    return picked
+    """分批规则（v2.8.6 口径=文件夹数；纯函数，回归用）：
+    正常：按顺序贪心累加夹数，≤上限就继续；加下一个会超 → 停（不拆剧）。
+    返回 [夹名]；空列表=源目录无剧。（夹数口径下不存在「单剧超限」——1 ≤ 上限恒成立，
+    上限经 _feed_run 里 max(1, ...) 钳制后每个剧夹天然可整批独占。）"""
+    return list(dirs[:max(1, limit)])
 
 
 def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
     """整夹剪切 src→dst（v2.8：经 CD2 WebDAV MOVE，同挂载=115 秒级移动）；任一失败即停并回报。
     返回 (成功夹名列表, 失败描述或 '')。只单向 src→dst，禁反向/删除；目标同名不覆盖。"""
     ok_names, err = [], ''
-    for name, _cnt in picks:
+    for name in picks:
         if _cd2_exists(dst, name):   # 目标同名已存在：不覆盖（防数据破坏）
             err = f'{name[:40]}：目标目录已存在同名文件夹'
             break
@@ -520,7 +482,7 @@ def _feed_run() -> None:
     try:
         src = SETTINGS['feed_src_dir'].rstrip('/')
         dst = SETTINGS['feed_dst_dir'].rstrip('/')
-        limit = max(1, int(SETTINGS['feed_batch_limit'] or 500))
+        limit = max(1, int(SETTINGS['feed_batch_limit'] or 500))   # v2.8.6：每批文件夹数
         dirs = _feed_scan_dirs(src)
         if dirs is None:
             _alert_push('feed_err', '自动喂料失败', [
@@ -534,25 +496,23 @@ def _feed_run() -> None:
         picks = _feed_plan(dirs, limit)
         if not picks:
             return
-        total_files = sum(c for _n, c in picks)
+        total_files = len(picks)       # v2.8.6：口径=文件夹数（一个剧夹=1 项）
         moved, err = _feed_move_batch(src, dst, picks)
         if moved:
-            # v2.8.5：转移成功后从缓存剔除已转夹（外科手术）——v2.7.3① 的全清策略在
-            # 24h 缓存下=每次喂料全量重数 1000+ 夹（烧 115 配额），改 surgical drop；
-            # 防「目标同名误报」目的不变：已转夹不再出现在计划里
+            # 转移成功后从缓存剔除已转夹（防同名误报目的不变：已转夹不再出现在计划里）
             _feed_cache_drop([n for n in moved])
-        names_brief = '、'.join(n[:16] for n, _c in picks[:4]) + ('…' if len(picks) > 4 else '')
+        names_brief = '、'.join(n[:16] for n in picks[:4]) + ('…' if len(picks) > 4 else '')
         if err or not moved:
             _alert_push('feed_err', '自动喂料转移失败', [
-                f'本批计划：{len(picks)} 夹 / {total_files} 文件（{names_brief}）',
+                f'本批计划：{total_files} 个剧夹（{names_brief}）',
                 f'已完成 {len(moved)} 夹后中止：{err[:80]}',
                 '已转移部分保留在目标目录，可在面板手动触发整理'])
             return
         # 转移全部成功 → 触发原生「手动整理网盘文件」（与面板/卡片按钮同源载荷）
-        # v2.7.2①：延迟 90 秒触发——扫描+转移刚消耗大量 115 接口调用，
+        # v2.7.2①：延迟 90 秒触发——转移刚消耗 115 接口调用，
         # 立即触发整理会撞「已达到当前访问上限」（首跑 #21354 实证），留配额恢复窗口。
         _alert_push('feed', '自动喂料完成', [
-            f'已转移 {len(moved)} 夹 / {total_files} 文件（{names_brief}）',
+            f'已转移 {total_files} 个剧夹（{names_brief}）',
             '90 秒后自动触发「手动整理网盘文件」'],
             buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
@@ -1692,7 +1652,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.5', 'readonly': False,
+                'version': 'v2.8.6', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1940,7 +1900,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.5，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.6，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
