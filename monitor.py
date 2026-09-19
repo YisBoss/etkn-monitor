@@ -1156,9 +1156,9 @@ def check_organize_running(now=None):
                 lines.append(f'本批耗时：{tmin} 分钟'
                              f'（{_fmt_hhmm(batch["started_at"])} → {_fmt_hhmm(now)}）')
             lines.append('当前队列：'
-                         f'刮削 {qr}/{qq} · 网盘 {nr}/{nq2}')
-            lines.append(f'　　　'
-                         f'共享 {sr}/{sq} · 追剧 {wr}/{wq}')
+                         f'刮削 运行{qr}/排队{qq} · 网盘 运行{nr}/排队{nq2}')
+            lines.append(f'　　　　　'
+                         f'共享 运行{sr}/排队{sq} · 追剧 运行{wr}/排队{wq}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
                 # v2.8.13：失败明细汇总进卡（≤5 条逐行「标题｜阶段｜原因」，超出折叠计数）
