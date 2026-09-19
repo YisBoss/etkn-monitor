@@ -55,16 +55,47 @@ FAST_INTERVAL = float(os.environ.get('FAST_INTERVAL', '2'))     # 快速活跃�
 TZ = timezone(timedelta(hours=8))          # 展示时区固定北京
 PAGE = 100                                  # workflows 翻页大小
 
-SPEEDTEST_TARGETS = [                       # 手动测速目标（默认无代理，自然走当前路由策略）
-    ('TMDB 图片', 'image.tmdb.org', None),
-    ('TMDB 接口', 'api.themoviedb.org', None),
-    ('TMDB 自建', 'tmdb.relay.example.com', '192.168.1.1:7890'),  # 模拟 ETKN 业务真实路径（经代理）
-    ('Telegram', 'api.telegram.org', None),
-    ('共享中心', 'shared.example.com', None),
-]
-SPEEDTEST_VIA_NOTE = {                      # 面板口径备注：经代理测量的域名
-    'tmdb.relay.example.com': '经代理',
-}
+# v2.8.7 测速目标全面配置化：代码零默认域名（全新安装=空列表，用户在设置页自增）。
+# 用户目标持久化在 settings.json 的 speed_targets（部署时从旧常量迁移，不丢项）。
+SPEEDTEST_VIA_NOTE: dict = {}               # （v2.8.7 退役）面板口径备注改为 per-target proxy 字段
+
+
+def _norm_speed_targets(raw) -> list:
+    """清洗用户配置的测速目标列表：{host:域名或URL, note:可选备注, proxy:可选代理}。
+    host 支持裸域名或 http(s) URL（剥协议取域名）；备注≤20 字；proxy 仅接受 host:port；
+    host 重复去重；最多 12 项。非法项剔除（不静默整表拒存）。"""
+    out, seen = [], set()
+    if not isinstance(raw, list):
+        return out
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        h = str(it.get('host') or '').strip()
+        if not h:
+            continue
+        m = re.match(r'^(?:https?://)?([^/:?#]+)', h, re.I)
+        if not m:
+            continue
+        h = m.group(1).strip('.').lower()
+        # host 必须是合法域名形态（字母/数字/点/连字符，带至少一个点）——空格等非法输入剔除
+        if not h or not re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+', h):
+            continue
+        if h in seen:
+            continue
+        seen.add(h)
+        note = str(it.get('note') or '').strip()[:20]
+        px = str(it.get('proxy') or '').strip()
+        if px and not re.fullmatch(r'[A-Za-z0-9._-]+:\d{1,5}', px):
+            px = ''
+        out.append({'host': h, 'note': note, 'proxy': px or None})
+        if len(out) >= 12:
+            break
+    return out
+
+
+def _speed_targets() -> list:
+    """当前测速目标（settings.speed_targets），空=无目标（不测速不推送）。"""
+    return _norm_speed_targets(SETTINGS.get('speed_targets'))
 
 # ==================== V2.5 设置 / 飞书推送 / 告警引擎 ====================
 # 设置持久化到本地 JSON；容器内 /app 只读挂载时按顺位降级：
@@ -101,6 +132,8 @@ SETTINGS_DEFAULTS = {
     'cd2_pass': '',
     # ---- v2.8 hosts 自动更新（shared 域名漂移自愈） ----
     'hosts_enabled': False,        # hosts 自动巡检开关（默认关）
+    # ---- v2.8.7 测速目标配置化：默认空列表（零预设域名），设置页编辑器增删改 ----
+    'speed_targets': [],           # [{'host':'域名','note':'备注','proxy':'host:port'|None}]
     # ---- v2.7 静止告警自动处置（只 restart，禁重建） ----
     'auto_restart_enabled': False, # 自动重启开关（默认关）
     # ---- v2.7 卡片按钮可配置（六）：[{'text','url'}]，空/非法剔除，≤6 个 ----
@@ -168,6 +201,8 @@ def settings_load():
             SETTINGS[k] = SETTINGS_DEFAULTS[k]
     cl = _norm_card_links(SETTINGS.get('card_links'))   # v2.7（六）：脏数据兜底
     SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
+    # v2.8.7 测速目标：载入即清洗（空列表合法=用户还没配；脏数据剔除不整表拒收）
+    SETTINGS['speed_targets'] = _norm_speed_targets(SETTINGS.get('speed_targets'))
 
 
 def settings_save():
@@ -208,9 +243,18 @@ def feishu_push(text: str, buttons: list = None, title: str = '', tcolor: str = 
         # v2.8.2⑤：正文最末尾小字时间戳（note 元素，灰色小号）
         elements.append({'tag': 'note', 'elements': [
             {'tag': 'plain_text', 'content': f'推送时间 {ts_line}'}]})
-        elements.append({'tag': 'action', 'actions': [
-            {'tag': 'button', 'text': {'tag': 'plain_text', 'content': b.get('text', '打开')},
-             'type': b.get('type', 'default'), 'url': b['url']} for b in buttons]})
+        # v2.8.7⑧ 按钮横排紧凑：column_set 两列布局，窄端自动下移换行，
+        # 按钮宽度随文字自适应（不拉满整行）；flex_weight 均分+column_margin 小间距
+        btns = [{'tag': 'button', 'text': {'tag': 'plain_text', 'content': b.get('text', '打开')},
+                 'type': b.get('type', 'default'), 'url': b['url']} for b in buttons]
+        if len(btns) == 1:
+            elements.append({'tag': 'action', 'actions': btns})
+        else:
+            cols = [{'tag': 'column', 'elements': [bt], 'flex_weight': 1,
+                     'vertical_align': 'top'} for bt in btns]
+            elements.append({'tag': 'column_set', 'flex_mode': 'bisect',
+                             'background_style': 'default', 'columns': cols,
+                             'horizontal_spacing': '8px'})
         payload = {'msg_type': 'interactive', 'card': {
             'header': {'template': tcolor, 'title': {'tag': 'plain_text', 'content': title}},
             'elements': elements}}
@@ -238,17 +282,21 @@ _alm = {'t500_fired': False, 't500_day': '', 'speed_fired': {}, 'backlog_fired':
         'next_500': 0.0, 'next_speed': 0.0}
 
 
-def _alert_text(kind_line: str, detail_lines: list) -> str:
-    return ('⚠️ ETKN 告警 · ' + kind_line + '\n时间 ' + _now().strftime('%m-%d %H:%M') +
-            '\n' + '\n'.join(detail_lines))
+def _alert_text(kind_line: str, detail_lines: list, icon: str = '⚠️') -> str:
+    """v2.8.7：图标参数化（默认 ⚠️ 兼容旧调用；成功通知传 ✅/ℹ️）。
+    v2.8.7⑥：正文「时间」行删除——卡片底部 note 已有统一「推送时间」，正文再报一次重复。"""
+    return (icon + ' ETKN 告警 · ' + kind_line + '\n' + '\n'.join(detail_lines))
 
 
 def _alert_push(kind: str, kind_line: str, detail_lines: list, buttons: list = None,
                 tcolor: str = 'yellow'):
-    """v2.6 卡片化告警推送：文本口径不变，加标题/按钮。"""
-    text = _alert_text(kind_line, detail_lines)
+    """v2.6 卡片化告警推送：文本口径不变，加标题/按钮。
+    v2.8.7：标题图标随卡片颜色走——绿=✅成功通知、黄=⚠️告警、蓝=ℹ️信息；
+    文本首行同步（推送史/纯文本通道口径一致）。失败/限流仍黄三角，成功才绿对勾。"""
+    icon = {'green': '✅', 'blue': 'ℹ️'}.get(tcolor, '⚠️')
+    text = _alert_text(kind_line, detail_lines, icon=icon)
     if buttons:
-        ok, err = feishu_push(text, buttons=buttons, title='⚠️ ' + kind_line, tcolor=tcolor)
+        ok, err = feishu_push(text, buttons=buttons, title=f'{icon} ' + kind_line, tcolor=tcolor)
     else:
         ok, err = feishu_push(text)
     record_push(kind, text, ok, err)
@@ -347,6 +395,14 @@ def _feed_scan_dirs(src: str) -> list:
         return None
     _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': dirs})
     return dirs
+
+
+def _clean_dir_name(name: str) -> str:
+    """v2.8.7：剥掉夹名尾部的刮削后缀 {tmdb-xxx}/{tmd-xxx} 及半截花括号残渣。
+    源目录夹名形如「小美人鱼2：重返大海 (2000) {tmdb-693134}」，推送里只需可读主名。"""
+    out = re.sub(r'\s*\{[^{}]*\}\s*$', '', name or '').strip()
+    out = re.sub(r'\s*\{[^{}]*$', '', out).strip()   # 已被截断的半截后缀（如「{tmd…」）
+    return out or (name or '')
 
 
 def _feed_cache_drop(moved_names: list) -> None:
@@ -501,7 +557,10 @@ def _feed_run() -> None:
         if moved:
             # 转移成功后从缓存剔除已转夹（防同名误报目的不变：已转夹不再出现在计划里）
             _feed_cache_drop([n for n in moved])
-        names_brief = '、'.join(n[:16] for n in picks[:4]) + ('…' if len(picks) > 4 else '')
+        # v2.8.7：夹名先剥 {tmdb-xxx}/{tmd…} 刮削后缀再截断——旧写法直接切 16 字
+        # 会把「圣诞雪人 (1998) {tmd…」这种半截花括号推进卡片（用户报「{tmd 乱码」根因）
+        names_brief = '、'.join(_clean_dir_name(n)[:20] for n in picks[:4]) + \
+            ('…' if len(picks) > 4 else '')
         if err or not moved:
             _alert_push('feed_err', '自动喂料转移失败', [
                 f'本批计划：{total_files} 个剧夹（{names_brief}）',
@@ -788,14 +847,21 @@ def check_500():
 
 
 def run_speed_round(alert: bool = True):
-    """一轮测速：写历史；shared 域不参与自动告警（手动测速保留）。"""
-    results = [speedtest_one(h, proxy=px) for _, h, px in SPEEDTEST_TARGETS]
+    """一轮测速：写历史；目标=settings.speed_targets（v2.8.7 配置化）。
+    列表为空=不测速不写历史不推送（面板显示「未配置测速目标」）。"""
+    targets = _speed_targets()
+    if not targets:
+        return []
+    results = []
+    for t in targets:
+        r = speedtest_one(t['host'], proxy=t['proxy'])
+        if t.get('note'):
+            r['note'] = t['note']
+        results.append(r)
     _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
     if alert and SETTINGS['push_enabled'] and SETTINGS['alert_speed_enabled']:
         thr = SETTINGS['speed_threshold_ms']
         for r in results:
-            if r['host'] == 'shared.example.com':
-                continue
             bad = (not r['ok']) or (r['total_ms'] is not None and r['total_ms'] > thr)
             host = r['host']
             if bad and not _alm['speed_fired'].get(host):
@@ -1485,7 +1551,8 @@ def poll_once():
     today_prefix = _today_prefix()
     snap = {'ts': _now().isoformat(timespec='seconds'), 'healthy': False, 'diag': {},
             'active': {'tasks': 0, 'media': 0, 'by_kind': {}}, 'done': {}, 'records': {},
-            'eta': {}, 'failed_today': []}
+            'eta': {}, 'failed_today': [],
+            'backlog_threshold': int(SETTINGS['backlog_threshold'])}  # v2.8.7 横条与告警同源
     s, b = api_get('/api/health')
     snap['healthy'] = (s == 200)
     s, b = api_get('/api/diagnostics/summary')
@@ -1652,7 +1719,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.6', 'readonly': False,
+                'version': 'v2.8.7', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1763,6 +1830,8 @@ class Handler(BaseHTTPRequestHandler):
         if 'card_links' in b:               # v2.7（六）：卡片按钮列表，空/非法剔除
             cl = _norm_card_links(b['card_links'])
             SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
+        if 'speed_targets' in b:            # v2.8.7 测速目标：清洗落盘（空列表合法=清空全部）
+            SETTINGS['speed_targets'] = _norm_speed_targets(b['speed_targets'])
         try:
             settings_save()
         except Exception as e:
@@ -1793,8 +1862,7 @@ class Handler(BaseHTTPRequestHandler):
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results},
                 ensure_ascii=False).encode())
         if p == '/api/speedtest':
-            results = [speedtest_one(h, proxy=px) for _, h, px in SPEEDTEST_TARGETS]
-            _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
+            results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results},
                 ensure_ascii=False).encode())
@@ -1900,7 +1968,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.6，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.7，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()

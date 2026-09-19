@@ -58,6 +58,14 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 /* 标题列截断：省略号+title 悬浮全称 */
 td.ttl{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 th.ttl{max-width:180px}
+/* v2.8.7 手机端窄屏优化：类型列不换行、标题列可换行显完整、宽表横向滚动 */
+td.tkind{white-space:nowrap;font-size:12px}
+@media (max-width:480px){
+  td.ttl{max-width:none;white-space:normal;word-break:break-word}
+  .twrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .twrap table{min-width:520px}
+  #tFail td:nth-child(2){max-width:74px;overflow:hidden;text-overflow:ellipsis}
+}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
 .hot{color:var(--bad);font-weight:700}
 .tag{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;background:var(--tag-bg);color:var(--acc);border:1px solid var(--tabon-line)}
@@ -107,7 +115,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.6</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.7</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -136,8 +144,8 @@ input[type=number]{width:90px}
     <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
       <div id="kSp2" style="margin-top:6px"></div>
     </div>
-    <div class="card w"><div class="k">今日失败/部分失败任务</div>
-      <div class="flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th class="num">操作</th></tr></thead><tbody></tbody></table></div>
+      <div class="card w"><div class="k">今日失败/部分失败任务</div>
+      <div class="twrap flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th class="num">操作</th></tr></thead><tbody></tbody></table></div>
       <div class="sub" style="margin-top:4px">重试仅对刮削入库类开放（ETKN 官方白名单）；其他类型官方不支持（409）</div>
     </div>
     <div class="card w"><div class="k">系统状态</div><div id="kDiag" style="margin-top:6px">-</div></div>
@@ -162,6 +170,10 @@ input[type=number]{width:90px}
         <div class="setrow"><label>队列积压告警</label><div class="setbox"><span class="sub">任一类型排队 ≥</span><input type="number" id="cfgTbl" min="1"><span class="sub">推送</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>500 命中阈值（今日条数）</label><input type="number" id="cfgT500" min="1"></div>
         <div class="setrow"><label>测速异常阈值（总耗时毫秒）</label><input type="number" id="cfgTsp" min="1000"></div>
+        <div class="setrow"><label>测速目标（≤12 项；域名必填，备注/代理可选）</label>
+          <div style="flex:1"><div id="stList"></div>
+          <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="stAdd()">＋新增测速目标</button>
+          <span class="sub" style="align-self:center">列表为空=不测速不推送；代理留空=直连</span></div></div></div>
         <div class="setrow"><label>整理任务静止告警</label><div class="setbox"><span class="sub">静止 ≥</span><input type="number" id="cfgTStall" min="1"><span class="sub">分钟推送，重复间隔</span><input type="number" id="cfgRStall" min="5"><span class="sub">分钟</span><label class="switch"><input type="checkbox" id="cfgAStall"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>大文件宽限（运行超1小时阈值放宽到30分钟）</label><label class="switch"><input type="checkbox" id="cfgGrace"><span class="slider"></span></label></div>
         <div class="setrow"><label>整理任务清空提醒</label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
@@ -188,8 +200,8 @@ input[type=number]{width:90px}
         <div class="histsub">保留最近 50 条推送（含测试）</div>
       </div>
       <div id="cfgHistSp" style="display:none">
-        <table id="tSpd"><thead><tr><th>时间</th><th>TMDB 图片</th><th>TMDB 接口</th><th>TMDB 自建</th><th>Telegram</th><th>共享中心</th></tr></thead><tbody></tbody></table>
-        <div class="histsub">保留最近 50 轮（手动+定时）；TMDB 自建经代理 7890 测量，模拟业务真实路径</div>
+        <div class="twrap" style="max-height:300px;overflow-y:auto"><table id="tSpd"><thead><tr><th>时间</th><th class="num">目标列…</th></tr></thead><tbody></tbody></table></div>
+        <div class="histsub">保留最近 50 轮（手动+定时）；列随「测速目标」配置动态生成</div>
       </div>
     </div>
   </div>
@@ -275,14 +287,16 @@ async function doRetry(id){
     }
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
 }
-/* ---- 测速（表格：域名/建连/握手/总耗时/状态；正常绿、异常红——不再用橙色） ---- */
+/* ---- 测速（表格：域名/建连/握手/总耗时/状态；正常绿、异常红——不再用橙色） ----
+   v2.8.7：目标来自设置列表，列头按测速顺序标注「#1/#2…」序号；结果带备注则显示 */
 function spRow(x){
   const dot = `<span class="dot" style="background:var(--${x.ok?'ok':'bad'})"></span>`;
+  const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'');
   if(!x.ok){
-    return `<tr class="row-bad"><td>${dot}${x.host}</td><td class="num">-</td><td class="num">-</td><td class="num">${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
+    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num">-</td><td class="num">-</td><td class="num">${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
   }
   const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${x.host}</td><td class="num">${x.tcp_ms}ms</td><td class="num">${x.tls_ms}ms</td><td class="num">${x.total_ms}ms</td><td>${stc}</td></tr>`;
+  return `<tr><td>${dot}${nm}</td><td class="num">${x.tcp_ms}ms</td><td class="num">${x.tls_ms}ms</td><td class="num">${x.total_ms}ms</td><td>${stc}</td></tr>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
@@ -293,8 +307,14 @@ async function runSpeedtest(){
   try{
     const r=await fetch('/api/speedtest',{method:'POST'});
     const b=await r.json();
+    if(!((b.results||[]).length)){
+      const empty='<div class="sub">未配置测速目标——请到 ⚙️ 设置 →「测速目标」添加</div>';
+      box.innerHTML=empty; if(box2)box2.innerHTML=empty; spBusy=false;
+      ['btnSp1','btnSp2'].forEach(id=>{const c=document.getElementById(id);if(c){c.disabled=false;c.textContent='开始测速';}});
+      return;
+    }
     const rendered=`<div class="sub" style="margin-bottom:4px">测于 ${ (b.ts||'').slice(11,16) }</div>`+
-      `<table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table>`;
+      `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`;
     box.innerHTML=rendered; if(box2)box2.innerHTML=rendered;
   }catch(e){toast('测速失败：'+String(e).slice(0,60),'bad');}
   ['btnSp1','btnSp2'].forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=false;b.textContent='开始测速';}});
@@ -387,7 +407,9 @@ async function showBad(){
 }
 /* ---- 设置页（v2.5）：读写设置/测试推送/手动检测/推送与测速历史 ---- */
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-const PUSH_KIND={'t500':'TMDB 500','speed':'测速异常','backlog':'队列积压','test':'测试推送','engine':'引擎'};
+const PUSH_KIND={'t500':'TMDB 500','speed':'测速异常','backlog':'队列积压','test':'测试推送','engine':'引擎','feed':'自动喂料','feed_err':'喂料告警','feed_empty':'喂料空源','hosts':'hosts 更新','hosts_err':'hosts 告警','stall':'静止告警','auto_restart':'自动重启'};
+/* v2.8.7：推送史图标对齐飞书卡片——feed 成功/触发类=绿对勾，*_err 失败类=黄三角，其余按色系 */
+const PUSH_ICON=k=>k==='feed'?'✅':k==='feed_empty'||k==='test'||k==='hosts'?'✅':k.endsWith('_err')||k==='stall'||k==='t500'||k==='speed'||k==='backlog'?'⚠️':'ℹ️';
 function openCfg(){
   document.getElementById('page1').style.display='none';
   document.getElementById('page2').style.display='none';
@@ -423,6 +445,31 @@ function clCollect(){
     text:r.querySelector('[data-cl=t]').value.trim(),url:r.querySelector('[data-cl=u]').value.trim()}))
     .filter(x=>x.text&&x.url);
 }
+/* ---- v2.8.7 测速目标编辑器：增删改列表（host 必填/note 备选/proxy 备选） ---- */
+function stRender(items){
+  const box=document.getElementById('stList');box.innerHTML='';
+  (items&&items.length?items:[{host:'',note:'',proxy:''}]).forEach(it=>{
+    const row=document.createElement('div');row.style.cssText='display:flex;gap:6px;margin-bottom:6px;align-items:center';
+    const h=document.createElement('input');h.type='text';h.placeholder='域名或 https://URL';h.value=it.host||'';h.dataset.st='h';h.style.cssText='flex:2;min-width:150px';
+    const n=document.createElement('input');n.type='text';n.placeholder='备注(可选)';n.value=it.note||'';n.dataset.st='n';n.style.cssText='width:110px';
+    const p=document.createElement('input');p.type='text';p.placeholder='代理(可选) host:port';p.value=it.proxy||'';p.dataset.st='p';p.style.cssText='width:150px';
+    const del=document.createElement('button');del.type='button';del.className='act';del.textContent='删除';
+    del.onclick=()=>row.remove();
+    row.appendChild(h);row.appendChild(n);row.appendChild(p);row.appendChild(del);box.appendChild(row);
+  });
+}
+function stAdd(){
+  const box=document.getElementById('stList');
+  if(box.children.length>=12){toast('最多 12 个测速目标','bad');return;}
+  stRender(Array.from(box.children).map(r=>({host:r.querySelector('[data-st=h]').value,note:r.querySelector('[data-st=n]').value,proxy:r.querySelector('[data-st=p]').value})).concat([{host:'',note:'',proxy:''}]));
+}
+function stCollect(){
+  return Array.from(document.getElementById('stList').children).map(r=>({
+    host:r.querySelector('[data-st=h]').value.trim(),
+    note:r.querySelector('[data-st=n]').value.trim(),
+    proxy:r.querySelector('[data-st=p]').value.trim()}))
+    .filter(x=>x.host);
+}
 async function cfgLoad(){
   try{
     const d=await (await fetch('/api/settings',{cache:'no-store'})).json();
@@ -446,6 +493,7 @@ async function cfgLoad(){
     document.getElementById('cfgTrg').checked=!!d.trigger_enabled;
     document.getElementById('cfgTrgBase').value=d.trigger_public_base||'';
     clRender(Array.isArray(d.card_links)?d.card_links:[]);
+    stRender(Array.isArray(d.speed_targets)?d.speed_targets:[]);
     document.getElementById('cfgFeed').checked=!!d.feed_enabled;
     document.getElementById('cfgCd2Url').value=d.cd2_dav_url||'';
     document.getElementById('cfgCd2User').value=d.cd2_user||'';
@@ -480,6 +528,7 @@ async function cfgSave(){
         trigger_enabled:document.getElementById('cfgTrg').checked,
         trigger_public_base:document.getElementById('cfgTrgBase').value.trim(),
         card_links:clCollect(),
+        speed_targets:stCollect(),
         feed_enabled:document.getElementById('cfgFeed').checked,
         cd2_dav_url:document.getElementById('cfgCd2Url').value.trim(),
         cd2_user:document.getElementById('cfgCd2User').value.trim(),
@@ -517,7 +566,7 @@ async function cfgLoadPush(){
     const b=await (await fetch('/api/push-history',{cache:'no-store'})).json();
     const rows=(b.items||[]);
     document.querySelector('#tPush tbody').innerHTML=rows.length?rows.map(x=>
-      `<tr><td class="num">${(x.ts||'').slice(5,16)}</td><td>${PUSH_KIND[x.kind]||esc(x.kind)}</td><td class="ttl" title="${esc(x.text)}">${esc((x.text||'').slice(0,60))}</td><td class="num ${x.delivered?'ok':'bad'}">${x.delivered?'已送达':esc((x.err||'失败').slice(0,18))}</td></tr>`).join('')
+      `<tr><td class="num">${(x.ts||'').slice(5,16)}</td><td>${PUSH_ICON(x.kind)} ${PUSH_KIND[x.kind]||esc(x.kind)}</td><td class="ttl" title="${esc(x.text)}">${esc((x.text||'').slice(0,60))}</td><td class="num ${x.delivered?'ok':'bad'}">${x.delivered?'已送达':esc((x.err||'失败').slice(0,18))}</td></tr>`).join('')
       :'<tr><td colspan="4"><div class="empty"><span class="ic">📭</span>暂无推送记录（异常时才会推送）</div></td></tr>';
   }catch(e){toast('读取推送历史失败','bad');}
 }
@@ -526,10 +575,17 @@ async function cfgLoadSpeed(){
     const b=await (await fetch('/api/speed-history',{cache:'no-store'})).json();
     const rows=(b.items||[]);
     const cell=r=>!r||r.ok==null?'-':(!r.ok?'<span class="bad">失败</span>':`${r.total_ms??'-'}ms`);
-    document.querySelector('#tSpd tbody').innerHTML=rows.length?rows.map(x=>{
+    // v2.8.7：测速目标配置化后轮次含的域名可不同——列头取该轮自己的域名序列（最大 6 列防溢出）
+    const hosts=rows.length?rows[0].results.map(r=>r.host).slice(0,6):[];
+    if(!rows.length){
+      document.querySelector('#tSpd thead').innerHTML='<tr><th>时间</th></tr>';
+      document.querySelector('#tSpd tbody').innerHTML='<tr><td><div class="empty"><span class="ic">⚡</span>暂无测速记录（手动测速或开启定时测速后出现）</div></td></tr>';
+      return;
+    }
+    document.querySelector('#tSpd thead').innerHTML='<tr><th>时间</th>'+hosts.map(h=>`<th class="num">${esc(h)}</th>`).join('')+'</tr>';
+    document.querySelector('#tSpd tbody').innerHTML=rows.map(x=>{
       const m={};(x.results||[]).forEach(r=>m[r.host]=r);
-      return `<tr><td class="num">${(x.ts||'').slice(5,16)}</td><td class="num">${cell(m['image.tmdb.org'])}</td><td class="num">${cell(m['api.themoviedb.org'])}</td><td class="num">${cell(m['tmdb.relay.example.com'])}</td><td class="num">${cell(m['api.telegram.org'])}</td><td class="num">${cell(m['shared.example.com'])}</td></tr>`;}).join('')
-      :'<tr><td colspan="6"><div class="empty"><span class="ic">⚡</span>暂无测速记录（手动测速或开启定时测速后出现）</div></td></tr>';
+      return `<tr><td class="num">${(x.ts||'').slice(5,16)}</td>${hosts.map(h=>`<td class="num">${cell(m[h])}</td>`).join('')}</tr>`;}).join('');
   }catch(e){toast('读取测速历史失败','bad');}
 }
 /* ---- 主刷新 ---- */
@@ -564,15 +620,18 @@ async function refresh(){
     document.getElementById('cEtaSub').textContent=`速率 ${e.rate||0} 媒体/分 · 剩 ${e.remaining_media||0} 媒体（窗口 ${e.window_min||10} 分）${(e.rate===0&&e.remaining_media>0)?' · 窗口内暂无完成':''}`;
     document.getElementById('cEtaOrg').textContent=eo.kinds&&eo.kinds.length?
       `整理类预计 ${eo.eta_text}（剩 ${eo.remaining_media||0} 媒体 · ${eo.rate||0} 媒体/分${(eo.rate===0&&eo.remaining_media>0)?' · 窗口内暂无完成':''}）`:'整理类队列空闲';
-    const kb=a.by_kind||{};
+    // 拥堵提示：v2.8.7 起与「队列积压告警」同源同阈值（后端 settings.backlog_threshold，
+    // 随 /api/status 快照下发）；此前前端硬编码 150，与告警 500 各报各的（用户指令统一）
+    // 队列列表红色高亮同步用 jamThr（原先也硬编码 150）
+    const jamThr = Number(s.backlog_threshold) || 200;
     document.getElementById('kQ').innerHTML=Object.keys(kb).length?
       Object.entries(kb).sort((x,y)=>(x[1].tier||50)-(y[1].tier||50)||x[1].rank-y[1].rank).map(([k,v])=>{
-        const q=v.queued>=150?`<span class="hot">${v.queued}</span>`:v.queued;
+        const q=v.queued>=jamThr?`<span class="hot">${v.queued}</span>`:v.queued;
         const rk=v.rank?`档位序第${v.rank}位`:((v.running?'进行中':'空闲'));
         return `<div class="row" style="padding:3px 0"><span>${kindZh(k)}<span class="sub">〔${rk}〕</span></span><span class="sub">${v.media} 媒体 · ${v.tasks} 任务（排${q}/行${v.running}）</span></div>`;}).join('')
       :'<div class="sub">当前队列为空</div>';
-    // 拥堵提示：任一类型排队≥150 才显示（badge 行，随每轮刷新更新）
-    const jams=Object.entries(kb).filter(([k,v])=>v.queued>=150);
+    // 拥堵提示与横条：同用上方 jamThr（与「队列积压告警」同源同阈值）
+    const jams=Object.entries(kb).filter(([k,v])=>v.queued>=jamThr);
     const jamEl=document.getElementById('jamBar');
     jamEl.style.display=jams.length?'':'none';
     if(jams.length)jamEl.innerHTML=jams.map(([k,v])=>`⚠ ${kindZh(k)}积压 ${v.queued}，预计拖慢整理`).join('　');
