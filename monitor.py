@@ -130,10 +130,15 @@ SETTINGS_DEFAULTS = {
     'cd2_dav_url': 'http://192.168.1.22:19798/dav',
     'cd2_user': '',
     'cd2_pass': '',
-    # ---- v2.8 hosts 自动更新（shared 域名漂移自愈） ----
+    # ---- v2.8 hosts 自动更新（域名漂移自愈） ----
     'hosts_enabled': False,        # hosts 自动巡检开关（默认关）
     # ---- v2.8.8 hosts 域名配置化：默认空=不监控；代码不再写死 shared 域 ----
     'hosts_domain': '',            # 要巡检的域名（用户自填；空=跳过巡检）
+    # ---- v2.8.10 路由器连接公版化：4 项全从设置读（不硬编码 IP/用户/凭据） ----
+    'router_ip': '',               # 软路由 IP（空=巡检直接跳过，不误报）
+    'router_port': 22,             # SSH 端口
+    'router_user': '',             # SSH 用户名
+    'router_pass': '',             # SSH 密码（存本地 settings.json；GET 接口掩码回传）
     # ---- v2.8.8 喂料触发延迟可配置：转移成功后隔 N 秒触发整理（0=立即） ----
     'feed_trigger_delay': 10,      # 默认 10 秒（旧版固定 90 秒退役；防 115 限流留缓冲）
     # ---- v2.8.7 测速目标配置化：默认空列表（零预设域名），设置页编辑器增删改 ----
@@ -714,41 +719,55 @@ def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
 
 
 def _ssh_router(cmd: str, timeout: int = 30) -> str:
-    """在路由器 192.168.1.1（iStoreOS, root）上执行命令，返回 stdout。凭据=clash_action 同源。"""
-    auth = ''
-    try:
-        with open('/vol1/@appdata/trim.hermes/workspace/etkn_logs/clash_action.py',
-                  encoding='utf-8') as f:
-            for ln in f:
-                if ln.startswith('AUTH = '):
-                    auth = ln.split('= ')[1].strip().strip('"')
-                    break
-    except OSError:
+    """在路由器（设置 router_ip/port/user/pass，不硬编码）上执行 SSH 命令，返回 stdout。
+    v2.8.10 公版化：凭据全部读设置；未配置（router_ip/user/pass 任一为空）返回空串，
+    由调用方按「未配置」处理（巡检跳过或告警），绝不猜默认 IP。"""
+    rip = str(SETTINGS.get('router_ip') or '').strip()
+    ruser = str(SETTINGS.get('router_user') or '').strip()
+    rpass = str(SETTINGS.get('router_pass') or '')
+    if not (rip and ruser and rpass):
         return ''
+    try:
+        rport = int(SETTINGS.get('router_port') or 22)
+    except (TypeError, ValueError):
+        rport = 22
     env = dict(os.environ)
-    env['SSHPASS'] = auth
-    r = subprocess.run(['sshpass', '-e', 'ssh', '-o', 'StrictHostKeyChecking=no',
+    env['SSHPASS'] = rpass
+    r = subprocess.run(['sshpass', '-e', 'ssh', '-p', str(rport),
+                        '-o', 'StrictHostKeyChecking=no',
                         '-o', 'UserKnownHostsFile=/dev/null', '-o', 'ConnectTimeout=10',
-                        'root@192.168.1.1', cmd],
+                        f'{ruser}@{rip}', cmd],
                        capture_output=True, env=env, timeout=timeout)
     return (r.stdout + r.stderr).replace(b'\x00', b'').decode('utf-8', errors='replace')
 
 
 def _hosts_check_once() -> None:
     """单次巡检：公共 DNS 解析 → 对比 /etc/hosts → 不同则原子更新该行+重启 dnsmasq+推送。
-    解析失败=域名挂了：不更新 hosts，只推告警。只动带标记的那一行。"""
+    解析失败=域名挂了：不更新 hosts，只推告警。只动带标记的那一行。
+    v2.8.10 公版化：路由器连接信息全读设置；未配置/解析失败→跳过不误报。"""
     now = time.time()
     _hosts_state['last_run'] = now
-    ip = _resolve_public(_HOSTS_DOMAIN())
+    domain = _HOSTS_DOMAIN()
+    if not domain:
+        return                      # v2.8.8：未配置域名=不监控，静默
+    _r = _ssh_router('true', timeout=15)
+    _rconfigured = bool(SETTINGS.get('router_ip') and SETTINGS.get('router_user')
+                        and SETTINGS.get('router_pass'))
+    if not _rconfigured or 'Permission denied' in _r:
+        _alert_push('hosts_err', '路由器连接未配置或认证失败（hosts 未改动）', [
+            '请到设置页填写：软路由 IP / SSH 端口 / SSH 用户名 / SSH 密码',
+            '巡检需要这些信息登录路由器修改 /etc/hosts；本次仅告警不改行'])
+        return
+    ip = _resolve_public(domain)
     if not ip:
-        _alert_push('hosts_err', 'shared 域名解析失败（hosts 未改动）', [
-            f'223.5.5.5 解析 {_HOSTS_DOMAIN()} 无 A 记录——可能域名/源站故障',
+        _alert_push('hosts_err', f'{domain} 域名解析失败（hosts 未改动）', [
+            f'223.5.5.5 解析 {domain} 无 A 记录——可能域名/源站故障',
             '/etc/hosts 保持原值，业务暂按旧 IP 走，请人工确认'])
         return
-    cur = _ssh_router(f"grep -n '{_HOSTS_DOMAIN()}' /etc/hosts || true")
+    cur = _ssh_router(f"grep -n '{domain}' /etc/hosts || true")
     found = []                       # (行号, 行内容)
     for ln in cur.splitlines():
-        if _HOSTS_DOMAIN() in ln:
+        if domain in ln:
             no, _, rest = ln.partition(':')
             if no.isdigit() and rest.strip():
                 found.append((int(no), rest))
@@ -757,24 +776,24 @@ def _hosts_check_once() -> None:
         (x for x in found if len(x[1].split()) >= 2), None)
     if not pick:
         _alert_push('hosts_err', 'hosts 未找到绑定行（未改动）', [
-            f'{_HOSTS_DOMAIN()} 在 iStoreOS /etc/hosts 无独立行（或行格式异常），请人工核对'])
+            f'{domain} 在路由器 /etc/hosts 无独立行（或行格式异常），请人工核对'])
         return
     line_no, rest = pick
     old_ip = rest.split()[0]
     if old_ip == ip:
         return                          # 一致：静默
     # 原子更新：替换该行 + 追加标记注释
-    new_line = f"{ip} {_HOSTS_DOMAIN()} {_HOSTS_MARKER}"
+    new_line = f"{ip} {domain} {_HOSTS_MARKER}"
     esc = new_line.replace('/', r'\/')
     script = (f"cp /etc/hosts /etc/hosts.bak-monitor && "
               f"sed -i '{line_no}s/.*/{esc}/' /etc/hosts && "
               f"/etc/init.d/dnsmasq restart >/dev/null 2>&1; "
-              f"grep -n '{_HOSTS_DOMAIN()}' /etc/hosts")
+              f"grep -n '{domain}' /etc/hosts")
     out = _ssh_router(script, timeout=45)
-    ok = f'{ip} {_HOSTS_DOMAIN()}' in out
+    ok = f'{ip} {domain}' in out
     if ok:
         # v2.8.3①：只在 hosts 真改了才推送，卡片写清具体改动（旧IP → 新IP）
-        _alert_push('hosts', f'{_HOSTS_DOMAIN()}：{old_ip} → {ip}，hosts 已更新', [
+        _alert_push('hosts', f'{domain}：{old_ip} → {ip}，hosts 已更新', [
             f'223.5.5.5 公网解析与 hosts 绑定不一致，已将该行改为 {ip} 并重启 dnsmasq',
             '原行已备份 /etc/hosts.bak-monitor'],
             buttons=_card_buttons(), tcolor='green')
@@ -1729,7 +1748,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.9', 'readonly': False,
+                'version': 'v2.8.10', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1796,6 +1815,8 @@ class Handler(BaseHTTPRequestHandler):
         else:
             d['webhook_masked'] = ''
         d.pop('cd2_pass', None)         # v2.8：CD2 密码永不回传前端（留空=不修改）
+        d['router_pass_set'] = bool(d.get('router_pass'))  # v2.8.10：掩码态回传
+        d.pop('router_pass', None)      # v2.8.10：路由器 SSH 密码同样不回传
         d['settings_path'] = SETTINGS_PATH
         return self._send(200, json.dumps(d, ensure_ascii=False).encode())
 
@@ -1842,11 +1863,23 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
         if 'speed_targets' in b:            # v2.8.7 测速目标：清洗落盘（空列表合法=清空全部）
             SETTINGS['speed_targets'] = _norm_speed_targets(b['speed_targets'])
-        if 'hosts_domain' in b and isinstance(b['hosts_domain'], str):   # v2.8.8 hosts 域名
+        if 'hosts_domain' in b and isinstance(b['hosts_domain'], str):
             hd = b['hosts_domain'].strip().lower().rstrip('.')
             if hd and not re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+', hd):
                 hd = ''                     # 非法域名=拒收置空（巡检自动跳过）
             SETTINGS['hosts_domain'] = hd
+        # v2.8.10 路由器连接 4 项（公版化）：写前清洗；密码原样存本地 settings.json
+        if 'router_ip' in b and isinstance(b['router_ip'], str):
+            SETTINGS['router_ip'] = b['router_ip'].strip()
+        if 'router_port' in b:
+            try:
+                SETTINGS['router_port'] = max(1, min(65535, int(b['router_port'])))
+            except (TypeError, ValueError):
+                pass
+        if 'router_user' in b and isinstance(b['router_user'], str):
+            SETTINGS['router_user'] = b['router_user'].strip()
+        if 'router_pass' in b and isinstance(b['router_pass'], str):
+            SETTINGS['router_pass'] = b['router_pass']   # 空串=清空；掩码回传不外泄
         try:
             settings_save()
         except Exception as e:
@@ -1983,7 +2016,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.9，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.10，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
