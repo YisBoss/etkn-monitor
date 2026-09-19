@@ -601,9 +601,8 @@ def _feed_run() -> None:
         _n_d, _n_f = len(moved_dirs), len(moved_files)
         _moved_line = ('已转移 ' + (f'{_n_d} 个剧夹' if _n_d else '') +
                        (' + ' if _n_d and _n_f else '') +
-                       (f'{_n_f} 个散文件' if _n_f else '') + '到待整理目录，' +
-                       ('整理已自动提交' if _delay <= 0
-                        else f'{_delay} 秒后自动提交整理') + '，完成后推清空提醒')
+                       (f'{_n_f} 个散文件' if _n_f else '') +
+                       '到待整理目录，整理已自动提交，完成后推清空提醒')
         _alert_push('feed', '自动喂料完成', [_moved_line],
                     buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
