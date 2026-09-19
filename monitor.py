@@ -347,19 +347,24 @@ def _cd2_exists(dst_dir: str, name: str) -> bool:
 # ================= v2.7 自动喂料（清空提醒后自动分批转移） =================
 _feed_lock = threading.Lock()          # 忙锁：防并发喂料
 _feed_state = {'last_run': 0.0, 'moving': False}
-_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # v2.7.2④：扫描缓存（10 分钟）
+_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # v2.8.5：全量树缓存（24 小时）
 _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时器
+
+FEED_TREE_TTL = 86400                  # v2.8.5：全量树缓存 24h——一天只数一次（每次喂料
+                                       # 重数 1063 夹=每次 1000+ 次 115 调用会打满配额）
 
 
 def _feed_scan_dirs(src: str) -> list:
-    """扫描源目录（v2.8.4：经 CD2 WebDAV，不碰 fuse）：[(夹名, 真实媒体项数)]，
+    """扫描源目录（v2.8.5：经 CD2 WebDAV，不碰 fuse）：[(夹名, 真实媒体项数)]，
     保持旧→新排序由 CD2 返回序决定。
-    v2.8.4：对每个剧夹调 _cd2_count_items 统计第一层子项数（走 WebDAV 列目录，
-    不烧 115 配额）——上限语义=每批真实媒体项数（不再是夹数）。
-    单夹计数失败（返回 0）不影响其他夹。10 分钟缓存沿用（v2.7.2④）。"""
+    v2.8.5：全量树缓存 TTL 10min→24h（一天只数一次）——v2.8.4 逐夹 Depth=1 数数
+    在 1063 夹规模=每次喂料 1000+ 次 115 调用（CD2 背后逐夹拉 115）打满配额。
+    方案 2（Depth=infinity 一次拿全量树）已实测被 CD2 拒绝（403 propfind-finite-depth，
+    REPORT=501），CD2 只允许有限深度，故长缓存是唯一解。
+    转移成功后不再全清缓存，改外科手术式剔除已转夹（_feed_cache_drop）。"""
     now = time.time()
     if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
-            and now - _feed_scan_cache['ts'] < 600):
+            and now - _feed_scan_cache['ts'] < FEED_TREE_TTL):
         return _feed_scan_cache['dirs']
     dirs = _cd2_list_dirs(src)
     if dirs is None:
@@ -367,6 +372,17 @@ def _feed_scan_dirs(src: str) -> list:
     out = [(n, _cd2_count_items(src, n)) for n in dirs]
     _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': out})
     return out
+
+
+def _feed_cache_drop(moved_names: list) -> None:
+    """v2.8.5：转移成功后从缓存里剔除已转走的夹（外科手术，不重扫不烧配额）。
+    背景：v2.7.3① 曾全清缓存防同名误报——24h 缓存下全清=每次喂料都全量重数（打回原形）。
+    剔除已转夹即可达成同目的：源目录里它们已不在，留在缓存里反而会让下次喂料
+    重试已转移的夹（幂等靠 _cd2_exists 挡，但会白跑）。"""
+    if _feed_scan_cache['dirs'] is None:
+        return
+    gone = set(moved_names)
+    _feed_scan_cache['dirs'] = [(n, c) for n, c in _feed_scan_cache['dirs'] if n not in gone]
 
 
 def _feed_plan(dirs: list, limit: int) -> list:
@@ -521,9 +537,10 @@ def _feed_run() -> None:
         total_files = sum(c for _n, c in picks)
         moved, err = _feed_move_batch(src, dst, picks)
         if moved:
-            # v2.7.3①：转移成功立即清扫描缓存——下次喂料强制重扫，
-            # 防止沿用旧计划误判「目标目录已存在同名文件夹」（02:18 误报实证）
-            _feed_scan_cache.update({'ts': 0.0, 'src': None, 'dirs': None})
+            # v2.8.5：转移成功后从缓存剔除已转夹（外科手术）——v2.7.3① 的全清策略在
+            # 24h 缓存下=每次喂料全量重数 1000+ 夹（烧 115 配额），改 surgical drop；
+            # 防「目标同名误报」目的不变：已转夹不再出现在计划里
+            _feed_cache_drop([n for n in moved])
         names_brief = '、'.join(n[:16] for n, _c in picks[:4]) + ('…' if len(picks) > 4 else '')
         if err or not moved:
             _alert_push('feed_err', '自动喂料转移失败', [
@@ -1675,7 +1692,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.4', 'readonly': False,
+                'version': 'v2.8.5', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1923,7 +1940,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.4，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.5，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
