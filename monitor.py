@@ -1155,10 +1155,10 @@ def check_organize_running(now=None):
                 tmin = max(1, round((now - batch['started_at']).total_seconds() / 60))
                 lines.append(f'本批耗时：{tmin} 分钟'
                              f'（{_fmt_hhmm(batch["started_at"])} → {_fmt_hhmm(now)}）')
+            # v2.8.15：队列一行简写「排N/行N」（与面板一致），不再分两行
             lines.append('当前队列：'
-                         f'刮削 运行{qr}/排队{qq} · 网盘 运行{nr}/排队{nq2}')
-            lines.append(f'　　　　　'
-                         f'共享 运行{sr}/排队{sq} · 追剧 运行{wr}/排队{wq}')
+                         f'刮削 排{qq}/行{qr} · 网盘 排{nq2}/行{nr}'
+                         f' · 共享 排{sq}/行{sr} · 追剧 排{wq}/行{wr}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
                 # v2.8.13：失败明细汇总进卡（≤5 条逐行「标题｜阶段｜原因」，超出折叠计数）
@@ -1823,7 +1823,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.14', 'readonly': False,
+                'version': 'v2.8.15', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',

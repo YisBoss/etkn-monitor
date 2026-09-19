@@ -98,7 +98,22 @@ button.act.lnk{border-color:var(--line);color:var(--sub)}
 #modal .btns button{flex:1;min-height:44px;border-radius:10px;font-size:14px;border:1px solid var(--line);background:transparent;color:var(--tx)}
 #modal .btns button.go{border-color:var(--warn);color:var(--warn);font-weight:600}
 /* ---- 设置页（v2.5）：行式布局+开关，主题全走变量 ---- */
-.setgroup{margin:14px 0 2px;font-size:13px;font-weight:700;color:var(--tx);opacity:.85;border-left:3px solid var(--acc,#4f8ef7);padding-left:8px}.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.setrow .why{font-size:11px;opacity:.6;margin-left:6px;font-weight:400}.fourrow{display:grid;grid-template-columns:1.2fr .7fr .9fr 1.1fr;gap:8px}.fourrow label{font-size:11px;opacity:.65;display:block;margin-bottom:3px}.fourrow input{width:100%;min-width:0;min-height:38px;padding:6px 8px;font-size:13px}@media(max-width:640px){.fourrow{grid-template-columns:1fr 1fr}}
+.setgroup{margin:14px 0 2px;font-size:13px;font-weight:700;color:var(--tx);opacity:.85;border-left:3px solid var(--acc,#4f8ef7);padding-left:8px}/* v2.8.15 卡片按钮/测速目标编辑器：同套网格布局，列可收缩，删除按钮永不溢出 */
+.edrow{display:grid;gap:6px;margin-bottom:6px;align-items:center}
+.edrow input{min-width:0;width:100%;box-sizing:border-box}
+.edrow-cl{grid-template-columns:minmax(0,88px) minmax(0,1fr) auto}
+.edrow-st{grid-template-columns:minmax(0,1.3fr) minmax(0,.9fr) minmax(0,1fr) auto}
+.edrow .act{white-space:nowrap}
+@media (max-width:480px){
+  .edrow-cl{grid-template-columns:minmax(0,72px) minmax(0,1fr) auto}
+  .edrow-st{grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr) minmax(0,1fr) auto}
+  .edrow input{padding:8px 6px;font-size:13px}
+  input[type=text],input[type=number]{min-width:0}
+  input[type=number]{width:72px}
+  .setbox input[type=text]{min-width:0;flex:1 1 120px}
+  .fourrow input{min-width:0;width:100%;box-sizing:border-box}
+}
+.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}.setrow .why{font-size:11px;opacity:.6;margin-left:6px;font-weight:400}.fourrow{display:grid;grid-template-columns:1.2fr .7fr .9fr 1.1fr;gap:8px}.fourrow label{font-size:11px;opacity:.65;display:block;margin-bottom:3px}.fourrow input{width:100%;min-width:0;min-height:38px;padding:6px 8px;font-size:13px}@media(max-width:640px){.fourrow{grid-template-columns:1fr 1fr}}
 .setrow:last-of-type{border-bottom:none}
 .setrow>label:first-child{font-size:14px}
 .setbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
@@ -115,7 +130,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.13</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.15</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -439,9 +454,9 @@ function swCfg(n){
 function clRender(items){
   const box=document.getElementById('clList');box.innerHTML='';
   (items&&items.length?items:[{text:'ETKN监控',url:'https://etknjk.example.com/'},{text:'ETKN',url:'https://etkn.example.com/'},{text:'CloudDrive2',url:'https://cd2.example.com/'}]).forEach((it,i)=>{
-    const row=document.createElement('div');row.style.cssText='display:flex;gap:6px;margin-bottom:6px;align-items:center';
-    const t=document.createElement('input');t.type='text';t.placeholder='按钮名称';t.value=it.text||'';t.dataset.cl='t';t.style.cssText='width:110px';
-    const u=document.createElement('input');u.type='text';u.placeholder='https://…';u.value=it.url||'';u.dataset.cl='u';u.style.cssText='flex:1;min-width:160px';
+    const row=document.createElement('div');row.className='edrow edrow-cl';
+    const t=document.createElement('input');t.type='text';t.placeholder='按钮名称';t.value=it.text||'';t.dataset.cl='t';
+    const u=document.createElement('input');u.type='text';u.placeholder='https://…';u.value=it.url||'';u.dataset.cl='u';
     const del=document.createElement('button');del.type='button';del.className='act';del.textContent='删除';
     del.onclick=()=>row.remove();
     row.appendChild(t);row.appendChild(u);row.appendChild(del);box.appendChild(row);
@@ -461,10 +476,10 @@ function clCollect(){
 function stRender(items){
   const box=document.getElementById('stList');box.innerHTML='';
   (items&&items.length?items:[{host:'',note:'',proxy:''}]).forEach(it=>{
-    const row=document.createElement('div');row.style.cssText='display:flex;gap:6px;margin-bottom:6px;align-items:center';
-    const h=document.createElement('input');h.type='text';h.placeholder='域名或 https://URL';h.value=it.host||'';h.dataset.st='h';h.style.cssText='flex:2;min-width:150px';
-    const n=document.createElement('input');n.type='text';n.placeholder='备注(可选)';n.value=it.note||'';n.dataset.st='n';n.style.cssText='width:110px';
-    const p=document.createElement('input');p.type='text';p.placeholder='代理(可选) host:port';p.value=it.proxy||'';p.dataset.st='p';p.style.cssText='width:150px';
+    const row=document.createElement('div');row.className='edrow edrow-st';
+    const h=document.createElement('input');h.type='text';h.placeholder='域名或 https://URL';h.value=it.host||'';h.dataset.st='h';
+    const n=document.createElement('input');n.type='text';n.placeholder='备注(可选)';n.value=it.note||'';n.dataset.st='n';
+    const p=document.createElement('input');p.type='text';p.placeholder='代理(可选)';p.value=it.proxy||'';p.dataset.st='p';
     const del=document.createElement('button');del.type='button';del.className='act';del.textContent='删除';
     del.onclick=()=>row.remove();
     row.appendChild(h);row.appendChild(n);row.appendChild(p);row.appendChild(del);box.appendChild(row);
@@ -615,7 +630,7 @@ async function cfgLoadSpeed(){
   }catch(e){toast('读取测速历史失败','bad');}
 }
 /* ---- 主刷新 ---- */
-let _spNote={};                       // host→备注（测速历史表头显示用，v2.8.13）
+let _spNote={};                       // host→备注（测速历史表头显示用，v2.8.15）
 let lastOkTs=null;                    // 最近一次成功取数的真实时间
 async function refresh(){
   try{
