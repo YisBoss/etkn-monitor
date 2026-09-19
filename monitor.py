@@ -190,18 +190,24 @@ def record_push(kind: str, text: str, delivered: bool, err: str = ''):
 def feishu_push(text: str, buttons: list = None, title: str = '', tcolor: str = 'blue'):
     """飞书自定义机器人 Webhook。v2.6：buttons 非空 → msg_type=interactive 卡片
     （title=卡片标题；正文=原文全文保留，口径零变化），否则 msg_type=text 兼容旧通道。
+    v2.8.2⑤：所有卡片正文最末尾追加小字时间戳行（YYYY-MM-DD HH:MM:SS，北京时区），
+    飞书消息列表自带时间不明显，方便对照推送史/日志。
     buttons=[{'tag':'default','text':'整理下一批','url':'https://…','type':'primary'},…]。
     返回 (ok, err)。零 token，不经过第三方。"""
     url = (SETTINGS.get('webhook_url') or '').strip()
     if not url.startswith(('http://', 'https://')):
         return False, '未配置 Webhook URL'
+    ts_line = _now().strftime('%Y-%m-%d %H:%M:%S')
     if buttons:
-        # 卡片：header 标题 + markdown 正文（原文全量）+ 按钮行（url 跳转，飞书内置浏览器打开）
+        # 卡片：header 标题 + markdown 正文（原文全量）+ 时间戳小字 + 按钮行
         first, _, rest = text.partition('\n')
         body = rest.strip() or first
         if not title:
             title = first
         elements = [{'tag': 'div', 'text': {'tag': 'lark_md', 'content': body}}]
+        # v2.8.2⑤：正文最末尾小字时间戳（note 元素，灰色小号）
+        elements.append({'tag': 'note', 'elements': [
+            {'tag': 'plain_text', 'content': f'推送时间 {ts_line}'}]})
         elements.append({'tag': 'action', 'actions': [
             {'tag': 'button', 'text': {'tag': 'plain_text', 'content': b.get('text', '打开')},
              'type': b.get('type', 'default'), 'url': b['url']} for b in buttons]})
@@ -375,10 +381,33 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
     return ok_names, err
 
 
+def _recent_organize_running(window_min: int = 3) -> bool:
+    """v2.8.1④：任务中心最近 N 分钟内有没有新的网盘整理（p115_organize）任务。
+    背景：#21843 实证壳任务的 /api/workflows/{id} 明细 chain_runs=[]（即使
+    chain_run_count=1，明细口不给数据），派生任务 #21844（parent=21843）只能从
+    任务列表反查。翻 2 页（200 条）足够覆盖 3 分钟窗口的新任务量。"""
+    cutoff = _now() - timedelta(minutes=window_min)
+    try:
+        for page in (1, 2):
+            s, b = api_get(f'/api/workflows?page={page}&limit=100')
+            if s != 200 or not isinstance(b, dict):
+                return False
+            for x in (b.get('items') or []):
+                if x.get('workflow_type') != 'p115_organize':
+                    continue
+                ca = _parse_ts(x.get('created_at'))
+                if ca and ca >= cutoff:
+                    return True
+    except Exception:
+        return False
+    return False
+
+
 def _watch_shell_run(rid: int, source: str) -> None:
-    """v2.8：壳任务（手动整理网盘文件）监视——succeeded 后 chain_runs 迟迟为空才告警。
-    节奏：每 10 秒一查（有派生立即静默返回）；累计满 180 秒（18 轮）仍空
-    才告警「疑似 115 配额受限」。50 秒版误报实证：派生真实任务需要更长时间。
+    """v2.8.1④：壳任务（手动整理网盘文件）监视——succeeded 后迟迟无派生才告警。
+    派生判据二选一即静默：①chain_runs 非空；②任务中心最近 3 分钟有新 p115 整理任务
+    （chain_runs 明细口缺陷实证 #21843：count=1 但返回空数组，必须补第二判据）。
+    节奏：每 10 秒一查，累计满 180 秒仍判不出派生才告警「疑似 115 配额受限」。
     时间按「轮询次数 × 10 秒」计（虚拟时钟），生产语义等价且可回归快进。"""
     def _watch():
         waited = 0
@@ -387,20 +416,26 @@ def _watch_shell_run(rid: int, source: str) -> None:
                 time.sleep(10)
                 waited += 10
                 s, d = api_get(f'/api/workflows/{rid}')
+                derived = False
                 if s == 200 and isinstance(d, dict):
                     st = d.get('status')
                     if st in ('failed', 'cancelled'):
                         return                        # 失败/取消：静默（另有失败卡）
                     if st == 'succeeded' and (d.get('chain_runs') or []):
-                        return                        # 已派生真实整理：静默
-                    # succeeded 且 0 派生：继续轮询等派生，满 180 秒仍空才告警
-                    if waited >= 180:
-                        _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
-                            f'手动整理壳任务 #{rid} 成功，但 3 分钟内未派生任何整理任务（引擎扫描 115 空转）',
-                            '待整理目录文件不会丢，全部原样等待',
-                            '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
-                        return
-                # 查询失败（非 200/非 dict）：继续轮询直到满 180 秒
+                        derived = True                # 判据①：明细口给了派生
+                    # 判据②（无论壳状态）：最近 3 分钟任务中心有新网盘整理任务
+                    if not derived and _recent_organize_running(3):
+                        derived = True
+                else:
+                    derived = _recent_organize_running(3)   # 明细查询失败也用判据②兜底
+                if derived:
+                    return                            # 已派生真实整理：静默
+                if waited >= 180:
+                    _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
+                        f'手动整理壳任务 #{rid} 成功，但 3 分钟内未派生任何整理任务（引擎扫描 115 空转）',
+                        '待整理目录文件不会丢，全部原样等待',
+                        '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
+                    return
         except Exception:
             pass                                # 监视线程绝不影响主流程
     threading.Thread(target=_watch, daemon=True).start()
@@ -414,7 +449,8 @@ def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
     if s in (200, 201, 202):
         _alert_push('feed', '自动喂料已触发整理', [
             f'本批 {moved_n} 夹 / {total_files} 文件已在待整理目录',
-            '整理任务已提交，出结果后正常推清空提醒'], tcolor='green')
+            '整理任务已提交，出结果后正常推清空提醒'],
+            buttons=_card_buttons(), tcolor='green')
         rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
         if rid:
             _watch_shell_run(int(rid), 'feed')  # v2.7.3②：空转监视
@@ -454,7 +490,7 @@ def _feed_run() -> None:
         if not dirs:
             _alert_push('feed_empty', '源目录已空，可放新文件', [
                 f'{src} 当前没有待整理文件夹', '放入新剧/电影后，下次清空提醒会自动喂料'],
-                tcolor='blue')
+                buttons=_card_buttons(), tcolor='blue')
             return
         picks = _feed_plan(dirs, limit)
         if not picks:
@@ -478,7 +514,7 @@ def _feed_run() -> None:
         _alert_push('feed', '自动喂料完成', [
             f'已转移 {len(moved)} 夹 / {total_files} 文件（{names_brief}）',
             '90 秒后自动触发「手动整理网盘文件」'],
-            tcolor='green')
+            buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
         if old:
             old.cancel()
@@ -1612,7 +1648,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.0', 'readonly': False,
+                'version': 'v2.8.2', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
