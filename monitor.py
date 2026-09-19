@@ -132,6 +132,10 @@ SETTINGS_DEFAULTS = {
     'cd2_pass': '',
     # ---- v2.8 hosts 自动更新（shared 域名漂移自愈） ----
     'hosts_enabled': False,        # hosts 自动巡检开关（默认关）
+    # ---- v2.8.8 hosts 域名配置化：默认空=不监控；代码不再写死 shared 域 ----
+    'hosts_domain': '',            # 要巡检的域名（用户自填；空=跳过巡检）
+    # ---- v2.8.8 喂料触发延迟可配置：转移成功后隔 N 秒触发整理（0=立即） ----
+    'feed_trigger_delay': 10,      # 默认 10 秒（旧版固定 90 秒退役；防 115 限流留缓冲）
     # ---- v2.8.7 测速目标配置化：默认空列表（零预设域名），设置页编辑器增删改 ----
     'speed_targets': [],           # [{'host':'域名','note':'备注','proxy':'host:port'|None}]
     # ---- v2.7 静止告警自动处置（只 restart，禁重建） ----
@@ -243,8 +247,8 @@ def feishu_push(text: str, buttons: list = None, title: str = '', tcolor: str = 
         # v2.8.2⑤：正文最末尾小字时间戳（note 元素，灰色小号）
         elements.append({'tag': 'note', 'elements': [
             {'tag': 'plain_text', 'content': f'推送时间 {ts_line}'}]})
-        # v2.8.7⑧ 按钮横排紧凑：column_set 两列布局，窄端自动下移换行，
-        # 按钮宽度随文字自适应（不拉满整行）；flex_weight 均分+column_margin 小间距
+        # v2.8.7⑧ 按钮横排紧凑；v2.8.8② 一行最多 4 个（stretch=权重铺满，4 列均分；
+        # >4 个自动换行下一行）。按钮宽度随文字、horizontal_spacing 小间距
         btns = [{'tag': 'button', 'text': {'tag': 'plain_text', 'content': b.get('text', '打开')},
                  'type': b.get('type', 'default'), 'url': b['url']} for b in buttons]
         if len(btns) == 1:
@@ -252,7 +256,7 @@ def feishu_push(text: str, buttons: list = None, title: str = '', tcolor: str = 
         else:
             cols = [{'tag': 'column', 'elements': [bt], 'flex_weight': 1,
                      'vertical_align': 'top'} for bt in btns]
-            elements.append({'tag': 'column_set', 'flex_mode': 'bisect',
+            elements.append({'tag': 'column_set', 'flex_mode': 'stretch',
                              'background_style': 'default', 'columns': cols,
                              'horizontal_spacing': '8px'})
         payload = {'msg_type': 'interactive', 'card': {
@@ -568,16 +572,18 @@ def _feed_run() -> None:
                 '已转移部分保留在目标目录，可在面板手动触发整理'])
             return
         # 转移全部成功 → 触发原生「手动整理网盘文件」（与面板/卡片按钮同源载荷）
-        # v2.7.2①：延迟 90 秒触发——转移刚消耗 115 接口调用，
-        # 立即触发整理会撞「已达到当前访问上限」（首跑 #21354 实证），留配额恢复窗口。
+        # v2.7.2①：转移刚消耗 115 接口调用，立即触发整理会撞「已达到当前访问上限」
+        # （首跑 #21354 实证）——v2.8.8 起延迟秒数可配置（默认 10，0=立即）
+        _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
         _alert_push('feed', '自动喂料完成', [
             f'已转移 {total_files} 个剧夹（{names_brief}）',
-            '90 秒后自动触发「手动整理网盘文件」'],
+            ('立即触发「手动整理网盘文件」' if _delay <= 0
+             else f'{_delay} 秒后自动触发「手动整理网盘文件」')],
             buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
         if old:
             old.cancel()
-        t = threading.Timer(90.0, _feed_delayed_trigger, args=(len(moved), total_files))
+        t = threading.Timer(float(_delay), _feed_delayed_trigger, args=(len(moved), total_files))
         t.daemon = True
         _feed_trigger['timer'] = t
         t.start()
@@ -665,10 +671,18 @@ def _auto_stall_handler(rid, c) -> None:
             f'任务 #{rid} 触发自动处置，但执行失败', f'错误：{out}'])
 
 
-# ============ v2.8 hosts 自动更新（shared.55565576.xyz 漂移自愈） ============
-_HOSTS_DOMAIN = 'shared.55565576.xyz'
+# ============ v2.8 hosts 自动更新（域名漂移自愈；v2.8.8 起域名可配置） ============
+# v2.8.8：域名改 settings['hosts_domain']（用户自填，默认空=不监控）；
+# _HOSTS_DOMAIN 兼容包装：优先取设置，空时回退旧常量（存量部署不受影响）。
+_HOSTS_DOMAIN_CONST = 'shared.55565576.xyz'
 _HOSTS_MARKER = '# etkn-monitor-managed'   # 我们负责的行的标记，其他行绝不碰
 _hosts_state = {'last_run': 0.0, 'timer': None}
+
+
+def _HOSTS_DOMAIN() -> str:
+    """当前监控域名：设置 hosts_domain 优先；未配置回退旧常量（保存量部署）。"""
+    d = str(SETTINGS.get('hosts_domain') or '').strip().lower().rstrip('.')
+    return d or _HOSTS_DOMAIN_CONST
 
 
 def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
@@ -729,16 +743,16 @@ def _hosts_check_once() -> None:
     解析失败=域名挂了：不更新 hosts，只推告警。只动带标记的那一行。"""
     now = time.time()
     _hosts_state['last_run'] = now
-    ip = _resolve_public(_HOSTS_DOMAIN)
+    ip = _resolve_public(_HOSTS_DOMAIN())
     if not ip:
         _alert_push('hosts_err', 'shared 域名解析失败（hosts 未改动）', [
-            f'223.5.5.5 解析 {_HOSTS_DOMAIN} 无 A 记录——可能域名/源站故障',
+            f'223.5.5.5 解析 {_HOSTS_DOMAIN()} 无 A 记录——可能域名/源站故障',
             '/etc/hosts 保持原值，业务暂按旧 IP 走，请人工确认'])
         return
-    cur = _ssh_router(f"grep -n '{_HOSTS_DOMAIN}' /etc/hosts || true")
+    cur = _ssh_router(f"grep -n '{_HOSTS_DOMAIN()}' /etc/hosts || true")
     found = []                       # (行号, 行内容)
     for ln in cur.splitlines():
-        if _HOSTS_DOMAIN in ln:
+        if _HOSTS_DOMAIN() in ln:
             no, _, rest = ln.partition(':')
             if no.isdigit() and rest.strip():
                 found.append((int(no), rest))
@@ -747,24 +761,24 @@ def _hosts_check_once() -> None:
         (x for x in found if len(x[1].split()) >= 2), None)
     if not pick:
         _alert_push('hosts_err', 'hosts 未找到绑定行（未改动）', [
-            f'{_HOSTS_DOMAIN} 在 iStoreOS /etc/hosts 无独立行（或行格式异常），请人工核对'])
+            f'{_HOSTS_DOMAIN()} 在 iStoreOS /etc/hosts 无独立行（或行格式异常），请人工核对'])
         return
     line_no, rest = pick
     old_ip = rest.split()[0]
     if old_ip == ip:
         return                          # 一致：静默
     # 原子更新：替换该行 + 追加标记注释
-    new_line = f"{ip} {_HOSTS_DOMAIN} {_HOSTS_MARKER}"
+    new_line = f"{ip} {_HOSTS_DOMAIN()} {_HOSTS_MARKER}"
     esc = new_line.replace('/', r'\/')
     script = (f"cp /etc/hosts /etc/hosts.bak-monitor && "
               f"sed -i '{line_no}s/.*/{esc}/' /etc/hosts && "
               f"/etc/init.d/dnsmasq restart >/dev/null 2>&1; "
-              f"grep -n '{_HOSTS_DOMAIN}' /etc/hosts")
+              f"grep -n '{_HOSTS_DOMAIN()}' /etc/hosts")
     out = _ssh_router(script, timeout=45)
-    ok = f'{ip} {_HOSTS_DOMAIN}' in out
+    ok = f'{ip} {_HOSTS_DOMAIN()}' in out
     if ok:
         # v2.8.3①：只在 hosts 真改了才推送，卡片写清具体改动（旧IP → 新IP）
-        _alert_push('hosts', f'{_HOSTS_DOMAIN}：{old_ip} → {ip}，hosts 已更新', [
+        _alert_push('hosts', f'{_HOSTS_DOMAIN()}：{old_ip} → {ip}，hosts 已更新', [
             f'223.5.5.5 公网解析与 hosts 绑定不一致，已将该行改为 {ip} 并重启 dnsmasq',
             '原行已备份 /etc/hosts.bak-monitor'],
             buttons=_card_buttons(), tcolor='green')
@@ -1719,7 +1733,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.7', 'readonly': False,
+                'version': 'v2.8.8', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1804,7 +1818,7 @@ class Handler(BaseHTTPRequestHandler):
                       ('count_500_threshold', 1), ('backlog_threshold', 1),
                       ('speed_threshold_ms', 1000),
                       ('stall_threshold_min', 1), ('stall_repeat_min', 5),
-                      ('feed_batch_limit', 1)):
+                      ('feed_batch_limit', 1), ('feed_trigger_delay', 0)):
             if k in b:
                 try:
                     v = int(b[k])
@@ -1832,6 +1846,11 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
         if 'speed_targets' in b:            # v2.8.7 测速目标：清洗落盘（空列表合法=清空全部）
             SETTINGS['speed_targets'] = _norm_speed_targets(b['speed_targets'])
+        if 'hosts_domain' in b and isinstance(b['hosts_domain'], str):   # v2.8.8 hosts 域名
+            hd = b['hosts_domain'].strip().lower().rstrip('.')
+            if hd and not re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+', hd):
+                hd = ''                     # 非法域名=拒收置空（巡检自动跳过）
+            SETTINGS['hosts_domain'] = hd
         try:
             settings_save()
         except Exception as e:
@@ -1968,7 +1987,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.7，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.8，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
