@@ -1,6 +1,7 @@
 services:
   etkn-monitor:
-    image: python:3.12-alpine
+    build: .                  # v2.8.10：改为本地构建（Dockerfile 装 sshpass）；镜像名固定
+    image: etkn-monitor:latest
     container_name: etkn-monitor
     restart: unless-stopped
     working_dir: /app

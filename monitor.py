@@ -509,9 +509,10 @@ def _feed_delayed_trigger(moved_n: int, total_files: int) -> None:
                               'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
     s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
     if s in (200, 201, 202):
+        # v2.8.11：话术简短化（不重复任务名，一句话说清去向）
         _alert_push('feed', '自动喂料已触发整理', [
-            f'本批 {moved_n} 夹 / {total_files} 文件已在待整理目录',
-            '整理任务已提交，出结果后正常推清空提醒'],
+            f'本批 {moved_n} 个剧夹已进入整理队列',
+            '出结果后正常推清空提醒'],
             buttons=_card_buttons(), tcolor='green')
         rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
         if rid:
@@ -576,10 +577,11 @@ def _feed_run() -> None:
         # v2.7.2①：转移刚消耗 115 接口调用，立即触发整理会撞「已达到当前访问上限」
         # （首跑 #21354 实证）——v2.8.8 起延迟秒数可配置（默认 10，0=立即）
         _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
+        # v2.8.11：话术简短化（不列夹名，夹名只在失败卡出现）
         _alert_push('feed', '自动喂料完成', [
-            f'已转移 {total_files} 个剧夹（{names_brief}）',
-            ('立即触发「手动整理网盘文件」' if _delay <= 0
-             else f'{_delay} 秒后自动触发「手动整理网盘文件」')],
+            f'已转移 {total_files} 个剧夹到待整理目录',
+            ('立即自动触发整理' if _delay <= 0
+             else f'{_delay} 秒后自动触发整理')],
             buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
         if old:
@@ -1095,10 +1097,9 @@ def check_organize_running(now=None):
             a_que = sum((by.get(k) or {}).get('queued', 0) for k in org_keys)
             lines = ['✅ ETKN 整理任务已清空，可以整理下一批']
             scope = SETTINGS['finish_scope']
-            task_part = f"任务 完成{batch['done']}·失败{batch['failed']}·取消{batch['cancelled']}"
-            media_part = f"媒体 完成{batch['m_ok']}·失败{batch['m_bad']}"
-            if scope == 'ok':                # 仅成功范围：失败数值归零展示，隐藏失败细节行
-                media_part = f"媒体 完成{batch['m_ok']}·失败0"
+            # v2.8.11 排版：每行一字段、左对齐（预览样卡用户已确认）
+            f_show = 0 if scope == 'ok' else batch['failed']
+            c_show = 0 if scope == 'ok' else batch['cancelled']
             # v2.5.5 口径：入库/媒体只含刮削入库；流程任务（手动/网盘整理）单独标注，
             # 按类分列计数；全部为 0 则整行省略
             def _fbit(name, d, f, c):
@@ -1112,18 +1113,28 @@ def check_organize_running(now=None):
                          for k, v in (('手动整理', batch['flow'].get('手动', (0, 0, 0))),
                                       ('网盘整理', batch['flow'].get('网盘', (0, 0, 0))))
                          if any(v)]
-            lines.append(f'本批：入库 {task_part} ｜ {media_part}')
+            _mbad = 0 if scope == 'ok' else batch['m_bad']
+            _fail_bits = f'失败 {f_show}'
+            if _mbad:
+                _fail_bits += f' · 媒体失败 {_mbad}'
+            if c_show:
+                _fail_bits += f' · 取消 {c_show}'
+            lines.append(f'本批入库：{batch["done"]} 任务 · {batch["m_ok"]} 媒体 · {_fail_bits}')
             if flow_bits:
-                lines.append('　　　流程 ' + ' · '.join(flow_bits))
+                lines.append('流程任务：' + ' · '.join(flow_bits))
             if batch['last']:
-                lines.append(f"最后任务：#{batch['last']['id']}「{batch['last']['title'][:40]}」"
-                             f"· 耗时 {batch['last']['min']} 分钟")
+                lines.append(f"最后任务：#{batch['last']['id']} "
+                             f"{_clean_dir_name(batch['last']['title'])[:32]}"
+                             f"（耗时 {batch['last']['min']} 分钟）")
             if batch['started_at']:
                 tmin = max(1, round((now - batch['started_at']).total_seconds() / 60))
-                lines.append(f'本批总耗时 {tmin} 分钟（{_fmt_hhmm(batch["started_at"])} 开始 → '
-                             f'{_fmt_hhmm(now)} 清空）')
-            lines.append(f'当前队列：刮削 运行{qr}/排队{qq} · 网盘 {nr}/{nq2} · '
-                         f'共享 运行{sr}/排队{sq} · 追剧 运行{wr}/排队{wq}')
+                lines.append(f'本批耗时：{tmin} 分钟'
+                             f'（{_fmt_hhmm(batch["started_at"])} → {_fmt_hhmm(now)}）')
+            lines.append('当前队列：')
+            lines.append(f'刮削 运行 {qr} / 排队 {qq}')
+            lines.append(f'网盘 运行 {nr} / 排队 {nq2}')
+            lines.append(f'共享 运行 {sr} / 排队 {sq}')
+            lines.append(f'追剧 运行 {wr} / 排队 {wq}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
             btns = _card_buttons()
@@ -1638,6 +1649,19 @@ def poll_once():
         {'id': d['id'], 'kind': d['kind'], 'wf': d['wf'], 'title': d['title'][:40],
          'media': d['media'], 'bad_media': d['bad_media'], 'finished_at': d['finished_at'][:19]}
         for d in done if d['status'] in ('failed', 'partial')][:50]
+    # v2.8.11：喂料转移失败（monitor 自身动作，ETKN 无任务记录）也进「今日失败」——
+    # 从推送史派生今日 feed_err 合成行（id=0、wf='feed' 不可重试；重启后随推送史清空）
+    for ph in _push_hist:
+        if ph.get('kind') != 'feed_err':
+            continue
+        ts = ph.get('ts') or ''
+        if ts[:10] != today_prefix[:10]:   # 同一天（ISO 前缀含 T00:00:00，不能直接 startswith）
+            continue
+        t = (ph.get('text') or '').replace('⚠️ ETKN 告警 · ', '')
+        snap['failed_today'].append({'id': 0, 'kind': '喂料', 'wf': 'feed',
+                                     'title': t[:40], 'media': 0, 'bad_media': 0,
+                                     'finished_at': ts})
+    snap['failed_today'] = snap['failed_today'][:50]
     return snap
 
 
@@ -1748,7 +1772,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.10', 'readonly': False,
+                'version': 'v2.8.11', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2016,7 +2040,7 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.10，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.11，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
