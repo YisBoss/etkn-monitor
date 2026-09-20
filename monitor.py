@@ -427,12 +427,15 @@ def _clean_dir_name(name: str) -> str:
 
 
 def _feed_cache_drop(moved_names: list) -> None:
-    """转移成功后从缓存里剔除已转走的夹（防「目标同名误报」：已转夹不再出现在计划里）。
-    v2.8.6：剔除逻辑保留（配合 10min 短缓存仍有意义——同窗口二次喂料不再重试已转夹）。"""
+    """转移成功后从缓存里剔除已转走的条目（v2.8.16：夹+散文件都剔）。
+    9/20 实锤：只剔夹不剔散文件时，10 分钟缓存窗口内的下一轮喂料会把已转走的
+    散文件当真（幽灵文件）→ WebDAV MOVE 404 → 整批中止（Grow Up Show/不是你的恋爱两批）。"""
     if _feed_scan_cache['dirs'] is None:
         return
     gone = set(moved_names)
     _feed_scan_cache['dirs'] = [n for n in _feed_scan_cache['dirs'] if n not in gone]
+    _feed_scan_cache['files'] = [n for n in (_feed_scan_cache.get('files') or [])
+                                 if n not in gone]
 
 
 def _feed_plan(dirs: list, limit: int) -> list:
@@ -444,9 +447,11 @@ def _feed_plan(dirs: list, limit: int) -> list:
 
 
 def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
-    """整夹剪切 src→dst（v2.8：经 CD2 WebDAV MOVE，同挂载=115 秒级移动）；任一失败即停并回报。
-    返回 (成功夹名列表, 失败描述或 '')。只单向 src→dst，禁反向/删除；目标同名不覆盖。"""
-    ok_names, err = [], ''
+    """整夹剪切 src→dst（v2.8：经 CD2 WebDAV MOVE，同挂载=115 秒级移动）。
+    v2.8.16：MOVE 返回 404=源文件在 115 端已不存在（CD2 列表缓存残影/已消失）——
+    跳过该项继续转剩余（9/20 Grow Up Show 批实证：整批 404 全是幽灵文件）；
+    其它错误仍即停回报。返回 (成功名单, 失败描述或 '', 跳过名单)。"""
+    ok_names, skipped, err = [], [], ''
     for name in picks:
         if _cd2_exists(dst, name):   # 目标同名已存在：不覆盖（防数据破坏）
             # v2.8.11a：错误文案用清洗后主名（剥 {tmdb-xxx} 后缀），失败卡不再出现刮削残渣
@@ -454,10 +459,13 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
             break
         ok, e2 = _cd2_move(src, dst, name)
         if not ok:
+            if 'HTTP 404' in (e2 or ''):
+                skipped.append(name)   # 源已无：跳过（不是喂料故障）
+                continue
             err = e2 or f'{_clean_dir_name(name)[:40]}：移动失败'
             break
         ok_names.append(name)
-    return ok_names, err
+    return ok_names, err, skipped
 
 
 def _recent_organize_running(window_min: int = 3) -> bool:
@@ -585,25 +593,42 @@ def _feed_run() -> None:
         picks_dirs = dirs[:limit]
         picks_files = loose[:max(0, limit - len(picks_dirs))]
         total_items = len(picks_dirs) + len(picks_files)
-        # 转移顺序：先夹后散文件（同一 MOVE 通道，任一失败即停并回报）
-        moved_dirs, err = _feed_move_batch(src, dst, picks_dirs)
+        # 转移顺序：先夹后散文件；v2.8.16：404（源已无）跳过继续，其余错误即停回报
+        moved_dirs, err, skip_d = _feed_move_batch(src, dst, picks_dirs)
         if err:
             _feed_err_partial(picks_dirs, picks_files, moved_dirs, [], total_items, err)
             return
-        moved_files, err = _feed_move_batch(src, dst, picks_files)
-        if err or (moved_dirs or moved_files) == []:
+        moved_files, err, skip_f = _feed_move_batch(src, dst, picks_files)
+        if err:
             _feed_err_partial(picks_dirs, picks_files, moved_dirs, moved_files, total_items, err)
             return
-        if moved_dirs:
-            _feed_cache_drop(list(moved_dirs))   # 已转夹剔除缓存（防同名误报）
+        if not moved_dirs and not moved_files:
+            _feed_cache_drop(list(skip_d) + list(skip_f))   # 全是幽灵文件：剔缓存防空转
+            _alert_push('feed_err', '自动喂料转移失败', [
+                f'本批 {total_items} 项全部跳过：源文件在 115 端已不存在（多半是列表缓存残影，'
+                '上一批已转走或源已删除）', '已把这些条目从扫描缓存剔除，下轮不再误报'],
+                buttons=_card_buttons(), tcolor='yellow')
+            return
+        _feed_cache_drop(list(moved_dirs) + list(moved_files) + list(skip_d) + list(skip_f))
         # v2.8.14：喂料合并单卡——转移完成+触发整理合一推送，不再连发两张卡
         _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
         _n_d, _n_f = len(moved_dirs), len(moved_files)
-        _moved_line = ('已转移 ' + (f'{_n_d} 个剧夹' if _n_d else '') +
-                       (' + ' if _n_d and _n_f else '') +
-                       (f'{_n_f} 个散文件' if _n_f else '') +
-                       '到待整理目录，整理已自动提交，完成后推清空提醒')
-        _alert_push('feed', '自动喂料完成', [_moved_line],
+        # v2.8.16 需求②：转移完顺手列一次目标目录第一层（一次 PROPFIND，不加 115 负担），
+        # 在「已转移」与「整理已自动提交」之间插「待整理目录剩余」行
+        _left = _cd2_list_entries(dst)
+        _left_line = None
+        if _left is not None:
+            _xl, _yl = len(_left[0]), len(_left[1])
+            _left_line = f'待整理目录剩余：{_xl} 个文件夹 + {_yl} 个散文件'
+        _lines = ['已转移 ' + (f'{_n_d} 个剧夹' if _n_d else '') +
+                  (' + ' if _n_d and _n_f else '') +
+                  (f'{_n_f} 个散文件' if _n_f else '') + '到待整理目录']
+        if _left_line:
+            _lines.append(_left_line)
+        if skip_d or skip_f:
+            _lines.append(f'另有 {len(skip_d) + len(skip_f)} 项源文件已不存在，已跳过')
+        _lines.append('整理已自动提交，完成后推清空提醒')
+        _alert_push('feed', '自动喂料完成', _lines,
                     buttons=_card_buttons(), tcolor='green')
         old = _feed_trigger.get('timer')
         if old:
@@ -1155,10 +1180,11 @@ def check_organize_running(now=None):
                 tmin = max(1, round((now - batch['started_at']).total_seconds() / 60))
                 lines.append(f'本批耗时：{tmin} 分钟'
                              f'（{_fmt_hhmm(batch["started_at"])} → {_fmt_hhmm(now)}）')
-            # v2.8.15：队列一行简写「排N/行N」（与面板一致），不再分两行
+            # v2.8.15a：队列两行，第二行共享对齐「当前队列：」之后（5 全角空格缩进）
             lines.append('当前队列：'
-                         f'刮削 排{qq}/行{qr} · 网盘 排{nq2}/行{nr}'
-                         f' · 共享 排{sq}/行{sr} · 追剧 排{wq}/行{wr}')
+                         f'刮削 排{qq}/行{qr} · 网盘 排{nq2}/行{nr}')
+            lines.append('　　　　　'
+                         f'共享 排{sq}/行{sr} · 追剧 排{wq}/行{wr}')
             if batch['failed'] and scope != 'ok':
                 lines.append(f"⚠ 本批 {batch['failed']} 个失败，可在面板任务统计页查看并重试")
                 # v2.8.13：失败明细汇总进卡（≤5 条逐行「标题｜阶段｜原因」，超出折叠计数）
@@ -1430,6 +1456,55 @@ def collect_today_done(today_prefix: str):
     return out
 
 
+_dayweek_cache = {'ts': 0.0, 'date': '', 'day': None, 'week': None, 'rebuilding': False}
+_DAYWEEK_INTERVAL = 900   # 15 分钟后台重建一次
+
+
+def _dayweek_rebuild() -> None:
+    """v2.8.15c：今日/本周完成后台全量重建（唯一可靠口径）。
+    实证（9/20）：workflows 列表页内/跨页均乱序（第 1 页混昨日任务、第 2 页又回 13:24），
+    任何「按时间提前停页/增量水位」都会漏算；records 列表接口 per_page 被无视+41 秒超时，
+    也不可用。唯一权威=全量翻页累加 succeeded_count（34 页约 210 秒），后台低频跑，
+    快照直读缓存。"""
+    if _dayweek_cache['rebuilding']:
+        return
+    _dayweek_cache['rebuilding'] = True
+    try:
+        today0 = _today_prefix()
+        week_cut = (_now() - timedelta(days=7)).isoformat()
+        day_ok = week_ok = 0
+        offset = 0
+        while offset < 8000:   # 保险上限 80 页
+            s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
+            items = b.get('items', []) if isinstance(b, dict) else []
+            if not items:
+                break
+            for it in items:
+                ttl = it.get('display_title') or ''
+                if not ttl.startswith(INGEST_PREFIXES):
+                    continue
+                fin = it.get('finished_at') or it.get('created_at') or ''
+                if fin < week_cut:
+                    continue
+                sc = it.get('succeeded_count') or 0
+                week_ok += sc
+                if fin >= today0:
+                    day_ok += sc
+            offset += PAGE
+        _dayweek_cache.update({'ts': time.time(), 'date': today0[:10],
+                               'day': day_ok, 'week': week_ok})
+    except Exception:
+        pass
+    finally:
+        _dayweek_cache['rebuilding'] = False
+
+
+def _dayweek_loop() -> None:
+    while True:
+        _dayweek_rebuild()
+        time.sleep(_DAYWEEK_INTERVAL)
+
+
 def collect_records_day(today_prefix: str):
     """今日媒体记录（p115/records）——全站统一媒体口径。
     v2.8.13 修复：不再信 API 的 total 字段——ETKN records 列表 total 与实收条数严重
@@ -1681,19 +1756,18 @@ def poll_once():
                     'items': sum(d['media'] for d in done),
                     'ok_media': sum(d['ok_media'] for d in done),
                     'bad_media': sum(d['bad_media'] for d in done)}
-    snap['records'] = collect_records_day(today_prefix)
-    # v2.7.1：本周完成（口径=records success 累计值，与 ETKN 整理记录「本周处理」同源）
-    # v2.8.13：total 为坏值——翻页实收累计（per_page=1000，≤3 页保险上限）
-    week_cut = (_now() - timedelta(days=7)).isoformat()
-    _wk = 0
-    for _pg in (1, 2, 3):
-        s, b = api_get(f'/api/p115/records?page={_pg}&per_page=1000&status=success'
-                       f'&processed_from={urllib.parse.quote(week_cut)}')
-        _its = (b or {}).get('items') or [] if s == 200 else []
-        _wk += len(_its)
-        if len(_its) < 1000:
-            break
-    snap['week'] = {'media': _wk}
+    # v2.8.15c：今日/本周完成直读后台重建缓存（_dayweek_rebuild 全量翻页，15 分钟一轮）
+    _dw_ok = (_dayweek_cache['date'] == _today_prefix()[:10]
+              and _dayweek_cache['day'] is not None)
+    _dw_fresh = time.time() - _dayweek_cache['ts'] < 1800
+    # v2.8.16 需求①：未识别口径=records unrecognized 的 total（累计，与 ETKN 界面同源；
+    # per_page=1 轻量请求 0.1s；实测该状态下 total 可信：2263==12 页翻页实收）
+    _s_ur, _b_ur = api_get('/api/p115/records?per_page=1&page=1&status=unrecognized')
+    _ur_total = (_b_ur or {}).get('total') or 0 if _s_ur == 200 else None
+    snap['records'] = {'success': _dayweek_cache['day'] if (_dw_ok and _dw_fresh) else None,
+                       'unrecognized': _ur_total,
+                       'total': _dayweek_cache['day'] if (_dw_ok and _dw_fresh) else None}
+    snap['week'] = {'media': _dayweek_cache['week'] if _dw_fresh else None}
     snap['failed_today'] = [
         {'id': d['id'], 'kind': d['kind'], 'wf': d['wf'], 'title': d['title'][:40],
          'media': d['media'], 'bad_media': d['bad_media'],
@@ -1823,7 +1897,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.15', 'readonly': False,
+                'version': 'v2.8.16', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -1845,7 +1919,11 @@ class Handler(BaseHTTPRequestHandler):
                                   'status': x.get('status'), 'reason': (x.get('reason') or x.get('error') or '')[:120],
                                   'at': (x.get('processed_at') or x.get('created_at') or '')[:19]})
             items.sort(key=lambda x: x['at'], reverse=True)
+            # v2.8.16：累计未识别（与面板异常卡同源；ETKN 界面同口径）
+            _s_ur, _b_ur = api_get('/api/p115/records?per_page=1&page=1&status=unrecognized')
+            _ur_all = (_b_ur or {}).get('total') or 0 if _s_ur == 200 else 0
             return self._send(200, json.dumps({'date': today_prefix, 'total': total or len(items),
+                                               'unrecognized_all': _ur_all,
                                                'items': items[:60]}, ensure_ascii=False).encode())
         if p == '/api/settings':
             return self._do_settings_get()
@@ -2089,9 +2167,10 @@ def main():
     threading.Thread(target=fast_loop, daemon=True).start()
     threading.Thread(target=alarm_loop, daemon=True).start()
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
+    threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.11，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.16，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
