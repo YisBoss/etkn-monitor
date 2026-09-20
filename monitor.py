@@ -469,24 +469,33 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
 
 
 def _recent_organize_running(window_min: int = 3) -> bool:
-    """v2.8.1④：任务中心最近 N 分钟内有没有新的网盘整理（p115_organize）任务。
-    背景：#21843 实证壳任务的 /api/workflows/{id} 明细 chain_runs=[]（即使
-    chain_run_count=1，明细口不给数据），派生任务 #21844（parent=21843）只能从
-    任务列表反查。翻 2 页（200 条）足够覆盖 3 分钟窗口的新任务量。"""
+    """v2.8.16b：最近 N 分钟内有没有新网盘整理（p115_organize）任务。
+    v2.8.1④ 背景：#21843 明细口 chain_runs=[]（count=1 也空），只能从列表反查。
+    v2.8.16b 关键修正：不带 status 的 /api/workflows?page=N 形式 page 参数被服务端
+    无视（9/20 实证 page1/2/3 返回同一批 100 条），200 条固定集在任务爆量期不保证含
+    最近 3 分钟的新任务 → 判据②失效（#31278 误报根因）。改用 status=running/
+    succeeded 两种带状态查询（翻页/limit 正常，13:44 实证），偏移翻到窗口边界即停。"""
     cutoff = _now() - timedelta(minutes=window_min)
-    try:
-        for page in (1, 2):
-            s, b = api_get(f'/api/workflows?page={page}&limit=100')
+    cut_iso = cutoff.isoformat()
+    for st in ('running', 'succeeded'):
+        off = 0
+        while off < 400:                      # 4 页保险：窗口内任务量异常大也不至于无限翻
+            s, b = api_get(f'/api/workflows?status={st}&limit={PAGE}&offset={off}')
             if s != 200 or not isinstance(b, dict):
-                return False
-            for x in (b.get('items') or []):
+                break
+            its = b.get('items') or []
+            if not its:
+                break
+            page_newest = max((x.get('created_at') or '') for x in its)
+            for x in its:
                 if x.get('workflow_type') != 'p115_organize':
                     continue
                 ca = _parse_ts(x.get('created_at'))
                 if ca and ca >= cutoff:
                     return True
-    except Exception:
-        return False
+            if page_newest < cut_iso:          # 整页都早于窗口 → 该状态查完了
+                break
+            off += PAGE
     return False
 
 
@@ -518,10 +527,14 @@ def _watch_shell_run(rid: int, source: str) -> None:
                 if derived:
                     return                            # 已派生真实整理：静默
                 if waited >= 180:
-                    _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
-                        f'手动整理壳任务 #{rid} 成功，但 3 分钟内未派生任何整理任务（引擎扫描 115 空转）',
-                        '待整理目录文件不会丢，全部原样等待',
-                        '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
+                    # v2.8.16b：按壳任务实际状态出文案（v2.8.1④ 起无条件写「成功」，
+                    # #31278 running 中即报「成功未派生」=文案失实）；且壳仍在 running
+                    # 时不算空转（还没扫完），只有 succeeded 后满 180 秒无派生才告警
+                    if st == 'succeeded':
+                        _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
+                            f'手动整理壳任务 #{rid} 已成功，但 3 分钟内未派生任何整理任务（引擎扫描 115 空转）',
+                            '待整理目录文件不会丢，全部原样等待',
+                            '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
                     return
         except Exception:
             pass                                # 监视线程绝不影响主流程
@@ -613,13 +626,13 @@ def _feed_run() -> None:
         # v2.8.14：喂料合并单卡——转移完成+触发整理合一推送，不再连发两张卡
         _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
         _n_d, _n_f = len(moved_dirs), len(moved_files)
-        # v2.8.16 需求②：转移完顺手列一次目标目录第一层（一次 PROPFIND，不加 115 负担），
-        # 在「已转移」与「整理已自动提交」之间插「待整理目录剩余」行
-        _left = _cd2_list_entries(dst)
+        # v2.8.16a 修正：列的是源目录第一层（单次请求，不加 115 负担）——
+        # 语义=这批转走后源目录还剩多少待喂；v2.8.16 误写成目标目录
+        _left = _cd2_list_entries(src)
         _left_line = None
         if _left is not None:
             _xl, _yl = len(_left[0]), len(_left[1])
-            _left_line = f'待整理目录剩余：{_xl} 个文件夹 + {_yl} 个散文件'
+            _left_line = f'源目录剩余：{_xl} 个文件夹 + {_yl} 个散文件'
         _lines = ['已转移 ' + (f'{_n_d} 个剧夹' if _n_d else '') +
                   (' + ' if _n_d and _n_f else '') +
                   (f'{_n_f} 个散文件' if _n_f else '') + '到待整理目录']
@@ -659,7 +672,7 @@ def _auto_restart_allowed() -> str:
 def _auto_restart_etkn() -> tuple:
     """执行 docker restart etkn（SSH 白名单单命令；monitor 容器内无 docker/sock）。
     返回 (是否成功, 输出摘要)。"""
-    PW = ''
+    PW = str(os.environ.get('SUDO_PASSWORD') or '')   # v2.8.17：compose env_file 注入优先
     for line in ('/hermes/.env', '/app/hermes/.env', '/vol1/@appdata/trim.hermes/hermes/.env'):
         try:
             with open(line, encoding='utf-8') as f:
@@ -730,10 +743,22 @@ _HOSTS_MARKER = '# etkn-monitor-managed'   # 我们负责的行的标记，其�
 _hosts_state = {'last_run': 0.0, 'timer': None}
 
 
+def _HOSTS_DOMAINS() -> list:
+    """v2.8.17：监控域名列表——设置 hosts_domain 支持逗号/分号/空白分隔多个；
+    未配置回退旧常量（保存量部署）。逐个清洗（小写、去尾点、非空去重）。"""
+    raw = str(SETTINGS.get('hosts_domain') or _HOSTS_DOMAIN_CONST)
+    out = []
+    for tok in __import__('re').split(r'[,，;；\s]+', raw):
+        d = tok.strip().lower().rstrip('.')
+        if d and d not in out:
+            out.append(d)
+    return out
+
+
 def _HOSTS_DOMAIN() -> str:
-    """当前监控域名：设置 hosts_domain 优先；未配置回退旧常量（保存量部署）。"""
-    d = str(SETTINGS.get('hosts_domain') or '').strip().lower().rstrip('.')
-    return d or _HOSTS_DOMAIN_CONST
+    """兼容包装：首个监控域名（v2.8.17 起多域名用 _HOSTS_DOMAINS）。"""
+    ds = _HOSTS_DOMAINS()
+    return ds[0] if ds else '' 
 
 
 def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
@@ -792,13 +817,14 @@ def _ssh_router(cmd: str, timeout: int = 30) -> str:
 
 
 def _hosts_check_once() -> None:
-    """单次巡检：公共 DNS 解析 → 对比 /etc/hosts → 不同则原子更新该行+重启 dnsmasq+推送。
-    解析失败=域名挂了：不更新 hosts，只推告警。只动带标记的那一行。
+    """单次巡检（v2.8.17 多域名）：路由器连通性只查一次，然后逐域名执行巡检。
+    每域名独立：公网解析 → 对比 /etc/hosts → 不同则原子更新该行+重启 dnsmasq+推送；
+    解析失败=该域名挂了：不更新 hosts，只推告警。只动带标记的那一行。
     v2.8.10 公版化：路由器连接信息全读设置；未配置/解析失败→跳过不误报。"""
     now = time.time()
     _hosts_state['last_run'] = now
-    domain = _HOSTS_DOMAIN()
-    if not domain:
+    domains = _HOSTS_DOMAINS()
+    if not domains:
         return                      # v2.8.8：未配置域名=不监控，静默
     _r = _ssh_router('true', timeout=15)
     _rconfigured = bool(SETTINGS.get('router_ip') and SETTINGS.get('router_user')
@@ -808,6 +834,15 @@ def _hosts_check_once() -> None:
             '请到设置页填写：软路由 IP / SSH 端口 / SSH 用户名 / SSH 密码',
             '巡检需要这些信息登录路由器修改 /etc/hosts；本次仅告警不改行'])
         return
+    for _d in domains:              # v2.8.17：逐域名巡检（一域一 IP，互不影响）
+        try:
+            _hosts_check_one(_d)
+        except Exception:
+            pass
+
+
+def _hosts_check_one(domain: str) -> None:
+    """单域名巡检核心（v2.8.17 自 _hosts_check_once 抽出，逻辑不变）。"""
     ip = _resolve_public(domain)
     if not ip:
         _alert_push('hosts_err', f'{domain} 域名解析失败（hosts 未改动）', [
@@ -1457,33 +1492,42 @@ def collect_today_done(today_prefix: str):
 
 
 _dayweek_cache = {'ts': 0.0, 'date': '', 'day': None, 'week': None, 'rebuilding': False}
-_DAYWEEK_INTERVAL = 900   # 15 分钟后台重建一次
+_DAYWEEK_INTERVAL = 300   # v2.8.17：5 分钟一轮（fast 停页单轮秒级）
 
 
 def _dayweek_rebuild() -> None:
-    """v2.8.15c：今日/本周完成后台全量重建（唯一可靠口径）。
-    实证（9/20）：workflows 列表页内/跨页均乱序（第 1 页混昨日任务、第 2 页又回 13:24），
-    任何「按时间提前停页/增量水位」都会漏算；records 列表接口 per_page 被无视+41 秒超时，
-    也不可用。唯一权威=全量翻页累加 succeeded_count（34 页约 210 秒），后台低频跑，
-    快照直读缓存。"""
+    """v2.8.17：今日/本周完成统一重建（唯一可靠口径，替代 15c 全量翻页）。
+    15c 方案结构性缺陷（今日/本周反复清零的根因，9/21 实证）：
+    ①全量翻页随任务量线性变慢（51 页 342 秒且每天 +50 页），终将超过 1800s 新鲜度闸
+      →「宁空勿错」永真 → 永久清零；②容器重启内存缓存清零，全量重建 5+ 分钟空窗；
+    ③0 点日期翻转瞬间显空，要等最多 15 分钟重建。
+    实测（9/21）：带 status 翻页「跨页单调、页内批间乱序（幅≈一批几分钟）」——
+    安全停页规则=翻到某页全部 created_at 的最小值 < 边界-1h 即停（1h 余量吸收乱序）。
+    今日边界（0 点）通常第 1~2 页内到达，5 秒级完成；本周边界最坏=7 天任务量，
+    与增长成正比但每轮都翻，单次 <6 分钟且只比全量省 7 天外的页。
+    触发：_dayweek_loop 每 5 分钟一轮 + 启动即跑（重启空窗从 5 分钟缩到 7 秒）。"""
     if _dayweek_cache['rebuilding']:
         return
     _dayweek_cache['rebuilding'] = True
     try:
         today0 = _today_prefix()
         week_cut = (_now() - timedelta(days=7)).isoformat()
+        # 停页边界=两者取早（更晚的时间边界先到）；1h 余量吸收页内批间乱序
+        bound = min(today0, week_cut)
+        stop_line = (datetime.fromisoformat(bound) - timedelta(hours=1)).isoformat()
         day_ok = week_ok = 0
         offset = 0
-        while offset < 8000:   # 保险上限 80 页
+        while offset < 20000:   # 保险上限 200 页（7 天窗口内不会触顶）
             s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
             items = b.get('items', []) if isinstance(b, dict) else []
             if not items:
                 break
-            for it in items:
+            cas = [(it.get('created_at') or it.get('finished_at') or '') for it in items]
+            for it, ca in zip(items, cas):
                 ttl = it.get('display_title') or ''
                 if not ttl.startswith(INGEST_PREFIXES):
                     continue
-                fin = it.get('finished_at') or it.get('created_at') or ''
+                fin = it.get('finished_at') or ca or ''
                 if fin < week_cut:
                     continue
                 sc = it.get('succeeded_count') or 0
@@ -1491,6 +1535,8 @@ def _dayweek_rebuild() -> None:
                 if fin >= today0:
                     day_ok += sc
             offset += PAGE
+            if min(cas) < stop_line:      # v2.8.17 安全停页：本页最小时间已过界-1h
+                break
         _dayweek_cache.update({'ts': time.time(), 'date': today0[:10],
                                'day': day_ok, 'week': week_ok})
     except Exception:
@@ -1500,8 +1546,13 @@ def _dayweek_rebuild() -> None:
 
 
 def _dayweek_loop() -> None:
+    _last_date = _dayweek_cache.get('date')
     while True:
         _dayweek_rebuild()
+        # v2.8.17：0 点日期翻转后立刻补一轮（消除翻转空窗，从最长 5 分钟缩到秒级）
+        if _dayweek_cache.get('date') != _last_date:
+            _last_date = _dayweek_cache.get('date')
+            continue
         time.sleep(_DAYWEEK_INTERVAL)
 
 
@@ -1759,7 +1810,7 @@ def poll_once():
     # v2.8.15c：今日/本周完成直读后台重建缓存（_dayweek_rebuild 全量翻页，15 分钟一轮）
     _dw_ok = (_dayweek_cache['date'] == _today_prefix()[:10]
               and _dayweek_cache['day'] is not None)
-    _dw_fresh = time.time() - _dayweek_cache['ts'] < 1800
+    _dw_fresh = time.time() - _dayweek_cache['ts'] < 3600   # v2.8.17：fast 5 分钟一轮，1h 闸=宁显旧不显零
     # v2.8.16 需求①：未识别口径=records unrecognized 的 total（累计，与 ETKN 界面同源；
     # per_page=1 轻量请求 0.1s；实测该状态下 total 可信：2263==12 页翻页实收）
     _s_ur, _b_ur = api_get('/api/p115/records?per_page=1&page=1&status=unrecognized')
@@ -1897,7 +1948,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.16', 'readonly': False,
+                'version': 'v2.8.17', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2170,7 +2221,7 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.16，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.17，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
