@@ -130,7 +130,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.19</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.20</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -595,7 +595,7 @@ async function cfgTestPush(){
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
   b.disabled=false;b.textContent='发送测试推送';
 }
-async async function hostsRecheck(){
+async function hostsRecheck(){
   const b=document.getElementById('btnHostsRe');
   const box=document.getElementById('hostsIps');
   b.disabled=true;const old=b.textContent;b.textContent='检测中…';
@@ -621,7 +621,7 @@ async function hostsStatus(){
     hostsShow(d.results||[]);
   }catch(e){}
 }
-function cfgCheck500(){
+async function cfgCheck500(){
   const b=document.getElementById('btnCfg500');b.disabled=true;b.textContent='检测中…';
   try{
     const d=await (await fetch('/api/check-500-now',{method:'POST'})).json();
@@ -675,7 +675,8 @@ async function refresh(){
     const slowTs=(s.slow_ts||'').slice(11,16);
     const lagMin=slowTs?Math.round((lastOkTs-new Date(s.slow_ts).getTime())/60000):null;
     const lagTxt=lagMin==null?'':(lagMin>=1?` · 统计截至 ${slowTs}(滞后${lagMin}分)`:'');
-    document.getElementById('updated').innerHTML=`更新于 ${hm}${lagTxt} · <span class="dot" style="background:var(--${s.healthy?'ok':'bad'});margin:0 2px 0 6px"></span>${s.healthy?'服务正常':'服务异常'}`;
+    const staleTxt=s.stale?` · <span style="color:var(--warn)">数据恢复中（当前为重启前缓存，后台更新中）</span>`:'';
+    document.getElementById('updated').innerHTML=`更新于 ${hm}${lagTxt}${staleTxt} · <span class="dot" style="background:var(--${s.healthy?'ok':'bad'});margin:0 2px 0 6px"></span>${s.healthy?'服务正常':'服务异常'}`;
     const a=s.active||{}, rec=s.records||{}, dn=s.done||{};
     document.getElementById('cQueued').innerHTML=fmtCard(a.media||0,'媒体');
     document.getElementById('cQueuedSub').textContent=`${a.tasks||0} 任务（排队+运行）`;

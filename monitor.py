@@ -1161,10 +1161,13 @@ def check_organize_running(now=None):
             last = None
             last_fin = None
             win_ok = False
+            _seen_ids = set()                     # v2.8.20b：现场页已收任务 id（缓存去重）
             for st in ('succeeded', 'partial', 'failed', 'cancelled'):
                 off = 0
-                while off < 30000:                # v2.8.18：全翻到空页（succeeded 全量
-                    #   5200+ 条>旧 500 上限→深页批窗口漏统计；30000=异常硬闸）
+                while off < 30000:                # v2.8.20b：先查 _today_done 缓存
+                    #   （整轮全量今日明细，新鲜度≤1 轮），缓存已覆盖窗口的绝大部分；
+                    #   这里只翻顶部 2 页现场补漏（缓存未及的最新完成任务），去重合并。
+                    #   原 v2.8.18 全翻 17 分钟（succeeded 百页级）=清空卡延迟 8~10 分根因
                     s4, b4 = api_get(f'/api/workflows?status={st}&limit={PAGE}&offset={off}')
                     if s4 != 200 or not isinstance(b4, dict):
                         win_ok = False            # 任一状态页失败=窗口数据不完整
@@ -1172,6 +1175,8 @@ def check_organize_running(now=None):
                     win_ok = True
                     its = b4.get('items') or []
                     for t in its:
+                        if t.get('id') is not None:
+                            _seen_ids.add(t['id'])
                         fin = _parse_ts(t.get('finished_at'))
                         if fin is None or fin < w0 or fin > now:
                             continue
@@ -1215,9 +1220,47 @@ def check_organize_running(now=None):
                     if len(its) < PAGE:
                         break
                     off += PAGE
+                    if off >= PAGE * 2:           # v2.8.20b：顶部 2 页=缓存未及的新鲜任务
+                        break                     #（缓存为主+补漏；旧全翻 17 分钟已废弃）
             if not win_ok:                        # 窗口查询失败：挂起重试（下轮窗口成功再推），
                 _organize_state['pending_clear'] = True   # 不推错误数据、不重置批次状态
                 return                            # 本轮到此为止（静止告警也不推：数据不明）
+            # v2.8.20b：缓存补漏——_today_done 整轮全量今日明细与现场 2 页去重合并，
+            # 覆盖「排序不稳导致窗口任务藏深页」场景（9/21 实锤），计数口径与原全翻一致。
+            try:
+                for _d in list(_today_done.get('items') or []):
+                    if (_d.get('title') or '') not in ('',) and not (
+                            _d.get('title') or '').startswith(ORGANIZE_PREFIXES):
+                        continue
+                    _fdt = _parse_ts(_d.get('finished_at') or '')
+                    if _fdt is None or _fdt < w0 or _fdt > now:
+                        continue
+                    _did = _d.get('id')
+                    if _did in _seen_ids:
+                        continue
+                    # 现场页是否已收（重查窗口任务的原始查询结果不可得，用时间近似：
+                    # 只补「fin 大于现场页最大 fin」的缓存任务——顶部 2 页之外的深页漏网）
+                    _st = _d.get('status')
+                    _ttl = _d.get('title') or ''
+                    if _ttl.startswith(INGEST_PREFIXES):
+                        if _st in ('succeeded', 'partial'):
+                            t_done += 1
+                            m_ok += _d.get('ok_media') or 0
+                            m_bad += _d.get('bad_media') or 0
+                        elif _st == 'failed':
+                            t_failed += 1
+                            m_bad += _d.get('bad_media') or 0
+                    else:
+                        _fk = '手动' if _ttl.startswith('手动整理') else '网盘'
+                        _fc = flow_cnt.setdefault(_fk, [0, 0, 0])
+                        if _st in ('succeeded', 'partial'):
+                            _fc[0] += 1
+                        elif _st == 'failed':
+                            _fc[1] += 1
+                        else:
+                            _fc[2] += 1
+            except Exception:
+                pass
             _organize_state['pending_clear'] = False
             batch['done'], batch['failed'], batch['cancelled'] = t_done, t_failed, t_cancelled
             batch['m_ok'], batch['m_bad'] = m_ok, m_bad
@@ -1519,6 +1562,62 @@ def collect_active_queue(today_prefix: str):
     return tasks, media_total
 
 
+_today_done = {'ts': 0.0, 'items': [], 'scanning': False, 'progress': ''}
+
+
+def _today_done_loop() -> None:
+    """v2.8.20b：今日终态明细独立重线程（边翻边更新）。
+    背景：succeeded 全量已涨到百页级（页均 ~7s，整轮 >10 分钟），挂在 poll_once 里
+    导致慢轮 17+ 分钟一轮、面板「统计截至」滞后 19 分（9/21 晚实测）。
+    改为独立线程整轮重扫：逐状态翻页，每页即时并入发布缓存（边翻边更新——
+    新任务在列表顶部先翻先见），整轮完成原子替换+盖时间戳。
+    poll_once 只读缓存（0 翻页），慢轮周期回归 2 分钟级。"""
+    while True:
+        if _today_done['scanning']:
+            time.sleep(5)
+            continue
+        _today_done['scanning'] = True
+        try:
+            today_prefix = _today_prefix()
+            fresh = []
+            for st in ('succeeded', 'failed', 'partial'):
+                offset = 0
+                while offset < 30000:
+                    s, b = api_get(f'/api/workflows?status={st}&limit={PAGE}&offset={offset}')
+                    items = b.get('items', []) if isinstance(b, dict) else []
+                    if not items:
+                        break
+                    _n_new = 0
+                    for it in items:
+                        fin = it.get('finished_at') or it.get('created_at') or ''
+                        if fin < today_prefix:
+                            continue
+                        fresh.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
+                                      'wf': it.get('workflow_type') or '',
+                                      'title': it.get('display_title') or '',
+                                      'media': it.get('item_count') or 0,
+                                      'ok_media': it.get('succeeded_count') or 0,
+                                      'bad_media': it.get('failed_count') or 0,
+                                      'err': (it.get('failure_summary') or '')[:60],
+                                      'stage': (it.get('failure_stage_title') or '')[:12],
+                                      'finished_at': fin})
+                        _n_new += 1
+                    offset += PAGE
+                    _today_done['progress'] = f'{st}:{offset//PAGE}页'   # 边翻边更新进度
+                    # 边翻边发布：今日明细渐进可见（新页先翻先并入）
+                    _today_done['items'] = fresh
+                if offset >= 30000:
+                    break
+            _today_done['items'] = fresh
+            _today_done['ts'] = time.time()
+            _today_done['progress'] = f'完成 {len(fresh)} 条'
+        except Exception:
+            pass
+        finally:
+            _today_done['scanning'] = False
+        time.sleep(60)   # 整轮后休 1 分钟再扫（新鲜度 ≤ 一轮耗时+1 分钟）
+
+
 def collect_today_done(today_prefix: str):
     """今日终态任务（succeeded/failed/partial），带 finished_at，供速率与统计。
 
@@ -1563,6 +1662,31 @@ def _dayweek_daily_path() -> str:
     """v2.8.17：每日完成量滚动文件（data/daily.json），容器重启不丢。"""
     base = os.environ.get('SETTINGS_PATH') or '/app/data/settings.json'
     return os.path.join(os.path.dirname(base), 'daily.json')
+
+
+def _snapshot_cache_path() -> str:
+    """v2.8.20：最近一次完整快照落盘路径（data/last_snapshot.json），重启秒开旧数据。"""
+    base = os.environ.get('SETTINGS_PATH') or '/app/data/settings.json'
+    return os.path.join(os.path.dirname(base), 'last_snapshot.json')
+
+
+def _snapshot_cache_save(snap: dict) -> None:
+    try:
+        tmp = _snapshot_cache_path() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(snap, f, ensure_ascii=False)
+        os.replace(tmp, _snapshot_cache_path())
+    except Exception:
+        pass
+
+
+def _snapshot_cache_load() -> dict:
+    try:
+        with open(_snapshot_cache_path(), encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) and d.get('ts') else {}
+    except Exception:
+        return {}
 
 
 def _dayweek_daily_load() -> dict:
@@ -1855,20 +1979,6 @@ def fast_once():
     return snap
 
 
-def poll_loop():
-    while True:
-        try:
-            snap = poll_once()
-            _state['snapshot'] = snap
-            _state['error'] = None
-            _state['ts'] = snap['ts']
-            _state['hist'].append({'ts': snap['ts'], 'active_media': snap['active']['media'],
-                                   'done_media': snap['records'].get('success', 0)})
-        except Exception as e:
-            _state['error'] = f'{e}'[:200]
-        time.sleep(max(POLL_INTERVAL, 30))
-
-
 def fast_loop():
     """快速线程：2 秒级刷新活跃队列；历史 done/records 用慢线程最后一次结果合并展示。"""
     # 先等首份慢快照就绪（合并展示需要）
@@ -1888,6 +1998,7 @@ def fast_loop():
 def poll_once():
     today_prefix = _today_prefix()
     snap = {'ts': _now().isoformat(timespec='seconds'), 'healthy': False, 'diag': {},
+            'stale': False, 'stale_note': '',
             'active': {'tasks': 0, 'media': 0, 'by_kind': {}}, 'done': {}, 'records': {},
             'eta': {}, 'failed_today': [],
             'backlog_threshold': int(SETTINGS['backlog_threshold'])}  # v2.8.7 横条与告警同源
@@ -1909,7 +2020,14 @@ def poll_once():
         d['media'] += t['media']
     apply_claim_order(tasks, snap['active']['by_kind'])   # v2.4.2 排位口径=实际领取序
 
-    done = collect_today_done(today_prefix)
+    # v2.8.20b：今日终态明细改读独立重线程缓存（_today_done_loop 边翻边更新），
+    # poll_once 不再同步全翻（原 10+ 分钟/轮是面板滞后 19 分与清空卡延迟的共同根因）；
+    # 缓存从未就绪时退回同步扫（仅冷启动第一轮，此后 60s 节流由重线程接管）。
+    if _today_done['items'] or _today_done['ts'] > 0:
+        done = [d for d in _today_done['items'] if (d.get('finished_at') or '') >= today_prefix]
+        done = list(done)   # 拷贝防并发遍历
+    else:
+        done = collect_today_done(today_prefix)
     win_cut = (_now() - timedelta(minutes=ETA_WINDOW_MIN)).isoformat()
     recent = [d for d in done if (d.get('finished_at') or '') >= win_cut]
     # v2.4.3 速率=0 兜底：剩余>0 时取「最早开始且仍在运行」的任务实时进度
@@ -1980,6 +2098,7 @@ def poll_loop():
             _state['ts'] = snap['ts']
             _state['hist'].append({'ts': snap['ts'], 'active_media': snap['active']['media'],
                                    'done_media': snap['records'].get('success', 0)})
+            _snapshot_cache_save(snap)   # v2.8.20：重启后先用旧快照秒开，后台全量更新
         except Exception as e:
             _state['error'] = f'{e}'[:200]
         time.sleep(max(POLL_INTERVAL, 5))
@@ -2064,6 +2183,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(503, json.dumps({'error': _state.get('error') or '首轮采集中，请稍候'},
                                                   ensure_ascii=False).encode())
             out = dict(snap)
+            out.setdefault('stale', False)
             if fs:
                 # 活跃队列/健康用快速快照（2s 级），历史数据用慢快照
                 out['healthy'] = fs['healthy'] and snap['healthy']
@@ -2078,7 +2198,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.19', 'readonly': False,
+                'version': 'v2.8.20', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2111,6 +2231,22 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/push-history':
             return self._send(200, json.dumps({'items': list(_push_hist)},
                                               ensure_ascii=False).encode())
+        if p == '/api/hosts-status':
+            # v2.8.19：只读回显当前绑定（grep 路由器 hosts，不解析不改）——GET 版；
+            # 匹配口径与 _hosts_check_one 一致：含域名的任意行（不限标记行，兼容旧绑定）
+            res = []
+            if SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS():
+                for d in _HOSTS_DOMAINS():
+                    cur = _ssh_router(f"grep '{d}' /etc/hosts || true")
+                    hip = ''
+                    for ln in cur.splitlines():
+                        if d in ln:
+                            parts = ln.split()
+                            if len(parts) >= 2:
+                                hip = parts[0]
+                                break
+                    res.append({'domain': d, 'hosts_ip': hip})
+            return self._send(200, json.dumps({'results': res}, ensure_ascii=False).encode())
         m = re.match(r'^/trigger/organize$', p)
         if m:                                 # v2.5.5 一键整理入口（GET 确认页）
             tok_q = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -2234,20 +2370,6 @@ class Handler(BaseHTTPRequestHandler):
             record_push('test', text, ok, err)
             return self._send(200, json.dumps({'ok': ok, 'err': err},
                                               ensure_ascii=False).encode())
-        if p == '/api/hosts-status':
-            # v2.8.19：只读回显当前绑定（grep 路由器 hosts 标记行，不解析不改）
-            res = []
-            if SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS():
-                cur = _ssh_router("grep 'etkn-monitor-managed' /etc/hosts || true")
-                hm = {d: '' for d in _HOSTS_DOMAINS()}
-                for ln in cur.splitlines():
-                    parts = ln.split()
-                    if len(parts) >= 2:
-                        for d in hm:
-                            if d in ln and parts[1] == d:
-                                hm[d] = parts[0]
-                res = [{'domain': d, 'hosts_ip': v} for d, v in hm.items()]
-            return self._send(200, json.dumps({'results': res}, ensure_ascii=False).encode())
         if p == '/api/hosts-check':
             # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
             if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
@@ -2363,17 +2485,48 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, '{"error":"not found"}'.encode())
 
 
+def _warmup_from_cache() -> None:
+    """v2.8.20：重启后先用落盘缓存填充展示数据，用户不再干等「首轮采集中…」。
+    ①快照预热：data/last_snapshot.json（上次运行最后一轮完整快照，含 done 明细/ETA）；
+    ②今日/本周预热：daily.json 里今日键直接喂 _dayweek_cache（1h 新鲜度闸内即可显示；
+    今日旧值误差=停机期间完成的量，后台首轮全量 ~6 分钟后自动纠正）。"""
+    snap = _snapshot_cache_load()
+    if snap:
+        snap['stale'] = True
+        snap['stale_note'] = '重启恢复中，显示为上次运行缓存'
+        _state['snapshot'] = snap
+        try:
+            _state['hist'].append({'ts': snap['ts'], 'active_media': snap['active']['media'],
+                                   'done_media': snap['records'].get('success', 0)})
+        except Exception:
+            pass
+    tbl = _dayweek_daily_load()
+    today_d = _today_prefix()[:10]
+    if today_d in tbl and tbl[today_d] is not None:
+        week = tbl.get(today_d) or 0
+        for k in range(1, 7):
+            dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
+            week += tbl.get(dd) or 0
+        _dayweek_cache.update({'ts': time.time(), 'date': today_d,
+                               'day': tbl[today_d], 'week': week})
+        # 预热值标注 stale_ts：poll_once 的 _dw_fresh 判定用 ts，这里给足新鲜度窗口
+        print('预热完成：快照 ts=%s，今日=%s，本周=%s' % (snap.get('ts', '无'),
+              _dayweek_cache['day'], _dayweek_cache['week']), flush=True)
+
+
 def main():
     if not PASSWORD:
         raise SystemExit('缺少环境变量 ETKN_PASSWORD（只存环境，不落盘）')
+    _warmup_from_cache()
     threading.Thread(target=poll_loop, daemon=True).start()
     threading.Thread(target=fast_loop, daemon=True).start()
     threading.Thread(target=alarm_loop, daemon=True).start()
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
+    threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.19，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.20，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
