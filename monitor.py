@@ -1784,8 +1784,25 @@ def _dayweek_rebuild() -> None:
         # 小任务批量完成时单页时间跨度可跨 1.5 天→提前停漏算→今日清零，9/21 11 点实锤；
         # 无 status 过滤参数可用（created_after 等均被无视，9/21 实测），只能全翻到空页）
         day_ok, _ = _dayweek_scan_day(today0, None)
-        tbl[today_d] = day_ok
-        _dayweek_daily_save(tbl)
+        # v2.8.21 闸1（持久值写盘闸）：扫描=0 且落盘旧值>0=疑似空窗口（etkn 重启后
+        # DB 未就绪/列表短暂空，9/22 03:19 实锤：3 分钟窗口扫 0 →无条件写盘→面板清零
+        # 11 分钟）。连续 2 轮确认才落 0；期间缓存保旧值（宁旧勿零）。
+        _prev = tbl.get(today_d) or 0
+        if day_ok == 0 and _prev > 0:
+            _zero_streak = _dayweek_cache.get('zero_streak', 0) + 1
+            _dayweek_cache['zero_streak'] = _zero_streak
+            if _zero_streak < 2:
+                print('今日扫描=0 但旧值=%d（第 %d 次），疑似空窗口不落盘，保旧值'
+                      % (_prev, _zero_streak), flush=True)
+            else:
+                tbl[today_d] = 0
+                _dayweek_daily_save(tbl)
+                print('今日连续 2 轮=0，确认落盘清零', flush=True)
+        else:
+            if day_ok > 0:
+                _dayweek_cache['zero_streak'] = 0
+            tbl[today_d] = day_ok
+            _dayweek_daily_save(tbl)
         # ③本周=今日+昨日~6 天前（口径=含今日共 7 天）
         week_ok = day_ok
         for k in range(1, 7):
@@ -2098,7 +2115,20 @@ def poll_loop():
             _state['ts'] = snap['ts']
             _state['hist'].append({'ts': snap['ts'], 'active_media': snap['active']['media'],
                                    'done_media': snap['records'].get('success', 0)})
-            _snapshot_cache_save(snap)   # v2.8.20：重启后先用旧快照秒开，后台全量更新
+            # v2.8.21 闸3（快照闸）：今日值比上一份落盘快照掉 50%+ 且非跨日翻转 →
+            # 疑似空窗口污染，跳过落盘（旧快照保命，预热链路不被污染）。
+            try:
+                _old_snap = _snapshot_cache_load()
+                _old_day = ((_old_snap or {}).get('records') or {}).get('success') or 0
+                _new_day = (snap.get('records') or {}).get('success') or 0
+                _same_day = (_old_snap or {}).get('ts', '')[:10] == snap.get('ts', '')[:10]
+                if _same_day and _old_day > 0 and _new_day < _old_day * 0.5:
+                    print('今日 %s→%s 异常跳水，快照不落盘（防污染）'
+                          % (_old_day, _new_day), flush=True)
+                else:
+                    _snapshot_cache_save(snap)
+            except Exception:
+                _snapshot_cache_save(snap)
         except Exception as e:
             _state['error'] = f'{e}'[:200]
         time.sleep(max(POLL_INTERVAL, 5))
@@ -2198,7 +2228,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.20', 'readonly': False,
+                'version': 'v2.8.21', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2502,6 +2532,14 @@ def _warmup_from_cache() -> None:
             pass
     tbl = _dayweek_daily_load()
     today_d = _today_prefix()[:10]
+    # v2.8.21 闸2（预热闸）：快照今日值若明显低于 daily.json 持久键（etkn 重启窗口期
+    # 污染的快照，9/22 实锤 0 vs 4397），预热以持久键为准——重启后直接显示正确值。
+    if snap and tbl.get(today_d):
+        _snap_day = ((snap.get('records') or {}).get('success')) or 0
+        if _snap_day < tbl[today_d]:
+            snap['records']['success'] = tbl[today_d]
+            snap['records']['total'] = tbl[today_d]
+            snap['stale_note'] = '重启恢复中（以持久统计为准）'
     if today_d in tbl and tbl[today_d] is not None:
         week = tbl.get(today_d) or 0
         for k in range(1, 7):
@@ -2526,7 +2564,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.20，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.21，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
