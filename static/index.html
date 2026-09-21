@@ -130,7 +130,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.21</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.22</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -684,7 +684,7 @@ async function refresh(){
     document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务（含流程类，与媒体数不同口径）`;
     document.getElementById('cDoneWk').textContent=`本周完成 ${(s.week?.media??'-')} 媒体（整理记录口径）`;
     document.getElementById('cBad').innerHTML=fmtCard(rec.unrecognized||0,'未识别');
-    document.getElementById('cBadSub').textContent=`失败/部分任务 ${s.failed_today?.length||0} 个`;
+    document.getElementById('cBadSub').textContent=`失败/部分任务 ${s.done?.bad_tasks??(s.failed_today?.length||0)} 个`;
     const e=s.eta||{}, eo=e.organize||{};
     document.getElementById('cEta').textContent=e.eta_text||'计算中';
     document.getElementById('cEtaSub').textContent=`速率 ${e.rate||0} 媒体/分 · 剩 ${e.remaining_media||0} 媒体（窗口 ${e.window_min||10} 分）${(e.rate===0&&e.remaining_media>0)?' · 窗口内暂无完成':''}`;
