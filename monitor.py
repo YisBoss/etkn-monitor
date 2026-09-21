@@ -860,8 +860,21 @@ def _hosts_check_one(domain: str) -> None:
     pick = mark[0] if mark else next(
         (x for x in found if len(x[1].split()) >= 2), None)
     if not pick:
-        _alert_push('hosts_err', 'hosts 未找到绑定行（未改动）', [
-            f'{domain} 在路由器 /etc/hosts 无独立行（或行格式异常），请人工核对'])
+        # v2.8.17：无绑定行 → 自动新增带标记行（公网 IP），推蓝卡告知；失败才告警
+        new_line = f"{ip} {domain} {_HOSTS_MARKER}"
+        script = (f"cp /etc/hosts /etc/hosts.bak-monitor && "
+                  f"echo '{new_line}' >> /etc/hosts && "
+                  f"/etc/init.d/dnsmasq restart >/dev/null 2>&1; "
+                  f"grep -n '{domain}' /etc/hosts")
+        out = _ssh_router(script, timeout=45)
+        if f'{ip} {domain}' in out:
+            _alert_push('hosts', f'{domain}：hosts 新增绑定 {ip}', [
+                f'路由器 /etc/hosts 原无 {domain} 独立行，已按公网解析新增并重启 dnsmasq',
+                '原文件已备份 /etc/hosts.bak-monitor'],
+                buttons=_card_buttons(), tcolor='blue')
+        else:
+            _alert_push('hosts_err', 'hosts 新增绑定失败（未生效）', [
+                f'期望新增 {ip} {domain}，路由器回执异常', f'回执：{(out or "(空)")[:100]}'])
         return
     line_no, rest = pick
     old_ip = rest.split()[0]
@@ -1022,7 +1035,8 @@ _organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_q
                    'last_clear_at': None, 'pending_clear': False,
                    'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
                              'm_ok': 0, 'm_bad': 0, 'started_at': None,
-                             'last': None, 'last_ts': None, 'flow': {}}}
+                             'last': None, 'last_ts': None, 'flow': {},
+                             'other_fail': []}}
 _trigger_lock = threading.Lock()          # 忙锁：整理下一批触发期间拒绝并发/连点
 _trigger_token = {'val': None, 'exp': 0}  # 一次性令牌（30 分钟有效，每次清空提醒轮换）
 
@@ -1113,12 +1127,14 @@ def check_organize_running(now=None):
             t_done = t_failed = t_cancelled = m_ok = m_bad = 0
             flow_cnt = {}                         # 流程任务分列：{'手动': [d,f,c], '网盘': [d,f,c]}
             fail_log = []                         # v2.8.13：本批失败明细（清空卡汇总展示）
+            other_fail = []                       # v2.8.18：非整理类失败明细
             last = None
             last_fin = None
             win_ok = False
             for st in ('succeeded', 'partial', 'failed', 'cancelled'):
                 off = 0
-                while off < 500:                  # 上限 500 条，防异常爆量
+                while off < 30000:                # v2.8.18：全翻到空页（succeeded 全量
+                    #   5200+ 条>旧 500 上限→深页批窗口漏统计；30000=异常硬闸）
                     s4, b4 = api_get(f'/api/workflows?status={st}&limit={PAGE}&offset={off}')
                     if s4 != 200 or not isinstance(b4, dict):
                         win_ok = False            # 任一状态页失败=窗口数据不完整
@@ -1147,7 +1163,7 @@ def check_organize_running(now=None):
                                 t_cancelled += 1
                             m_ok += int(t.get('succeeded_count') or 0)
                             m_bad += int(t.get('failed_count') or 0)
-                        else:
+                        elif ttl.startswith(FLOW_PREFIXES):
                             fk = '手动' if ttl.startswith('手动整理') else '网盘'
                             fc = flow_cnt.setdefault(fk, [0, 0, 0])
                             if st in ('succeeded', 'partial'):
@@ -1156,6 +1172,11 @@ def check_organize_running(now=None):
                                 fc[1] += 1
                             else:
                                 fc[2] += 1
+                        elif st in ('failed', 'partial'):
+                            # v2.8.18：批次窗口内其他类型失败（共享登记/追剧刷新等）也入卡
+                            other_fail.append({'title': _clean_dir_name(ttl)[:24],
+                                               'stage': (t.get('failure_stage_title') or '')[:12],
+                                               'err': (t.get('failure_summary') or '')[:60]})
                         if last_fin is None or fin > last_fin:
                             last_fin = fin
                             d0l = _parse_ts(t.get('started_at'))
@@ -1172,6 +1193,7 @@ def check_organize_running(now=None):
             batch['m_ok'], batch['m_bad'] = m_ok, m_bad
             batch['flow'] = {k: tuple(v) for k, v in flow_cnt.items()}
             batch['fail_log'] = fail_log          # v2.8.13：失败明细随批次窗口落定
+            batch['other_fail'] = other_fail      # v2.8.18：非整理类失败随窗口落定
             if last:
                 batch['last'] = last
             fast = _state.get('fast') or {}
@@ -1233,6 +1255,19 @@ def check_organize_running(now=None):
                 _more = len(batch.get('fail_log') or []) - 5
                 if _more > 0:
                     lines.append(f"· …等 {_more + 5} 条失败，详见面板任务统计页")
+            # v2.8.18：非整理类失败（共享登记/追剧刷新等）单独一块，防「失败0」体感误差
+            _of = batch.get('other_fail') or []
+            if _of and scope != 'ok':
+                lines.append(f'⚠ 其他类型失败 {len(_of)} 条：')
+                for fl in _of[:3]:
+                    _seg = fl['title']
+                    if fl.get('stage'):
+                        _seg += f"｜{fl['stage']}"
+                    if fl.get('err'):
+                        _seg += f"｜{fl['err']}"
+                    lines.append(f'· {_seg}')
+                if len(_of) > 3:
+                    lines.append(f'· …共 {len(_of)} 条，详见面板任务统计页')
             btns = _card_buttons()
             if SETTINGS['trigger_enabled'] and not a_run and not a_que:
                 # v2.6 卡片按钮入口：一次性令牌 30 分钟；每次清空轮换，旧令牌作废
@@ -1249,7 +1284,7 @@ def check_organize_running(now=None):
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
                                         'cancelled': 0, 'm_ok': 0, 'm_bad': 0,
                                         'started_at': None, 'last': None, 'last_ts': None,
-                                        'flow': {}}
+                                        'flow': {}, 'other_fail': []}
             if ok:
                 _feed_run()               # v2.7：清空提醒送达后自动喂料（事件驱动）
         elif total_cur > 0:
@@ -1468,8 +1503,9 @@ def collect_today_done(today_prefix: str):
             items = b.get('items', []) if isinstance(b, dict) else []
             if not items:
                 break
-            page_oldest = min((it.get('finished_at') or it.get('created_at') or '')
-                              for it in items)
+            # v2.8.17b：不再停页——订阅预处理批量完成时单页时间跨度可跨天，
+            # page_oldest 停页会漏算深页今日任务（9/21 实锤今日任务数同步漏报）；
+            # 代价=每轮多翻几十页（succeeded 全量 52 页≈350s），换来精确。
             for it in items:
                 fin = it.get('finished_at') or it.get('created_at') or ''
                 if fin < today_prefix:
@@ -1483,8 +1519,6 @@ def collect_today_done(today_prefix: str):
                             'err': (it.get('failure_summary') or '')[:60],
                             'stage': (it.get('failure_stage_title') or '')[:12],
                             'finished_at': fin})
-            if page_oldest < today_prefix:
-                break
             offset += PAGE
             if offset >= 30000:   # v2.7.1 安全闸：防接口异常时的无限翻页（正常今日远小于此）
                 break
@@ -1492,52 +1526,118 @@ def collect_today_done(today_prefix: str):
 
 
 _dayweek_cache = {'ts': 0.0, 'date': '', 'day': None, 'week': None, 'rebuilding': False}
-_DAYWEEK_INTERVAL = 300   # v2.8.17：5 分钟一轮（fast 停页单轮秒级）
+_DAYWEEK_INTERVAL = 900   # v2.8.17b：15 分钟一轮（全量翻页 ~350s/轮，无停页精确口径）
+
+
+def _dayweek_daily_path() -> str:
+    """v2.8.17：每日完成量滚动文件（data/daily.json），容器重启不丢。"""
+    base = os.environ.get('SETTINGS_PATH') or '/app/data/settings.json'
+    return os.path.join(os.path.dirname(base), 'daily.json')
+
+
+def _dayweek_daily_load() -> dict:
+    """读 {date: succ_media} 表（仅刮削入库口径，与今日完成同源）。"""
+    try:
+        with open(_dayweek_daily_path(), encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _dayweek_daily_save(tbl: dict) -> None:
+    try:
+        tmp = _dayweek_daily_path() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(tbl, f, ensure_ascii=False)
+        os.replace(tmp, _dayweek_daily_path())
+    except Exception:
+        pass
+
+
+def _dayweek_scan_day(day_prefix: str, stop_line: str, offset: int = 0,
+                      end_prefix: str = None) -> tuple:
+    """v2.8.17 核心扫描：带状态翻页累加 [day_prefix, end_prefix) 界内 succ（刮削入库口径）。
+    安全停页=页内全部 created_at 最小值 < stop_line（界-1h 余量吸收页内批间乱序；
+    带 status 翻页跨页单调已实证 9/21）。end_prefix=次日 0 点（回填用，今日扫描=None=无上界）。
+    返回 (succ合计, 是否触底)。"""
+    ok = 0
+    while offset < 20000:
+        s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
+        items = b.get('items', []) if isinstance(b, dict) else []
+        if not items:
+            return ok, True
+        cas = [(it.get('created_at') or it.get('finished_at') or '') for it in items]
+        for it, ca in zip(items, cas):
+            if not (it.get('display_title') or '').startswith(INGEST_PREFIXES):
+                continue
+            fin = it.get('finished_at') or ca or ''
+            if fin >= day_prefix and (not end_prefix or fin < end_prefix):
+                ok += it.get('succeeded_count') or 0
+        offset += PAGE
+        if stop_line and min(cas) < stop_line:   # v2.8.17b：stop_line=None=全量无停页
+            return ok, False
+    return ok, False
 
 
 def _dayweek_rebuild() -> None:
-    """v2.8.17：今日/本周完成统一重建（唯一可靠口径，替代 15c 全量翻页）。
-    15c 方案结构性缺陷（今日/本周反复清零的根因，9/21 实证）：
-    ①全量翻页随任务量线性变慢（51 页 342 秒且每天 +50 页），终将超过 1800s 新鲜度闸
-      →「宁空勿错」永真 → 永久清零；②容器重启内存缓存清零，全量重建 5+ 分钟空窗；
-    ③0 点日期翻转瞬间显空，要等最多 15 分钟重建。
-    实测（9/21）：带 status 翻页「跨页单调、页内批间乱序（幅≈一批几分钟）」——
-    安全停页规则=翻到某页全部 created_at 的最小值 < 边界-1h 即停（1h 余量吸收乱序）。
-    今日边界（0 点）通常第 1~2 页内到达，5 秒级完成；本周边界最坏=7 天任务量，
-    与增长成正比但每轮都翻，单次 <6 分钟且只比全量省 7 天外的页。
-    触发：_dayweek_loop 每 5 分钟一轮 + 启动即跑（重启空窗从 5 分钟缩到 7 秒）。"""
+    """v2.8.17 终版：今日/本周 = 「今日 fast 翻页（秒级）+ daily.json 7 日滚动」。
+    历史方案缺陷（今日/本周反复清零根因）：
+    15c 全量翻页随任务量线性变慢（51 页 342 秒，每天 +50 页）→ 超新鲜度闸永真清零；
+    周窗口 fast 翻页在数据大头面前≈全量（翻穿全部较新任务 8 分钟+，同样恶化）；
+    容器重启内存缓存清零+0 点翻转空窗。
+    终版：每天 0 点把当日值归档进 daily.json（持久化，重启不丢）；
+    今日值=扫到今日 0 点-1h 即停（通常第 1~2 页，5 秒）；本周=Σ(历史 6 天)+今日。
+    首次部署回填：daily.json 缺历史日时按日回填（每日一次停页扫描，只跑一次）。"""
     if _dayweek_cache['rebuilding']:
         return
     _dayweek_cache['rebuilding'] = True
     try:
         today0 = _today_prefix()
-        week_cut = (_now() - timedelta(days=7)).isoformat()
-        # 停页边界=两者取早（更晚的时间边界先到）；1h 余量吸收页内批间乱序
-        bound = min(today0, week_cut)
-        stop_line = (datetime.fromisoformat(bound) - timedelta(hours=1)).isoformat()
-        day_ok = week_ok = 0
-        offset = 0
-        while offset < 20000:   # 保险上限 200 页（7 天窗口内不会触顶）
-            s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
-            items = b.get('items', []) if isinstance(b, dict) else []
-            if not items:
-                break
-            cas = [(it.get('created_at') or it.get('finished_at') or '') for it in items]
-            for it, ca in zip(items, cas):
-                ttl = it.get('display_title') or ''
-                if not ttl.startswith(INGEST_PREFIXES):
-                    continue
-                fin = it.get('finished_at') or ca or ''
-                if fin < week_cut:
-                    continue
-                sc = it.get('succeeded_count') or 0
-                week_ok += sc
-                if fin >= today0:
-                    day_ok += sc
-            offset += PAGE
-            if min(cas) < stop_line:      # v2.8.17 安全停页：本页最小时间已过界-1h
-                break
-        _dayweek_cache.update({'ts': time.time(), 'date': today0[:10],
+        today_d = today0[:10]
+        tbl = _dayweek_daily_load()
+        # ①回填/归档：缺的日期一次翻页分桶补齐（翻到最早缺日-1h 停页，绝不逐日重翻）
+        need = []
+        for k in range(1, 7):
+            dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
+            if dd not in tbl:
+                need.append(dd)
+        if need:
+            oldest = min(need)               # 最早缺日
+            oldest0 = oldest + 'T00:00:00+08:00'
+            stop = (datetime.fromisoformat(oldest0) - timedelta(hours=1)).isoformat()
+            buckets = {dd: 0 for dd in need}
+            offset = 0
+            while offset < 20000:
+                s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
+                items = b.get('items', []) if isinstance(b, dict) else []
+                if not items:
+                    break
+                cas = [(it.get('created_at') or it.get('finished_at') or '') for it in items]
+                for it, ca in zip(items, cas):
+                    if not (it.get('display_title') or '').startswith(INGEST_PREFIXES):
+                        continue
+                    fin = it.get('finished_at') or ca or ''
+                    dd = fin[:10]
+                    if dd in buckets:
+                        buckets[dd] += it.get('succeeded_count') or 0
+                offset += PAGE
+                if min(cas) < stop:
+                    break
+            tbl.update(buckets)
+            _dayweek_daily_save(tbl)
+        # ②今日扫描：**全量翻页无停页**（v2.8.17b 根治：停页规则在订阅预处理等
+        # 小任务批量完成时单页时间跨度可跨 1.5 天→提前停漏算→今日清零，9/21 11 点实锤；
+        # 无 status 过滤参数可用（created_after 等均被无视，9/21 实测），只能全翻到空页）
+        day_ok, _ = _dayweek_scan_day(today0, None)
+        tbl[today_d] = day_ok
+        _dayweek_daily_save(tbl)
+        # ③本周=今日+昨日~6 天前（口径=含今日共 7 天）
+        week_ok = day_ok
+        for k in range(1, 7):
+            dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
+            week_ok += tbl.get(dd) or 0
+        _dayweek_cache.update({'ts': time.time(), 'date': today_d,
                                'day': day_ok, 'week': week_ok})
     except Exception:
         pass
@@ -1948,7 +2048,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.17', 'readonly': False,
+                'version': 'v2.8.18', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2221,7 +2321,7 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.17，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.18，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
