@@ -130,7 +130,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.22b</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.23</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -141,7 +141,7 @@ input[type=number]{width:90px}
   <div class="grid">
     <div class="card"><div class="k">待处理（媒体）</div><div class="v warn" id="cQueued">-<small>媒体</small></div><div class="sub" id="cQueuedSub">- 任务排队/运行</div></div>
     <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div><div class="sub" id="cDoneWk" style="margin-top:2px;color:var(--dim)">本周 -</div></div>
-    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>未识别</small></div><div class="sub" id="cBadSub">- 任务失败/部分</div></div>
+    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>今日</small></div><div class="sub" id="cBadSub">- 未识别 · - 失败/部分</div><div class="sub" id="cBadAll" style="margin-top:2px;color:var(--dim)">累计未识别 -</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div><div class="sub" id="cEtaOrg" style="margin-top:2px">整理类预计 -</div></div>
     <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
     <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
@@ -423,7 +423,7 @@ async function showBad(){
     const b=await (await fetch('/api/bad-media')).json();
     const rows=(b.items||[]);
     body.innerHTML = rows.length
-      ? `<div class="sub" style="margin-bottom:6px">${b.date} · 今日 ${rows.length} 条（最多展示 60） · 累计未识别 ${b.unrecognized_all ?? '-'}</div>`+
+      ? `<div class="sub" style="margin-bottom:6px">${b.date} · 今日异常 ${b.total??rows.length}（未识别 ${b.unrecognized_today??'-'} · 最多展示 60） · 累计未识别 ${b.unrecognized_all ?? '-'}</div>`+
         `<div class="flist" style="max-height:50vh">`+rows.map(x=>
           `<div class="sp"><span style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(x.name||'-').replace(/</g,'&lt;')}</span>`+
           `<span class="sub">${(x.at||'').slice(11,16)} ${(x.reason||x.status||'').slice(0,26)}</span></div>`).join('')+`</div>`
@@ -683,8 +683,11 @@ async function refresh(){
     document.getElementById('cDone').innerHTML=fmtCard(rec.success||0,'媒体');
     document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务（含流程类，与媒体数不同口径）`;
     document.getElementById('cDoneWk').textContent=`本周完成 ${(s.week?.media??'-')} 媒体（整理记录口径）`;
-    document.getElementById('cBad').innerHTML=fmtCard(rec.unrecognized||0,'未识别');
-    document.getElementById('cBadSub').textContent=`失败/部分任务 ${s.done?.bad_tasks??(s.failed_today?.length||0)} 个`;
+    // v2.8.23 异常卡改版：主数=今日异常（今日新增未识别+失败/部分任务）；拆分副行；累计未识别转次要小字
+    const _urToday=rec.unrecognized_today??0, _badT=dn.bad_tasks??(s.failed_today?.length||0);
+    document.getElementById('cBad').innerHTML=fmtCard(_urToday+_badT,'今日');
+    document.getElementById('cBadSub').textContent=`未识别 ${_urToday} · 失败/部分任务 ${_badT} 个`;
+    document.getElementById('cBadAll').textContent=`累计未识别 ${rec.unrecognized??'-'}`;
     const e=s.eta||{}, eo=e.organize||{};
     document.getElementById('cEta').textContent=e.eta_text||'计算中';
     document.getElementById('cEtaSub').textContent=`速率 ${e.rate||0} 媒体/分 · 剩 ${e.remaining_media||0} 媒体（窗口 ${e.window_min||10} 分）${(e.rate===0&&e.remaining_media>0)?' · 窗口内暂无完成':''}`;
