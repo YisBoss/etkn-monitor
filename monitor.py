@@ -2133,6 +2133,12 @@ def poll_once():
     if _dw_fresh and _p_bad > 0 and _live_bad < _p_bad * 0.5:
         _live_bad = _p_bad
     snap['done']['bad_tasks'] = _live_bad
+    # v2.8.22b：异常值回填缓存——poll 直读的 unrec 真值与 done 统计的 bad_tasks
+    # 写回 _dayweek_cache，下轮 rebuild 落盘 daily.json 时带上（否则首轮落 0）
+    if _ur_total and _ur_total > (_dayweek_cache.get('unrec') or 0):
+        _dayweek_cache['unrec'] = _ur_total
+    if _live_bad > (_dayweek_cache.get('bad_tasks') or 0):
+        _dayweek_cache['bad_tasks'] = _live_bad
     # v2.8.11：喂料转移失败（monitor 自身动作，ETKN 无任务记录）也进「今日失败」——
     # 从推送史派生今日 feed_err 合成行（id=0、wf='feed' 不可重试；重启后随推送史清空）
     for ph in _push_hist:
@@ -2279,7 +2285,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.22', 'readonly': False,
+                'version': 'v2.8.22b', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2630,7 +2636,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.22，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.22b，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
