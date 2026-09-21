@@ -900,6 +900,36 @@ def _hosts_check_one(domain: str) -> None:
             f'期望改到 {ip}，路由器回执异常', f'回执：{(out or "(空)")[:100]}'])
 
 
+def _hosts_recheck() -> list:
+    """v2.8.19 手动「重新检测 IP」：逐域名跑巡检（复用 _hosts_check_one，
+    改行/新增照旧推送卡片），然后回读路由器 hosts 当前绑定 IP 返回结构化结果。
+    返回 [{'domain','dns_ip','hosts_ip','changed'}]，异常域名 hosts_ip=''。"""
+    out = []
+    domains = _HOSTS_DOMAINS()
+    if not domains:
+        return out
+    for d in domains:
+        ip = _resolve_public(d)
+        before = _ssh_router(f"grep '{d}' /etc/hosts || true")
+        old_ip = ''
+        for ln in before.splitlines():
+            if d in ln:
+                parts = ln.split()
+                if len(parts) >= 2:
+                    old_ip = parts[0]
+        _hosts_check_one(d)
+        after = _ssh_router(f"grep '{d}' /etc/hosts || true")
+        new_ip = ''
+        for ln in after.splitlines():
+            if d in ln:
+                parts = ln.split()
+                if len(parts) >= 2:
+                    new_ip = parts[0]
+        out.append({'domain': d, 'dns_ip': ip, 'hosts_ip': new_ip,
+                    'changed': bool(old_ip and new_ip and old_ip != new_ip)})
+    return out
+
+
 def _hosts_loop() -> None:
     """每小时巡检线程（守护，绝不影响主流程）。"""
     while True:
@@ -2048,7 +2078,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.18', 'readonly': False,
+                'version': 'v2.8.19', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2204,6 +2234,28 @@ class Handler(BaseHTTPRequestHandler):
             record_push('test', text, ok, err)
             return self._send(200, json.dumps({'ok': ok, 'err': err},
                                               ensure_ascii=False).encode())
+        if p == '/api/hosts-status':
+            # v2.8.19：只读回显当前绑定（grep 路由器 hosts 标记行，不解析不改）
+            res = []
+            if SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS():
+                cur = _ssh_router("grep 'etkn-monitor-managed' /etc/hosts || true")
+                hm = {d: '' for d in _HOSTS_DOMAINS()}
+                for ln in cur.splitlines():
+                    parts = ln.split()
+                    if len(parts) >= 2:
+                        for d in hm:
+                            if d in ln and parts[1] == d:
+                                hm[d] = parts[0]
+                res = [{'domain': d, 'hosts_ip': v} for d, v in hm.items()]
+            return self._send(200, json.dumps({'results': res}, ensure_ascii=False).encode())
+        if p == '/api/hosts-check':
+            # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
+            if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
+                return self._send(200, json.dumps({'ok': False, 'err': '未启用 hosts 监控或未配置域名'},
+                                                  ensure_ascii=False).encode())
+            res = _hosts_recheck()
+            return self._send(200, json.dumps({'ok': True, 'results': res},
+                                              ensure_ascii=False).encode())
         if p == '/api/check-500-now':
             check_500()
             return self._send(200, json.dumps({'fired': _alm['t500_fired']},
@@ -2321,7 +2373,7 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.18，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.19，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
