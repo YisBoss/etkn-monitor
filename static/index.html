@@ -130,7 +130,7 @@ input[type=number]{width:90px}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.23</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.24</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -153,7 +153,7 @@ input[type=number]{width:90px}
 <div id="page2" style="display:none">
   <div class="grid">
     <div class="card w"><div class="k">今日分类统计（任务口径；成功/异常为媒体项）</div>
-      <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th></tr></thead><tbody></tbody></table>
+      <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th><th class="num">失败/部分任务</th></tr></thead><tbody></tbody></table>
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
     <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
@@ -355,17 +355,19 @@ window.matchMedia('(max-width:480px)').addEventListener('change',e=>{compact=e.m
 function renderKind(by){
   lastKind=by;
   const th=document.querySelector('#tKind thead tr'), tb=document.querySelector('#tKind tbody');
+  // v2.8.24：任务统计加「失败/部分任务」列（与入库进度页失败明细同源同口径）
   const head=compact
-    ?'<th>类型</th><th class="num">任务/项</th><th class="num">成功/异常</th>'
-    :'<th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th>';
+    ?'<th>类型</th><th class="num">任务/项</th><th class="num">成功/异常</th><th class="num">失败任务</th>'
+    :'<th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th><th class="num">失败/部分任务</th>';
   if(th.innerHTML!==head)th.innerHTML=head;
   tb.innerHTML='';
   Object.entries(by||{}).sort((x,y)=>y[1].tasks-x[1].tasks).forEach(([k,v])=>{
+    const ft=v.fail_tasks||0;
     const dc=!v.bad_media?'var(--ok)':(v.ok_media>=v.bad_media?'var(--acc)':'var(--bad)');
     const name=`<span class="dot" style="background:${dc}"></span><span title="${k}">${k}</span>`;
     tb.insertAdjacentHTML('beforeend', compact
-      ?`<tr><td class="ttl">${name}</td><td class="num">${v.tasks}/${v.items??'-'}</td><td class="num ${v.bad_media?'':''}"><span class="ok">${v.ok_media}</span>/<span class="${v.bad_media?'bad':''}">${v.bad_media}</span></td></tr>`
-      :`<tr><td class="ttl">${name}</td><td class="num">${v.tasks}</td><td class="num">${v.items??'-'}</td><td class="num ok">${v.ok_media}</td><td class="num ${v.bad_media?'bad':''}">${v.bad_media}</td></tr>`);
+      ?`<tr><td class="ttl">${name}</td><td class="num">${v.tasks}/${v.items??'-'}</td><td class="num"><span class="ok">${v.ok_media}</span>/<span class="${v.bad_media?'bad':''}">${v.bad_media}</span></td><td class="num ${ft?'bad':''}">${ft}</td></tr>`
+      :`<tr><td class="ttl">${name}</td><td class="num">${v.tasks}</td><td class="num">${v.items??'-'}</td><td class="num ok">${v.ok_media}</td><td class="num ${v.bad_media?'bad':''}">${v.bad_media}</td><td class="num ${ft?'bad':''}">${ft}</td></tr>`);
   });
 }
 /* ---- 清空共享登记积压（原生 cancel，仅 queued；绝不碰 running） ---- */

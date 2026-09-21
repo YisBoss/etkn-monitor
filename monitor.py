@@ -1657,7 +1657,7 @@ def collect_today_done(today_prefix: str):
 # v2.8.23：缓存扩异常三元——unrec=累计未识别（全局计数器，跨日有效）；
 # bad_tasks=今日失败/部分任务数；unrec_today=今日新增未识别（后两项为日内口径，跨日须清零）
 _dayweek_cache = {'ts': 0.0, 'date': '', 'day': None, 'week': None, 'rebuilding': False,
-                  'unrec': 0, 'bad_tasks': 0, 'unrec_today': 0}
+                  'unrec': 0, 'bad_tasks': 0, 'unrec_today': 0, 'by_kind_fail': {}}
 _DAYWEEK_INTERVAL = 900   # v2.8.17b：15 分钟一轮（全量翻页 ~350s/轮，无停页精确口径）
 
 
@@ -1696,6 +1696,7 @@ def _dayweek_daily_load() -> dict:
     """读 {date: 统计} 表。v2.8.22 值升级三元组 {'succ','unrec','bad_tasks'}
     （succ=今日完成 succ 媒体，unrec=未识别累计，bad_tasks=今日失败/部分任务数）；
     v2.8.23 扩四元：+unrec_today（今日新增未识别，processed_from 当日界内实收计数）；
+    v2.8.24 再扩 by_kind_fail（分类失败数 map，透传不归一化）；
     历史日 int 值归一化为 {'succ': v, 'unrec': 0, 'bad_tasks': 0, 'unrec_today': 0}。"""
     try:
         with open(_dayweek_daily_path(), encoding='utf-8') as f:
@@ -1708,6 +1709,8 @@ def _dayweek_daily_load() -> dict:
                 out[k] = {'succ': v.get('succ') or 0, 'unrec': v.get('unrec') or 0,
                           'bad_tasks': v.get('bad_tasks') or 0,
                           'unrec_today': v.get('unrec_today') or 0}
+                if isinstance(v.get('by_kind_fail'), dict):
+                    out[k]['by_kind_fail'] = v['by_kind_fail']
             else:
                 out[k] = {'succ': v or 0, 'unrec': 0, 'bad_tasks': 0, 'unrec_today': 0}
         return out
@@ -1813,7 +1816,8 @@ def _dayweek_rebuild() -> None:
         _cur_bad = _dayweek_cache.get('bad_tasks') or 0
         _cur_urtd = _dayweek_cache.get('unrec_today') or 0
         _new_rec = {'succ': day_ok, 'unrec': _cur_unrec, 'bad_tasks': _cur_bad,
-                    'unrec_today': _cur_urtd}
+                    'unrec_today': _cur_urtd,
+                    'by_kind_fail': dict(_dayweek_cache.get('by_kind_fail') or {})}
         if day_ok == 0 and _prev_succ > 0:
             _zero_streak = _dayweek_cache.get('zero_streak', 0) + 1
             _dayweek_cache['zero_streak'] = _zero_streak
@@ -1837,6 +1841,14 @@ def _dayweek_rebuild() -> None:
                 _new_rec['bad_tasks'] = _prev_bad
             if _prev_urtd > 0 and _cur_urtd < _prev_urtd * 0.5:
                 _new_rec['unrec_today'] = _prev_urtd
+            # v2.8.24：分类失败数兜底——持久旧值各分类取 max（重启窗口不许洗掉）
+            _prev_bkf = _prev.get('by_kind_fail', {}) if isinstance(_prev, dict) else {}
+            if isinstance(_prev_bkf, dict) and _prev_bkf:
+                _cur_bkf = dict(_new_rec.get('by_kind_fail') or {})
+                for _k, _v in _prev_bkf.items():
+                    if _v > (_cur_bkf.get(_k) or 0):
+                        _cur_bkf[_k] = _v
+                _new_rec['by_kind_fail'] = _cur_bkf
             tbl[today_d] = _new_rec
             _dayweek_daily_save(tbl)
         # ③本周=今日+昨日~6 天前（口径=含今日共 7 天）
@@ -1847,6 +1859,7 @@ def _dayweek_rebuild() -> None:
             _hd = tbl.get(dd) or {}
             week_ok += _hd.get('succ', 0) if isinstance(_hd, dict) else (_hd or 0)
         # v2.8.22：异常值进缓存（poll_once/warmup 消费；succ 口径不变）
+        # v2.8.24：缓存刷新时保留 by_kind_fail（rebuild 刷缓存不洗掉 poll 回填的分类失败数）
         _dayweek_cache.update({'ts': time.time(), 'date': today_d,
                                'day': day_ok, 'week': week_ok,
                                'unrec': _today_rec.get('unrec', 0) if isinstance(_today_rec, dict) else 0,
@@ -2105,11 +2118,16 @@ def poll_once():
     by_kind_done = {}
     for d in done:
         k = d['kind']
-        e = by_kind_done.setdefault(k, {'tasks': 0, 'items': 0, 'ok_media': 0, 'bad_media': 0})
+        # v2.8.24：分类统计扩 fail_tasks（该类失败/部分任务数）——与入库进度页失败明细
+        # 同一 done 源（status∈failed/partial 计数），口径天然对应；重启后由持久化兜底
+        e = by_kind_done.setdefault(k, {'tasks': 0, 'items': 0, 'ok_media': 0, 'bad_media': 0,
+                                        'fail_tasks': 0})
         e['tasks'] += 1
         e['items'] += d['media']
         e['ok_media'] += d['ok_media']
         e['bad_media'] += d['bad_media']
+        if d['status'] in ('failed', 'partial'):
+            e['fail_tasks'] += 1
     snap['done'] = {'tasks': len(done), 'by_kind': by_kind_done,
                     'items': sum(d['media'] for d in done),
                     'ok_media': sum(d['ok_media'] for d in done),
@@ -2158,6 +2176,21 @@ def poll_once():
     if _dw_fresh and _same_day and _p_bad > 0 and _live_bad < _p_bad * 0.5:
         _live_bad = _p_bad
     snap['done']['bad_tasks'] = _live_bad
+    # v2.8.24：分类统计（by_kind）重启不丢——etkn 重启窗口 _today_done 缓存清空时，
+    # live 扫描只能看到重启后完成的少量任务，各分类 fail_tasks 会归零；
+    # 用持久今日键中的 by_kind_fail 做兜底取大（每类独立取 max，新完成任务正常累加）。
+    _persist_kind = ((tbl.get(today_d) or {}).get('by_kind_fail') or {}) if _same_day else {}
+    if isinstance(_persist_kind, dict) and _persist_kind:
+        for _pk, _pv in _persist_kind.items():
+            _pe = by_kind_done.setdefault(_pk, {'tasks': 0, 'items': 0, 'ok_media': 0,
+                                                'bad_media': 0, 'fail_tasks': 0})
+            if _pv > (_pe.get('fail_tasks') or 0):
+                _pe['fail_tasks'] = _pv
+    for _bk in (snap['done'].get('by_kind') or {}).values():
+        _bk.setdefault('fail_tasks', 0)
+    # v2.8.24：回填缓存——下轮 rebuild 落盘 daily.json 时带上分类失败数（否则首轮丢）
+    _dayweek_cache['by_kind_fail'] = {k: v.get('fail_tasks', 0)
+                                      for k, v in (snap['done'].get('by_kind') or {}).items()}
     # v2.8.22b：异常值回填缓存——poll 直读的 unrec 真值与 done 统计的 bad_tasks
     # 写回 _dayweek_cache，下轮 rebuild 落盘 daily.json 时带上（否则首轮落 0）。
     # v2.8.23：unrec_today 同回填；跨日翻转（缓存日期≠今日）时日内口径清零重计，
@@ -2322,7 +2355,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.23', 'readonly': False,
+                'version': 'v2.8.24', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2652,6 +2685,15 @@ def _warmup_from_cache() -> None:
                 _sd['bad_tasks'] = _persist.get('bad_tasks') or 0
             if _persist_is_today and ((_sr.get('unrecognized_today') or 0) or 0) < (_persist.get('unrec_today') or 0):
                 _sr['unrecognized_today'] = _persist.get('unrec_today') or 0
+            # v2.8.24：分类失败数预热兜底（每类独立取 max，与快照 live 值融合）
+            _persist_bkf = _persist.get('by_kind_fail') or {}
+            if _persist_is_today and isinstance(_persist_bkf, dict) and _persist_bkf:
+                _sd_by = _sd.setdefault('by_kind', {})
+                for _pk, _pv in _persist_bkf.items():
+                    _pe = _sd_by.setdefault(_pk, {'tasks': 0, 'items': 0, 'ok_media': 0,
+                                                  'bad_media': 0, 'fail_tasks': 0})
+                    if _pv > (_pe.get('fail_tasks') or 0):
+                        _pe['fail_tasks'] = _pv
     if today_d in tbl and tbl[today_d] is not None:
         _td = tbl[today_d]
         _td_succ = _td.get('succ', 0) if isinstance(_td, dict) else (_td or 0)
@@ -2664,7 +2706,8 @@ def _warmup_from_cache() -> None:
                                'day': _td_succ, 'week': week,
                                'unrec': _td.get('unrec', 0) if isinstance(_td, dict) else 0,
                                'bad_tasks': _td.get('bad_tasks', 0) if isinstance(_td, dict) else 0,
-                               'unrec_today': _td.get('unrec_today', 0) if isinstance(_td, dict) else 0})
+                               'unrec_today': _td.get('unrec_today', 0) if isinstance(_td, dict) else 0,
+                               'by_kind_fail': dict((_td.get('by_kind_fail') or {}) if isinstance(_td, dict) else {})})
         # 预热值标注 stale_ts：poll_once 的 _dw_fresh 判定用 ts，这里给足新鲜度窗口
         print('预热完成：快照 ts=%s，今日=%s，本周=%s' % (snap.get('ts', '无'),
               _dayweek_cache['day'], _dayweek_cache['week']), flush=True)
@@ -2682,7 +2725,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.23，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.24，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
