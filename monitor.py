@@ -190,7 +190,7 @@ def settings_load():
         pass
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
               'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-              'trigger_enabled', 'feed_enabled', 'auto_restart_enabled'):
+              'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled'):
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
               'backlog_threshold', 'speed_threshold_ms',
@@ -761,12 +761,45 @@ def _HOSTS_DOMAIN() -> str:
     return ds[0] if ds else '' 
 
 
-def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
-    """用指定 DNS 服务器解析 A 记录（UDP 53 直连指定服务器，绕过本机 DNS/劫持）。
-    返回首个 A 记录字符串；失败返回 ''。socket/struct 用模块级导入（可 monkeypatch 测试）。
-    v2.8.3：修复 qname 构造 bug——旧写法 bytes([len(x)…])+b''.join(标签) 会把所有
-    长度字节集中放在最前（06 08 03 shared'example'xyz=畸形报文，服务器不回→超时），
-    必须逐段交错：\\x06shared\\x08example\\x03xyz\\x00。10:42 hosts_err 每小时误报实证。"""
+_DOH_ENDPOINTS = (                          # v2.8.26：DoH 端点顺位（任一成功即返回）
+    'https://dns.alidns.com/resolve',
+    'https://doh.pub/dns-query',
+    'https://cloudflare-dns.com/dns-query',
+)
+
+
+def _hosts_ts() -> str:
+    """巡检日志时间戳（北京时区），配合 [hosts] 前缀做日志审计（v2.8.26）。"""
+    return '[hosts] ' + _now().strftime('%H:%M:%S')
+
+
+def _doh_resolve(name: str, timeout: int = 6) -> str:
+    """v2.8.26：DoH（DNS over HTTPS）解析 A 记录——HTTPS/443 直连端点，不经本机解析器，
+    绕开软路由对明文 53 端口的 DNAT 劫持。依次尝试 _DOH_ENDPOINTS，任一成功即返回首个
+    A 记录；全部失败返回 ''。标准库 urllib+json，零第三方依赖。
+    JSON 口径：Status==0 且 Answer[].type==1（RFC 8484 的 JSON 变体）。"""
+    for base in _DOH_ENDPOINTS:
+        try:
+            req = urllib.request.Request(
+                f'{base}?name={urllib.parse.quote(name, safe="")}&type=A',
+                headers={'Accept': 'application/dns-json'})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode('utf-8', 'replace'))
+            if data.get('Status') != 0:
+                continue                    # 该端点判失败（NXDOMAIN 等），换下一个
+            for ans in data.get('Answer') or []:
+                if ans.get('type') == 1 and ans.get('data'):
+                    return str(ans['data'])
+        except Exception:
+            continue
+    return ''
+
+
+def _udp53_resolve(name: str, server: str = '223.5.5.5') -> str:
+    """明文 UDP/53 解析（v2.8.26 自 _resolve_public 抽出，解析逻辑不变）。
+    本网络该通道被软路由 DNAT 到本地解析器（读路由器 /etc/hosts），结果只作兜底且不可信，
+    信任判定见 _resolve_public / _hosts_check_one。socket/struct 用模块级导入（可 monkeypatch）。
+    v2.8.3：qname 必须逐段交错（每段=长度前缀+标签体），集中前置=畸形报文，服务器不回。"""
     import struct as _s
     qname = b''.join(bytes([len(p)]) + p.encode() for p in name.split('.')) + b'\x00'
     q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00' + qname + b'\x00\x01\x00\x01'
@@ -791,6 +824,27 @@ def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
     except Exception:
         pass
     return ''
+
+
+def _resolve_public(name: str, server: str = '223.5.5.5') -> str:
+    """解析域名公网 A 记录，返回首个 A 记录字符串；失败返回 ''（签名与返回语义不变）。
+    v2.8.26 缺陷①修复：旧实现明文 UDP/53 直连 223.5.5.5，本网络被软路由 nft 把 dport 53
+    全量 DNAT 到本地解析器（读路由器 /etc/hosts）——对被 hosts 钉住的域名，查回的恒为
+    hosts 里的值，dns_ip==hosts_ip 恒成立，漂移永远检不出（假阴性）。
+    新实现：主路 DoH（HTTPS/443），alidns→doh.pub→cloudflare 任一成功即返回；明文 UDP/53
+    仅最后兜底，兜底结果视为不可信——调用方不得据「兜底值==hosts 值」判无漂移。"""
+    ip = _doh_resolve(name)
+    if ip:
+        return ip
+    return _udp53_resolve(name, server)
+
+
+def _hosts_alert(kind: str, kind_line: str, detail_lines: list,
+                 buttons: list = None, tcolor: str = 'yellow') -> None:
+    """v2.8.26 缺陷②修复：hosts 巡检推送统一出口——修复照做，发不发卡片只由推送总开关
+    push_enabled 决定（自动巡检不再被 push_enabled 连坐停摆）。"""
+    if SETTINGS.get('push_enabled'):
+        _alert_push(kind, kind_line, detail_lines, buttons=buttons, tcolor=tcolor)
 
 
 def _ssh_router(cmd: str, timeout: int = 30) -> str:
@@ -830,23 +884,27 @@ def _hosts_check_once() -> None:
     _rconfigured = bool(SETTINGS.get('router_ip') and SETTINGS.get('router_user')
                         and SETTINGS.get('router_pass'))
     if not _rconfigured or 'Permission denied' in _r:
-        _alert_push('hosts_err', '路由器连接未配置或认证失败（hosts 未改动）', [
+        _hosts_alert('hosts_err', '路由器连接未配置或认证失败（hosts 未改动）', [
             '请到设置页填写：软路由 IP / SSH 端口 / SSH 用户名 / SSH 密码',
             '巡检需要这些信息登录路由器修改 /etc/hosts；本次仅告警不改行'])
         return
     for _d in domains:              # v2.8.17：逐域名巡检（一域一 IP，互不影响）
         try:
             _hosts_check_one(_d)
-        except Exception:
-            pass
+        except Exception as e:
+            print(_hosts_ts(), f'{_d} 巡检异常：{type(e).__name__} {e}', flush=True)
 
 
 def _hosts_check_one(domain: str) -> None:
-    """单域名巡检核心（v2.8.17 自 _hosts_check_once 抽出，逻辑不变）。"""
-    ip = _resolve_public(domain)
+    """单域名巡检核心（v2.8.17 自 _hosts_check_once 抽出；v2.8.26 增加解析可信度判定）。"""
+    doh_ip = _doh_resolve(domain)           # v2.8.26 主路：DoH（可信）
+    ip = doh_ip or _udp53_resolve(domain)   # 兜底：明文 UDP/53（本网被 DNAT 劫持，不可信）
+    trusted = bool(doh_ip)                  # 唯有 DoH 直出才允许判「无漂移」
     if not ip:
-        _alert_push('hosts_err', f'{domain} 域名解析失败（hosts 未改动）', [
-            f'223.5.5.5 解析 {domain} 无 A 记录——可能域名/源站故障',
+        print(_hosts_ts(), f'{domain} 解析失败（DoH 与明文兜底均无 A 记录），hosts 未改动',
+              flush=True)
+        _hosts_alert('hosts_err', f'{domain} 域名解析失败（hosts 未改动）', [
+            f'公网解析 {domain} 无 A 记录——可能域名/源站故障',
             '/etc/hosts 保持原值，业务暂按旧 IP 走，请人工确认'])
         return
     cur = _ssh_router(f"grep -n '{domain}' /etc/hosts || true")
@@ -868,18 +926,24 @@ def _hosts_check_one(domain: str) -> None:
                   f"grep -n '{domain}' /etc/hosts")
         out = _ssh_router(script, timeout=45)
         if f'{ip} {domain}' in out:
-            _alert_push('hosts', f'{domain}：hosts 新增绑定 {ip}', [
+            print(_hosts_ts(), f'{domain}：hosts 新增绑定 {ip} 成功', flush=True)
+            _hosts_alert('hosts', f'{domain}：hosts 新增绑定 {ip}', [
                 f'路由器 /etc/hosts 原无 {domain} 独立行，已按公网解析新增并重启 dnsmasq',
                 '原文件已备份 /etc/hosts.bak-monitor'],
                 buttons=_card_buttons(), tcolor='blue')
         else:
-            _alert_push('hosts_err', 'hosts 新增绑定失败（未生效）', [
+            print(_hosts_ts(), f'{domain}：hosts 新增绑定失败，回执：{(out or "(空)")[:100]}',
+                  flush=True)
+            _hosts_alert('hosts_err', 'hosts 新增绑定失败（未生效）', [
                 f'期望新增 {ip} {domain}，路由器回执异常', f'回执：{(out or "(空)")[:100]}'])
         return
     line_no, rest = pick
     old_ip = rest.split()[0]
     if old_ip == ip:
-        return                          # 一致：静默
+        if not trusted:                 # v2.8.26：明文兜底值不可信，不判「无漂移」防假阴性
+            print(_hosts_ts(), f'{domain}：DoH 全败，明文兜底值与 hosts 一致但不可信，'
+                               f'本轮不判无漂移，下一轮重试', flush=True)
+        return                          # 一致且可信：静默
     # 原子更新：替换该行 + 追加标记注释
     new_line = f"{ip} {domain} {_HOSTS_MARKER}"
     esc = new_line.replace('/', r'\/')
@@ -891,12 +955,15 @@ def _hosts_check_one(domain: str) -> None:
     ok = f'{ip} {domain}' in out
     if ok:
         # v2.8.3①：只在 hosts 真改了才推送，卡片写清具体改动（旧IP → 新IP）
-        _alert_push('hosts', f'{domain}：{old_ip} → {ip}，hosts 已更新', [
+        print(_hosts_ts(), f'{domain}：{old_ip} → {ip}，hosts 已更新并重启 dnsmasq', flush=True)
+        _hosts_alert('hosts', f'{domain}：{old_ip} → {ip}，hosts 已更新', [
             f'223.5.5.5 公网解析与 hosts 绑定不一致，已将该行改为 {ip} 并重启 dnsmasq',
             '原行已备份 /etc/hosts.bak-monitor'],
             buttons=_card_buttons(), tcolor='green')
     else:
-        _alert_push('hosts_err', 'hosts 更新失败（未生效）', [
+        print(_hosts_ts(), f'{domain}：hosts 更新失败，期望 {ip}，回执：{(out or "(空)")[:100]}',
+              flush=True)
+        _hosts_alert('hosts_err', 'hosts 更新失败（未生效）', [
             f'期望改到 {ip}，路由器回执异常', f'回执：{(out or "(空)")[:100]}'])
 
 
@@ -931,13 +998,20 @@ def _hosts_recheck() -> list:
 
 
 def _hosts_loop() -> None:
-    """每小时巡检线程（守护，绝不影响主流程）。"""
+    """每小时巡检线程（守护，绝不影响主流程）。
+    v2.8.26 缺陷②修复：自动巡检只由 hosts_enabled 控制，与推送总开关 push_enabled 解耦
+    （旧判定 push_enabled and hosts_enabled → 用户关推送后巡检线程每小时空转，自动巡检
+    形同死亡，且被手动「重新检测 IP」的正常表象掩盖）。巡检/修复照跑；发不发推送卡片
+    由 _hosts_alert 按 push_enabled 决定。"""
     while True:
         try:
-            if SETTINGS['push_enabled'] and SETTINGS.get('hosts_enabled'):
+            if SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS():
+                print(_hosts_ts(), '自动巡检开始（每小时，push_enabled=%s）'
+                      % SETTINGS.get('push_enabled'), flush=True)
                 _hosts_check_once()
-        except Exception:
-            pass
+                print(_hosts_ts(), '自动巡检完成', flush=True)
+        except Exception as e:
+            print(_hosts_ts(), f'巡检线程异常：{type(e).__name__} {e}', flush=True)
         time.sleep(3600)
 
 
@@ -2398,7 +2472,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.25', 'readonly': False,
+                'version': 'v2.8.26', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2759,6 +2833,10 @@ def _warmup_from_cache() -> None:
 def main():
     if not PASSWORD:
         raise SystemExit('缺少环境变量 ETKN_PASSWORD（只存环境，不落盘）')
+    settings_load()   # v2.8.26：主线程先加载设置再拉起各线程。原只在 alarm_loop 首行加载，
+                      # 与 _hosts_loop 存在启动竞速——本轮重启实测 hosts 线程抢跑读到默认值
+                      # hosts_enabled=False，首轮巡检被静默跳过睡 3600 秒（幸被新增日志暴露）。
+                      # 各后台线程从此一律读到已加载设置（poll/fast 同享此修复）。
     # v2.8.25 排障：每 180 秒转储一次全线程栈到日志（定位 poll_loop 阻塞点用；
     # 输出量小，仅 7 线程；确认根因后可移除）
     import faulthandler, sys
@@ -2772,7 +2850,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.25，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.26，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
