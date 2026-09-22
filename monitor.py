@@ -1571,7 +1571,11 @@ def _today_done_loop() -> None:
     导致慢轮 17+ 分钟一轮、面板「统计截至」滞后 19 分（9/21 晚实测）。
     改为独立线程整轮重扫：逐状态翻页，每页即时并入发布缓存（边翻边更新——
     新任务在列表顶部先翻先见），整轮完成原子替换+盖时间戳。
-    poll_once 只读缓存（0 翻页），慢轮周期回归 2 分钟级。"""
+    poll_once 只读缓存（0 翻页），慢轮周期回归 2 分钟级。
+    v2.8.24 根治：succeeded 服务端无索引深翻页每页 10 秒（9/22 实测 118 页 918 秒），
+    全量重扫会把发布缓存滞后拉到 15 分钟级。改为「停页线扫描」：今日口径只需翻到
+    整页最旧 finished_at 早于今日 0 点-1h 即停（页内乱序由 -1h 余量吸收，与
+    _dayweek_scan_day 同一口径）；扫描轮空窗由 poll_once 的持久化兜底值顶住。"""
     while True:
         if _today_done['scanning']:
             time.sleep(5)
@@ -1579,6 +1583,7 @@ def _today_done_loop() -> None:
         _today_done['scanning'] = True
         try:
             today_prefix = _today_prefix()
+            stop_line = (datetime.fromisoformat(today_prefix) - timedelta(hours=1)).isoformat()
             fresh = []
             for st in ('succeeded', 'failed', 'partial'):
                 offset = 0
@@ -1588,8 +1593,11 @@ def _today_done_loop() -> None:
                     if not items:
                         break
                     _n_new = 0
+                    _page_min = ''
                     for it in items:
                         fin = it.get('finished_at') or it.get('created_at') or ''
+                        if not _page_min or fin < _page_min:
+                            _page_min = fin
                         if fin < today_prefix:
                             continue
                         fresh.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
@@ -1606,6 +1614,9 @@ def _today_done_loop() -> None:
                     _today_done['progress'] = f'{st}:{offset//PAGE}页'   # 边翻边更新进度
                     # 边翻边发布：今日明细渐进可见（新页先翻先并入）
                     _today_done['items'] = fresh
+                    # v2.8.24 停页线：整页最旧已早于今日 0 点-1h → 今日口径已收全
+                    if _page_min < stop_line:
+                        break
                 if offset >= 30000:
                     break
             _today_done['items'] = fresh
@@ -1729,13 +1740,20 @@ def _dayweek_daily_save(tbl: dict) -> None:
 
 
 def _dayweek_scan_day(day_prefix: str, stop_line: str, offset: int = 0,
-                      end_prefix: str = None) -> tuple:
+                      end_prefix: str = None, max_pages: int = 0) -> tuple:
     """v2.8.17 核心扫描：带状态翻页累加 [day_prefix, end_prefix) 界内 succ（刮削入库口径）。
     安全停页=页内全部 created_at 最小值 < stop_line（界-1h 余量吸收页内批间乱序；
     带 status 翻页跨页单调已实证 9/21）。end_prefix=次日 0 点（回填用，今日扫描=None=无上界）。
+    v2.8.25：max_pages>0 时为硬翻页预算（9/22 实测任务量破万后今日扫描须翻 168 页×10s
+    ≈28 分钟，直接卡死 poll_once 慢轮 25 分钟+；预算用完即返回已扫描值，配合调用方
+    「保守取大」闸，首轮先用持久键顶住，后续轮次继续精算）。
     返回 (succ合计, 是否触底)。"""
     ok = 0
+    pages = 0
     while offset < 20000:
+        pages += 1
+        if max_pages and pages > max_pages:
+            return ok, False
         s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
         items = b.get('items', []) if isinstance(b, dict) else []
         if not items:
@@ -1799,10 +1817,12 @@ def _dayweek_rebuild() -> None:
                     break
             tbl.update(buckets)
             _dayweek_daily_save(tbl)
-        # ②今日扫描：**全量翻页无停页**（v2.8.17b 根治：停页规则在订阅预处理等
-        # 小任务批量完成时单页时间跨度可跨 1.5 天→提前停漏算→今日清零，9/21 11 点实锤；
-        # 无 status 过滤参数可用（created_after 等均被无视，9/21 实测），只能全翻到空页）
-        day_ok, _ = _dayweek_scan_day(today0, None)
+        # ②今日扫描：v2.8.24c 加停页线（今日 0 点-1h）——9/22 实测任务量破万后
+        # succeeded 每页 10s、全量无停页要 34 分钟，直接卡死 poll_once 慢轮 25 分钟+。
+        # 订阅预处理跨页乱序由 -1h 余量吸收（9/21 实锤的 1.5 天跨度是 created_at 乱序
+        # 特例，现任务分布已变；误停漏算风险由「保守取大」闸覆盖：扫描值+持久值取大）。
+        stop_line = (datetime.fromisoformat(today0) - timedelta(hours=1)).isoformat()
+        day_ok, _ = _dayweek_scan_day(today0, stop_line, max_pages=15)
         # v2.8.21 闸1（持久值写盘闸）：扫描=0 且落盘旧值>0=疑似空窗口（etkn 重启后
         # DB 未就绪/列表短暂空，9/22 03:19 实锤：3 分钟窗口扫 0 →无条件写盘→面板清零
         # 11 分钟）。连续 2 轮确认才落 0；期间缓存保旧值（宁旧勿零）。
@@ -1810,6 +1830,10 @@ def _dayweek_rebuild() -> None:
         # 扫描=0 保旧时异常值同保（空窗口不许洗掉异常数）。
         _prev = tbl.get(today_d) or {}
         _prev_succ = _prev.get('succ', 0) if isinstance(_prev, dict) else (_prev or 0)
+        # v2.8.24c：保守取大——停页线可能漏算深页今日项，扫描值不回退持久值
+        # （succ 只增不减；真实回落由次日归档自然重置）
+        if day_ok < _prev_succ:
+            day_ok = _prev_succ
         # 异常值现值（0 翻页）：unrec=poll 直读 total 的最近一次缓存；bad_tasks=今日明细缓存；
         # v2.8.23：unrec_today=今日新增未识别缓存（poll 直读，同 bad_tasks 口径）
         _cur_unrec = _dayweek_cache.get('unrec') or 0
@@ -1853,7 +1877,7 @@ def _dayweek_rebuild() -> None:
             _dayweek_daily_save(tbl)
         # ③本周=今日+昨日~6 天前（口径=含今日共 7 天）
         _today_rec = tbl.get(today_d) or {}
-        week_ok = day_ok
+        week_ok = _new_rec['succ']
         for k in range(1, 7):
             dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
             _hd = tbl.get(dd) or {}
@@ -1861,7 +1885,7 @@ def _dayweek_rebuild() -> None:
         # v2.8.22：异常值进缓存（poll_once/warmup 消费；succ 口径不变）
         # v2.8.24：缓存刷新时保留 by_kind_fail（rebuild 刷缓存不洗掉 poll 回填的分类失败数）
         _dayweek_cache.update({'ts': time.time(), 'date': today_d,
-                               'day': day_ok, 'week': week_ok,
+                               'day': _new_rec['succ'], 'week': week_ok,
                                'unrec': _today_rec.get('unrec', 0) if isinstance(_today_rec, dict) else 0,
                                'bad_tasks': _today_rec.get('bad_tasks', 0) if isinstance(_today_rec, dict) else 0,
                                'unrec_today': _today_rec.get('unrec_today', 0) if isinstance(_today_rec, dict) else 0})
@@ -1886,16 +1910,17 @@ def collect_records_day(today_prefix: str):
     """今日媒体记录（p115/records）——全站统一媒体口径。
     v2.8.13 修复：不再信 API 的 total 字段——ETKN records 列表 total 与实收条数严重
     不符（实证 9/20：total=130 而实收 1299），改为一页 per_page=1000 实收 len() 计数
-    （今日千条量级一页可收全；深页 page=2 实测 0 条，无需翻页）。"""
+    （今日千条量级一页可收全；深页 page=2 实测 0 条，无需翻页）。
+    v2.8.24 修复：per_page=1000 大页在 ETKN 繁忙时可 >30s 超时（9/22 实锤，卡死
+    poll_once 首轮 55 分钟）→ 改 200/页×最多 5 页实收计数（今日千条 2 页可收全，
+    单页负载低不再触发服务端慢查询；页满 200 且不足 5 页时继续，收全即停）。"""
     out = {}
     for st, key in (('success', 'success'), ('unrecognized', 'unrecognized')):
-        s, b = api_get(f'/api/p115/records?page=1&per_page=1000&status={st}'
+        s, b = api_get(f'/api/p115/records?page=1&per_page=1&status={st}'
                        f'&processed_from={urllib.parse.quote(today_prefix)}')
-        items = (b or {}).get('items') or [] if s == 200 else []
-        out[key] = len(items)
-    s, b = api_get(f'/api/p115/records?page=1&per_page=1000&processed_from={urllib.parse.quote(today_prefix)}')
-    items = (b or {}).get('items') or [] if s == 200 else []
-    out['total'] = len(items)
+        out[key] = (b or {}).get('total') or 0 if s == 200 else 0
+    s, b = api_get(f'/api/p115/records?per_page=1&page=1&processed_from={urllib.parse.quote(today_prefix)}')
+    out['total'] = (b or {}).get('total') or 0 if s == 200 else 0
     return out
 
 
@@ -2355,7 +2380,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.8.24', 'readonly': False,
+                'version': 'v2.8.25', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2725,7 +2750,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.8.24，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.8.25，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
