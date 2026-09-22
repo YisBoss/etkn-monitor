@@ -1636,18 +1636,27 @@ def collect_today_done(today_prefix: str):
     服务端按时间倒序返回，一旦某页最旧记录已早于今日 0 点，更深的页必然更旧，直接停。
     """
     out = []
+    # v2.8.25：同步兜底也加停页线（今日 0 点-1h）+ 15 页硬预算——9/22 任务量破万后
+    # 本函数在首轮 poll_once 里全量翻 succeeded 168 页×10s ≈ 28 分钟，是慢轮
+    # 25 分钟+ 不收敛的真根因（重线程版已带停页线，此为冷启动第一轮的同口径收口）。
+    # 页内乱序由 -1h 余量吸收；漏算深页今日项风险由持久化兜底闸（宁旧勿零）覆盖。
+    _stop = (datetime.fromisoformat(today_prefix) - timedelta(hours=1)).isoformat()
     for st in ('succeeded', 'failed', 'partial'):
         offset = 0
+        _pages = 0
         while True:
+            _pages += 1
+            if _pages > 15:
+                break
             s, b = api_get(f'/api/workflows?status={st}&limit={PAGE}&offset={offset}')
             items = b.get('items', []) if isinstance(b, dict) else []
             if not items:
                 break
-            # v2.8.17b：不再停页——订阅预处理批量完成时单页时间跨度可跨天，
-            # page_oldest 停页会漏算深页今日任务（9/21 实锤今日任务数同步漏报）；
-            # 代价=每轮多翻几十页（succeeded 全量 52 页≈350s），换来精确。
+            _page_min = ''
             for it in items:
                 fin = it.get('finished_at') or it.get('created_at') or ''
+                if not _page_min or fin < _page_min:
+                    _page_min = fin
                 if fin < today_prefix:
                     continue
                 out.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
@@ -1660,6 +1669,8 @@ def collect_today_done(today_prefix: str):
                             'stage': (it.get('failure_stage_title') or '')[:12],
                             'finished_at': fin})
             offset += PAGE
+            if _page_min < _stop:   # v2.8.25 停页线：整页最旧已早于今日 0 点-1h
+                break
             if offset >= 30000:   # v2.7.1 安全闸：防接口异常时的无限翻页（正常今日远小于此）
                 break
     return out
@@ -2204,7 +2215,14 @@ def poll_once():
     # v2.8.24：分类统计（by_kind）重启不丢——etkn 重启窗口 _today_done 缓存清空时，
     # live 扫描只能看到重启后完成的少量任务，各分类 fail_tasks 会归零；
     # 用持久今日键中的 by_kind_fail 做兜底取大（每类独立取 max，新完成任务正常累加）。
-    _persist_kind = ((tbl.get(today_d) or {}).get('by_kind_fail') or {}) if _same_day else {}
+    # v2.8.25 修复：tbl 未定义（v2.8.24 误用 _dayweek_rebuild 局部变量名）导致
+    # poll_once 首轮必炸 NameError、快照永驻预热旧值——改读持久载入函数。
+    _persist_kind = {}
+    if _same_day:
+        try:
+            _persist_kind = ((_dayweek_daily_load().get(today_prefix[:10]) or {}).get('by_kind_fail') or {})
+        except Exception:
+            _persist_kind = {}
     if isinstance(_persist_kind, dict) and _persist_kind:
         for _pk, _pv in _persist_kind.items():
             _pe = by_kind_done.setdefault(_pk, {'tasks': 0, 'items': 0, 'ok_media': 0,
@@ -2741,6 +2759,10 @@ def _warmup_from_cache() -> None:
 def main():
     if not PASSWORD:
         raise SystemExit('缺少环境变量 ETKN_PASSWORD（只存环境，不落盘）')
+    # v2.8.25 排障：每 180 秒转储一次全线程栈到日志（定位 poll_loop 阻塞点用；
+    # 输出量小，仅 7 线程；确认根因后可移除）
+    import faulthandler, sys
+    faulthandler.dump_traceback_later(180, repeat=True, file=sys.stderr)
     _warmup_from_cache()
     threading.Thread(target=poll_loop, daemon=True).start()
     threading.Thread(target=fast_loop, daemon=True).start()
