@@ -139,7 +139,15 @@ input[type=number]{width:90px}
 /* v2.9.0：两栏区（分类队列+手动操作合并吃掉桌面空白） */
 .grid>.duo{grid-column:1/-1}
 .duo{display:grid;grid-template-columns:1.5fr 1fr;gap:10px;align-items:stretch}
-@media (max-width:900px){.duo{grid-template-columns:1fr}}
+/* v2.9.1.8：手机端 .duo 并排 2 列，匹配上面 4 卡 2x2 网格
+   分类队列在左、手动操作在右，整体高度砍半，省一屏不出滚动 */
+@media (max-width:900px){.duo{grid-template-columns:1fr 1fr;gap:8px}}
+/* 窄列适配：手动操作卡按钮去最小宽度，2 个/行排得下 */
+@media (max-width:900px){.ops .opsr button{min-width:0;padding:7px 8px;font-size:12.5px}.ops .opsl{flex:0 0 auto;font-size:11.5px}}
+/* 窄列适配：测速结果紧凑显示，避免压垮手动操作卡高度 */
+@media (max-width:900px){#kSp{margin-top:6px}#kSp .sptab{font-size:11.5px}#kSp .sptab td{padding:1px 4px}#kSp .sptab tr{padding:4px 0;border-bottom-width:1px}#kSp .sptab .sub{margin-bottom:2px}}
+/* 480px 以下更窄：卡 padding 缩 2px，并排再缩 gap */
+@media (max-width:480px){.duo{gap:6px}.card{padding:10px}}
 /* v2.9.0：导航分级——主导航收窄为紧凑 tab；设置子导航降一级（小一号、弱底色） */
 .tabs button{font-size:14px}
 .tabs.compact{display:inline-flex;padding:3px;border-radius:10px}
