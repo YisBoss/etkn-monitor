@@ -27,6 +27,7 @@ body{background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,"PingFang 
 @media (min-width:900px){
   body{padding:16px}
   .card{padding:14px}
+
 }
 .tabs{display:flex;gap:8px;margin-bottom:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px}
 .tabs button{flex:1;min-height:44px;border:none;background:transparent;color:var(--sub);border-radius:9px;font-size:15px;transition:background .15s,color .15s}
@@ -127,14 +128,49 @@ input[type=number]{width:90px}
 .switch input:checked+.slider{background:var(--ok)}
 .switch input:checked+.slider:before{transform:translateX(20px)}
 .histsub{font-size:12px;color:var(--sub);margin-top:6px}
+/* v2.9.0：两栏区（分类队列+手动操作合并吃掉桌面空白） */
+.grid>.duo{grid-column:1/-1}
+.duo{display:grid;grid-template-columns:1.5fr 1fr;gap:10px;align-items:stretch}
+@media (max-width:900px){.duo{grid-template-columns:1fr}}
+/* v2.9.0：导航分级——主导航收窄为紧凑 tab；设置子导航降一级（小一号、弱底色） */
+.tabs button{font-size:14px}
+.tabs.compact{display:inline-flex;padding:3px;border-radius:10px}
+.tabs.compact button{padding:6px 16px;font-size:13.5px;border-radius:8px;white-space:nowrap}
+.tabs.sub{display:inline-flex;background:transparent;border:none;padding:0 0 8px;gap:6px}
+.tabs.sub button{flex:0 0 auto;padding:4px 12px;font-size:12px;border-radius:8px;background:transparent;border:1px solid var(--line);opacity:.72;box-shadow:none}
+.tabs.sub button.on{opacity:1;background:var(--card);border-color:var(--acc,#4f8ef7)}
+/* v2.9.0：表格数字列收紧，宽度让给类型/标题列 */
+table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-right:4px}
+/* v2.9.0：设置行对齐统一——label 固定 160px，控件吃满剩余 */
+.setrow>label:first-child{flex:0 0 160px;align-items:flex-start;text-align:left}
+.setrow>input[type=text]{flex:1;min-width:200px}
+.setrow>select,.setrow>input[type=number]{flex:0 0 120px}
+.setrow>input[type=checkbox]{flex:0 0 auto}
+/* v2.9.0：设置分组折叠 */
+.setgroup{cursor:pointer;user-select:none}
+.setgroup .tgl{float:right;font-size:11px;opacity:.6}
+.setbody.collapsed{display:none}
+/* v2.9.0：底部 sticky 保存条 */
+.stickybar{position:sticky;bottom:0;z-index:30;background:var(--card);border-top:1px solid var(--line);
+  margin:10px -14px -14px;padding:10px 14px;display:flex;justify-content:flex-end;gap:8px;
+  box-shadow:0 -4px 12px rgba(0,0,0,.18);border-radius:0 0 12px 12px}
+/* v2.9.0：手动操作卡 space-between（左结果右按钮） */
+.ops{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}
+.ops .opsl{font-size:12px;opacity:.65;min-width:0;flex:1 1 180px;text-align:left}
+.ops .opsr{display:flex;flex-wrap:wrap;gap:8px}
+/* v2.9.0：测速耗时颜色 */
+.spd-ok{color:var(--ok,#3ddc84);font-weight:600}
+.spd-warn{color:var(--warn,#f7b500);font-weight:600}
+.spd-bad{color:var(--bad,#ff5c69);font-weight:600}
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.8.26</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.9.0</span></h1><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
-<div class="tabs">
+<div class="tabs compact">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
 <button id="tab2" onclick="sw(2)">任务统计</button>
+<button id="tab3" onclick="sw(3)">设置</button>
 </div>
 
 <div id="page1">
@@ -143,21 +179,25 @@ input[type=number]{width:90px}
     <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div><div class="sub" id="cDoneWk" style="margin-top:2px;color:var(--dim)">本周 -</div></div>
     <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>今日</small></div><div class="sub" id="cBadSub">- 未识别 · - 失败/部分</div><div class="sub" id="cBadAll" style="margin-top:2px;color:var(--dim)">累计未识别 -</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div><div class="sub" id="cEtaOrg" style="margin-top:2px">整理类预计 -</div></div>
-    <div class="card w"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
-    <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
+    <div class="duo">
+    <div class="card"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
+    <div class="card"><div class="k">手动操作</div>
+      <div class="ops"><span class="opsl" id="opsLast1"></span><span class="opsr"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">打开 ETKN 原站 ↗</button></div>
+      </span></div>
       <div id="kSp" style="margin-top:6px"></div>
     </div>
   </div>
-</div>
-
 <div id="page2" style="display:none">
   <div class="grid">
     <div class="card w"><div class="k">今日分类统计（任务口径；成功/异常为媒体项）</div>
       <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th><th class="num">失败/部分任务</th></tr></thead><tbody></tbody></table>
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
-    <div class="card w"><div class="k">手动操作</div><div class="ops"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">更多任务 →</button></div>
+    <div class="card w"><div class="k">手动操作</div>
+      <div class="ops"><span class="opsl" id="opsLast2"></span><span class="opsr"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="location.href='http://192.168.1.22:5257/task-center'">打开 ETKN 原站 ↗</button></div>
+      </span></div>
       <div id="kSp2" style="margin-top:6px"></div>
+    </div> style="margin-top:6px"></div>
     </div>
       <div class="card w"><div class="k">今日失败/部分失败任务</div>
       <div class="twrap flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th class="num">操作</th></tr></thead><tbody></tbody></table></div>
@@ -171,13 +211,13 @@ input[type=number]{width:90px}
 <div id="page3" style="display:none">
   <div class="grid">
     <div class="card w">
-      <div class="tabs" style="margin-bottom:10px">
+      <div class="tabs sub" style="margin-bottom:10px">
         <button id="cfgTab1" class="on" onclick="swCfg(1)">推送与巡检</button>
         <button id="cfgTab2" onclick="swCfg(2)">推送历史</button>
         <button id="cfgTab3" onclick="swCfg(3)">测速历史</button>
       </div>
       <div id="cfgForm">
-        <div class="setgroup">【推送】</div>
+        <div class="setgroup" data-g="1">【推送】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>飞书 Webhook 地址<span class="why">机器人 Incoming 地址</span></label></div>
         <div class="setrow"><input type="text" id="cfgUrl" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"></div>
         <div class="setrow"><label>推送总开关<span class="why">关闭则全部静默</span></label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
@@ -185,7 +225,7 @@ input[type=number]{width:90px}
           <div style="flex:1"><div id="clList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button></div></div></div>
         <div class="setrow"><label>外网面板地址<span class="why">空=内网 192.168.1.22:8620</span></label><input type="text" id="cfgTrgBase" placeholder="https://etknjk.example.com" style="max-width:260px"></div>
-        <div class="setgroup">【告警】</div>
+        <div class="setgroup" data-g="2">【告警】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>TMDB HTTP 500 检测<span class="why">频率+异常才推送</span></label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
         <div class="setrow"><label>队列积压告警<span class="why">任一类型排队 ≥ N 推送</span></label><div class="setbox"><input type="number" id="cfgTbl" min="1"><span class="sub">条</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>500 命中阈值<span class="why">今日条数</span></label><input type="number" id="cfgT500" min="1"></div>
@@ -194,14 +234,14 @@ input[type=number]{width:90px}
         <div class="setrow"><label>整理任务清空提醒<span class="why">汇总含/隐藏失败行</span></label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>一键整理入口<span class="why">清空提醒附「整理下一批」，令牌30分钟一次性</span></label><label class="switch"><input type="checkbox" id="cfgTrg"><span class="slider"></span></label></div>
         <div class="setrow"><label>静止告警自动重启 etkn<span class="why">仅 restart；30分钟冷却+24小时≤2次；默认关</span></label><label class="switch"><input type="checkbox" id="cfgAutoRst"><span class="slider"></span></label></div>
-        <div class="setgroup">【测速】</div>
+        <div class="setgroup" data-g="3">【测速】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>定时测速<span class="why">异常才推送</span></label><div class="setbox"><select id="cfgISp"><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 60 分钟</option><option value="120">每 120 分钟</option></select><label class="switch"><input type="checkbox" id="cfgASp"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>测速异常阈值<span class="why">总耗时毫秒</span></label><input type="number" id="cfgTsp" min="1000"></div>
         <div class="setrow"><label>测速目标<span class="why">≤12 项；域名必填，备注/代理可选</span></label>
           <div style="flex:1"><div id="stList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="stAdd()">＋新增测速目标</button>
           <span class="sub" style="align-self:center">列表为空=不测速不推送；代理留空=直连</span></div></div></div>
-        <div class="setgroup">【喂料】</div>
+        <div class="setgroup" data-g="4">【喂料】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>自动喂料<span class="why">清空提醒后自动分批转移，经 CD2 WebDAV 通道</span></label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
         <div class="setrow"><label>喂料源目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
         <div class="setrow"><label>喂料目标目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
@@ -209,7 +249,7 @@ input[type=number]{width:90px}
         <div class="setrow"><label>喂料转移后延迟秒数<span class="why">隔 N 秒触发整理，0=立即</span></label><input type="number" id="cfgFeedDelay" min="0" style="max-width:120px"></div>
         <div class="setrow"><label>CD2 WebDAV 地址<span class="why">CloudDrive2 挂载通道</span></label><input type="text" id="cfgCd2Url" style="max-width:340px" placeholder="http://192.168.1.22:19798/dav"></div>
         <div class="setrow"><label>CD2 账号 / 密码<span class="why">密码留空=不修改</span></label><div class="setbox"><input type="text" id="cfgCd2User" style="max-width:220px" placeholder="CloudDrive2 登录邮箱"><input type="password" id="cfgCd2Pass" style="max-width:200px" placeholder="留空=不修改"></div></div>
-        <div class="setgroup">【hosts】</div>
+        <div class="setgroup" data-g="5">【hosts】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>监控域名<span class="why">支持逗号分隔多个，逐域名监控漂移；解析比对路由器 /etc/hosts，漂移改行+重启 dnsmasq；留空=不监控</span></label><div class="setbox"><input type="text" id="cfgHostsDomain" placeholder="a.com,b.com" style="max-width:260px"><button class="act" id="btnHostsRe" onclick="hostsRecheck()">重新检测 IP</button></div></div>
         <div class="setrow"><label>当前绑定<span class="why">路由器 /etc/hosts 实际绑定 IP（点「重新检测 IP」后刷新）</span></label><div id="hostsIps" style="font-size:12px;opacity:.75;text-align:right">待检测</div></div>
         <div class="setrow"><label>路由器连接<span class="why">公版配置本机保存；留空=巡检跳过不告警</span></label>
@@ -220,7 +260,7 @@ input[type=number]{width:90px}
             <div><label>SSH 密码</label><input type="password" id="cfgRtrPass" placeholder="留空=不修改"></div>
           </div></div>
         <div class="setrow"><label>hosts 自动更新<span class="why">漂移时改行+重启 dnsmasq</span></label><label class="switch"><input type="checkbox" id="cfgHosts"><span class="slider"></span></label></div>
-        <div class="ops"><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button></div>
+        <div class="stickybar"><button class="act lnk" onclick="tglAll(true)">全部展开</button><button class="act lnk" onclick="tglAll(false)">全部收起</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button></div>
         <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
       </div>
       <div id="cfgHist" style="display:none">
@@ -264,10 +304,9 @@ function toggleTheme(){
   try{localStorage.removeItem('etknmon_theme');}catch(e){}
 }
 function sw(n){
-  document.getElementById('page1').style.display=n===1?'':'none';
-  document.getElementById('page2').style.display=n===2?'':'none';
-  document.getElementById('tab1').className=n===1?'on':'';
-  document.getElementById('tab2').className=n===2?'on':'';
+  [1,2,3].forEach(i=>{const p=document.getElementById('page'+i);if(p)p.style.display=(n===i)?'':'none';});
+  [1,2,3].forEach(i=>{const b=document.getElementById('tab'+i);if(b)b.className=(n===i)?'on':'';});
+  if(n===3&&!window._cfgLoadedOnce){try{cfgLoad();window._cfgLoadedOnce=true;}catch(e){}}
 }
 /* ---- 类型中文映射（未知类型回退原名，不吞新类型） ---- */
 const KIND_ZH = {'batch_ingest':'刮削入库','p115_organize':'网盘整理','organize-p115':'手动整理网盘文件',
@@ -324,7 +363,7 @@ function spRow(x){
     return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num">-</td><td class="num">-</td><td class="num">${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
   }
   const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${nm}</td><td class="num">${x.tcp_ms}ms</td><td class="num">${x.tls_ms}ms</td><td class="num">${x.total_ms}ms</td><td>${stc}</td></tr>`;
+  return `<tr><td>${dot}${nm}</td><td class="num">${x.tcp_ms}ms</td><td class="num">${x.tls_ms}ms</td><td class="num"><span class="${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></td><td>${stc}</td></tr>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
@@ -344,6 +383,7 @@ async function runSpeedtest(){
     const rendered=`<div class="sub" style="margin-bottom:4px">测于 ${ (b.ts||'').slice(11,16) }</div>`+
       `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`;
     box.innerHTML=rendered; if(box2)box2.innerHTML=rendered;
+    opsStamp('手动测速');
   }catch(e){toast('测速失败：'+String(e).slice(0,60),'bad');}
   ['btnSp1','btnSp2'].forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=false;b.textContent='开始测速';}});
   spBusy=false;
@@ -386,6 +426,7 @@ async function purgeRegister(){
         if(r.ok){
           const failTxt = (b.failed&&b.failed.length)?`，失败 ${b.failed.length} 个`:'';
           toast(`已取消 ${b.cancelled} 个共享登记任务${failTxt}`, (b.failed&&b.failed.length)?'warn':'ok');
+          opsStamp('清空共享登记积压');
           setTimeout(refresh, 1500);
         }else{
           toast('清空失败：'+String(b.error||JSON.stringify(b)).slice(0,100),'bad');
@@ -395,6 +436,14 @@ async function purgeRegister(){
     });
 }
 const taskBusy = {};
+/* v2.9.0：手动操作卡左侧——最近一次操作结果+时间（本地会话记忆） */
+function opsStamp(name,ok=true){
+  const t=new Date().toTimeString().slice(0,5);
+  const txt=`${ok?'✅':'❌'} ${name} · ${t}`;
+  ['opsLast1','opsLast2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=txt;});
+  try{localStorage.setItem('em_ops_last',txt);}catch(e){}
+}
+try{const _ol=localStorage.getItem('em_ops_last');if(_ol){['opsLast1','opsLast2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=_ol;});}}catch(e){}
 async function runTask(key, btnIds, busyText, resetText){
   if(taskBusy[key]) return; taskBusy[key]=true;
   btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent=busyText;}});
@@ -403,6 +452,7 @@ async function runTask(key, btnIds, busyText, resetText){
     const b=await r.json();
     if(r.ok&&(b.etkn_status===200||b.etkn_status===201||b.etkn_status===202)){
       toast('已提交进入队列','ok');
+      opsStamp(resetText);
       setTimeout(refresh,1500);
     }else{
       const msg=(b.etkn_body&&(b.etkn_body.detail||b.etkn_body.error))||JSON.stringify(b.etkn_body||b);
@@ -440,12 +490,23 @@ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'
 const PUSH_KIND={'t500':'TMDB 500','speed':'测速异常','backlog':'队列积压','test':'测试推送','engine':'引擎','feed':'自动喂料','feed_err':'喂料告警','feed_empty':'喂料空源','hosts':'hosts 更新','hosts_err':'hosts 告警','stall':'静止告警','auto_restart':'自动重启'};
 /* v2.8.7：推送史图标对齐飞书卡片——feed 成功/触发类=绿对勾，*_err 失败类=黄三角，其余按色系 */
 const PUSH_ICON=k=>k==='feed'?'✅':k==='feed_empty'||k==='test'||k==='hosts'?'✅':k.endsWith('_err')||k==='stall'||k==='t500'||k==='speed'||k==='backlog'?'⚠️':'ℹ️';
-function openCfg(){
-  document.getElementById('page1').style.display='none';
-  document.getElementById('page2').style.display='none';
-  document.getElementById('page3').style.display='';
-  ['tab1','tab2'].forEach(id=>{const b=document.getElementById(id);b.classList.remove('on');});
-  swCfg(1);hostsStatus(); cfgLoad();
+function openCfg(){ sw(3); swCfg(1); hostsStatus(); }
+/* v2.9.0：设置分组折叠（按 setgroup 动态包裹后续 setrow，DOM 稳定） */
+function tglGroup(g){
+  let n=g.nextElementSibling,open=true;
+  while(n&&!n.classList.contains('setgroup')){
+    const hid=n.style.display==='none';
+    if(hid){n.style.display='';}else{n.style.display='none';open=false;}
+    n=n.nextElementSibling;
+  }
+  const t=g.querySelector('.tgl');if(t)t.textContent=open?'展开 ▼':'收起 ▲';
+}
+function tglAll(show){
+  document.querySelectorAll('#cfgForm .setgroup').forEach(g=>{
+    let n=g.nextElementSibling;
+    while(n&&!n.classList.contains('setgroup')){n.style.display=show?'':'none';n=n.nextElementSibling;}
+    const t=g.querySelector('.tgl');if(t)t.textContent=show?'收起 ▲':'展开 ▼';
+  });
 }
 function swCfg(n){
   document.getElementById('cfgForm').style.display=n===1?'':'none';
@@ -644,7 +705,8 @@ async function cfgLoadSpeed(){
   try{
     const b=await (await fetch('/api/speed-history',{cache:'no-store'})).json();
     const rows=(b.items||[]);
-    const cell=r=>!r||r.ok==null?'-':(!r.ok?'<span class="bad">失败</span>':`${r.total_ms??'-'}ms`);
+    const spdCls=ms=>ms<800?'spd-ok':(ms<1500?'spd-warn':'spd-bad');
+    const cell=r=>!r||r.ok==null?'-':(!r.ok?'<span class="bad">失败</span>':`<span class="${spdCls(r.total_ms??9999)}">${r.total_ms??'-'}ms</span>`);
     // v2.8.7：测速目标配置化后轮次含的域名可不同——列头取该轮自己的域名序列（最大 6 列防溢出）
     const hosts=rows.length?rows[0].results.map(r=>r.host).slice(0,6):[];
     if(!rows.length){
