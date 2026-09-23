@@ -2180,7 +2180,8 @@ def _speedtest_proxy(host: str, explicit):
 
 # ---------- 手动测速（无定时；默认直连，proxy 指定域经代理 CONNECT 隧道） ----------
 def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
-    r = {'host': host, 'ok': False, 'tcp_ms': None, 'tls_ms': None, 'http_ms': None,
+    r = {'host': host, 'ok': False, 'tcp_ms': None, 'connect_ms': None, 'tls_ms': None,
+         'http_ms': None,
          'total_ms': None, 'status': None, 'error': None, 'via': 'proxy' if proxy else 'direct'}
     t0 = time.perf_counter()
     try:
@@ -2202,22 +2203,25 @@ def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
                 raise ConnectionError('代理隧道建立失败: '
                                       + buf.split(b'\r\n', 1)[0].decode('latin1', 'replace')[:60])
             t2 = time.perf_counter()
-            r['tls_ms'] = round((t2 - t1) * 1000)   # 阶段2：CONNECT 隧道建立（含代理侧回源）
+            # v2.9.2.6 阶段2：CONNECT 隧道建立。注意代理（sing-box）收到 CONNECT 就秒回
+            # 200、此时尚未回源，所以这个值恒在 1ms 量级，不能当"延迟"看，故不再占用 tls_ms。
+            r['connect_ms'] = round((t2 - t1) * 1000)
             tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
-            t3 = time.perf_counter()
-            r['http_ms'] = round((t3 - t2) * 1000)  # 阶段3：TLS 握手（真目标）
+            t2b = time.perf_counter()
+            # v2.9.2.6 阶段3：真目标 TLS 握手（与直连分支同口径，UI「握手」列读的就是它）
+            r['tls_ms'] = round((t2b - t2) * 1000)
         else:
             sock = socket.create_connection((host, 443), timeout=timeout)
             t1 = time.perf_counter()
             r['tcp_ms'] = round((t1 - t0) * 1000)
             tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
-            t2 = time.perf_counter()
-            r['tls_ms'] = round((t2 - t1) * 1000)
+            t2b = time.perf_counter()
+            r['tls_ms'] = round((t2b - t1) * 1000)
         tls.sendall(f'GET / HTTP/1.1\r\nHost: {host}\r\n'
                     f'User-Agent: etkn-monitor\r\nConnection: close\r\n\r\n'.encode())
         chunk = tls.recv(256)
         t3 = time.perf_counter()
-        r['http_ms'] = round((t3 - t2) * 1000)  # 代理路径：末段=GET 响应；直连路径：=首字节
+        r['http_ms'] = round((t3 - t2b) * 1000)  # v2.9.2.6 末段：GET 首字节（两路径同基准）
         line = chunk.decode('latin1', 'replace').split('\r\n', 1)[0]
         m = re.search(r'\b(\d{3})\b', line)
         r['status'] = int(m.group(1)) if m else None
