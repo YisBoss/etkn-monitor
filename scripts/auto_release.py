@@ -26,15 +26,33 @@ def _tag_key(t):
             re.sub(r'\d+', '', t.lstrip('v')))
 
 
+def fetch_tags():
+    """同步远端 tag（尽力而为，失败不阻断发版）。
+
+    tag 由 release_upload.py 走 GitHub API 建、从不 git push --tags，所以本地
+    tag 会滞后 → prev 会算成更早的版本，发版摘要覆盖过多提交。--force 是因为
+    远端才是 tag 的权威来源（重打 tag 时本地旧值会让 fetch 被拒）。
+    """
+    r = subprocess.run(['git', '-C', GIT_DIR, 'fetch', '--tags', '--force', 'origin'],
+                       capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        err = (r.stderr or '').strip().splitlines()
+        print('git fetch --tags 失败（按本地 tag 继续）：' + (err[-1] if err else '未知错误'))
+    return r.returncode == 0
+
+
 def main():
     tag = sys.argv[1] if len(sys.argv) > 1 else ''
     if not tag.startswith('v'):
         print('用法: auto_release.py v2.8.3')
         return 1
+    fetch_tags()          # v2.9.2.4：先同步远端 tag，否则 prev 会滞后（失败不阻断）
     # 上一个 tag（语义化排序）
     tags = sorted([t for t in git('tag', '--list').splitlines() if t.startswith('v')],
                   key=_tag_key)
-    prev = tags[-1] if (tags and tags[-1] != tag) else None
+    # 排除本次要发的 tag 本身：远端可能已经有了（重跑/幂等场景），
+    # 否则 tags[-1] == tag → prev 变 None → 摘要退化成 HEAD~5..HEAD
+    prev = next((t for t in reversed(tags) if t != tag), None)
     rng = f'{prev}..HEAD' if prev else 'HEAD~5..HEAD'
     log = git('log', '--format=- %s', rng)
     if not log:
