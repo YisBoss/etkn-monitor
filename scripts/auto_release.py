@@ -36,8 +36,10 @@ def fetch_tags():
     r = subprocess.run(['git', '-C', GIT_DIR, 'fetch', '--tags', '--force', 'origin'],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
-        err = (r.stderr or '').strip().splitlines()
-        print('git fetch --tags 失败（按本地 tag 继续）：' + (err[-1] if err else '未知错误'))
+        # v2.9.2.5：原来只取 stderr 最后一行，多行 fatal 会被截成
+        # 「and the repository exists.」这种残句，看不出原因。改为合并全部非空行。
+        err = ' | '.join(x for x in (r.stderr or '').strip().splitlines() if x.strip())
+        print('git fetch --tags 失败（按本地 tag 继续）：' + (err[:200] or '未知错误'))
     return r.returncode == 0
 
 
