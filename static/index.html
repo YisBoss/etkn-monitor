@@ -389,8 +389,14 @@ function spNet(net){return net&&net.src?'　·　口径：'+esc(net.src):'';}
 function spDeps(d){return d&&d.src?'　·　'+esc(d.src):'';}
 /* v2.9.2.7：代理口径下「建连」测不到目标（显示 —）；软路由口径下才是到目标的真实 TCP */
 function msTxt(v){return v==null?'<span class="sub">—</span>':v+'ms';}
-const VIA_ZH={'proxy·ETKN':'ETKN','direct·软路由':'软路由','proxy·指定':'指定',
-  'direct·ETKN no_proxy':'直连','direct':'直连'};
+/* v2.9.2.8：「建连+握手」= 连接就绪耗时。
+   为什么合成一列：代理口径下「到目标的 TCP 建连」在客户端物理上测不到 ——
+   sing-box 收到 CONNECT 就乐观回 200（用 192.0.2.1/198.51.100.7/203.0.113.9 三个不可达
+   目标对照实测：均 0.3~0.8ms 回 200，发数据后才 RST），真正的回源建连发生在那之后、
+   天然并进握手。合成一列后每格都是真数，不再出现恒 0 或恒 — 的格子。 */
+function connTls(x){const t=x.tcp_ms, l=x.tls_ms;if(t==null&&l==null)return null;return (t||0)+(l||0);}
+const VIA_ZH={'proxy·ETKN':'ETKN','proxy·ETKN 试算':'ETKN 试算','direct·软路由':'软路由',
+  'proxy·指定':'指定','direct·ETKN no_proxy':'直连','direct':'直连'};
 /* 只在非 ETKN 口径时打标签：ETKN 是常态，不加噪 */
 function viaTxt(v){const z=VIA_ZH[v]||v||'';return z==='ETKN'?'':z;}
 const spdCls=ms=>ms<800?'spd-ok':(ms<1500?'spd-warn':'spd-bad');
@@ -399,10 +405,10 @@ function spRow(x){
   const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'')
            + (viaTxt(x.via)?`<span class="via">${esc(viaTxt(x.via))}</span>`:'');
   if(!x.ok){
-    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${x.error||'失败'}</td></tr>`;
+    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连+握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${x.error||'失败'}</td></tr>`;
   }
   const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">${msTxt(x.tcp_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">${msTxt(x.tls_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">${msTxt(x.http_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
+  return `<tr><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连+握手</span><span class="spval">${msTxt(connTls(x))}</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">${msTxt(x.http_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
@@ -420,8 +426,8 @@ async function runSpeedtest(){
       return;
     }
     const rendered=`<div class="sub" style="margin-bottom:4px">测于 ${ (b.ts||'').slice(11,16) }${spNet(b.etkn_net)}${spDeps(b.etkn_deps)}</div>`+
-      `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">首字节</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`+
-      `<div class="sub" style="margin-top:4px">「建连」在 ETKN 口径下是 em→本地代理那一跳（恒 ~0ms，显示 —），目标建连由代理侧完成、已并入「握手」；软路由口径下「建连」才是到目标的真实 TCP。</div>`;
+      `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连+握手</th><th class="num">首字节</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`+
+      `<div class="sub" style="margin-top:4px">「建连+握手」= 从发出请求到连接就绪。ETKN 口径下目标是代理侧回源建连（sing-box 对 CONNECT 乐观秒回 200，客户端测不到目标 TCP 建连，已用不可达目标对照实验证明），所以这一格天然含回源；软路由口径下则含到目标的真实 TCP。「首字节」= 服务器处理+回传，「总耗时」= 全流程。</div>`;
     box.innerHTML=rendered; if(box2)box2.innerHTML=rendered;
     opsStamp('手动测速');
     cfgLoadSpeed();   // v2.9.1：测速历史已移至任务统计页卡片，测完同步刷新

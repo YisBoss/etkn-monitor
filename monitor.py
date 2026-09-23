@@ -85,7 +85,11 @@ def _norm_speed_targets(raw) -> list:
         seen.add(h)
         note = str(it.get('note') or '').strip()[:20]
         px = str(it.get('proxy') or '').strip()
-        if px and not re.fullmatch(r'[A-Za-z0-9._-]+:\d{1,5}', px):
+        # v2.9.2.8：放行哨兵 "etkn" = 按 ETKN 当前口径试算（给「要不要在 ETKN 里切换」
+        # 做同口径对比用；代理地址仍从 ETKN 动态取样，不在 em 侧硬编码）；其余仍只收 host:port
+        if px.lower() == 'etkn':
+            px = 'etkn'
+        elif px and not re.fullmatch(r'[A-Za-z0-9._-]+:\d{1,5}', px):
             px = ''
         out.append({'host': h, 'note': note, 'proxy': px or None})
         if len(out) >= 12:
@@ -2305,6 +2309,13 @@ def _speedtest_proxy(host: str, explicit):
        3) 其余（ETKN 不用的，含 em 以后新加的）→ 直连，由软路由按自己的规则出
     取样失败（hosts 为空）时回退到 v2.9.2.2 行为：一律跟随 ETKN。"""
     if explicit:
+        if str(explicit).strip().lower() == 'etkn':
+            # v2.9.2.8 哨兵：按 ETKN 当前口径试算 —— ETKN 还没用这个域名时，
+            # 也能拿到「如果切过去会怎样」的同口径数字（代理地址仍取自 ETKN 取样）
+            env = _etkn_net_env()
+            if env['proxy']:
+                return env['proxy'], u'proxy·ETKN 试算'
+            return None, u'direct·ETKN 未设代理'
         return explicit, u'proxy·指定'
     env = _etkn_net_env()
     deps = _etkn_deps_async()
