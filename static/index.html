@@ -142,9 +142,12 @@ input[type=number]{width:90px}
 .grid>.duo{grid-column:1/-1}
 .duo>.card{min-width:0}
 .duo{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:10px;align-items:stretch}
-/* v2.9.1.8：手机端 .duo 并排 2 列，匹配上面 4 卡 2x2 网格
-   分类队列在左、手动操作在右，整体高度砍半，省一屏不出滚动 */
-@media (max-width:900px){.duo{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}}
+/* v2.9.1.8：手机端 .duo 曾并排 2 列（分类队列在左、手动操作在右），省一屏高度。
+   ⚠️ v2.9.2.12 用户要求改回各占一行：并列时两栏都太窄——
+   分类队列的「N 媒体 · N 任务（排x/行y）」被挤到换行错位，
+   手动操作按钮文字也要折成两行。现在 ≤900px 一律单列，两张卡各占整行。
+   （桌面端 >900px 仍是 1.5fr/1fr 两栏，未改动。） */
+@media (max-width:900px){.duo{grid-template-columns:minmax(0,1fr);gap:8px}}
 /* 窄列适配：手动操作卡按钮去最小宽度，2 个/行排得下 */
 /* v2.9.2.0：手机端手动操作——ops 竖排（状态在上/按钮在下），按钮组改 2 列网格，
    5 个按钮排 2+2+1 三行，修半屏宽下按钮各占一行的竖排问题 */
