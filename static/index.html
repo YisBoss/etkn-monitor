@@ -89,7 +89,12 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
   .sptab td:first-child{display:block;width:100%;max-width:none;margin-bottom:2px;font-weight:600}
   .sptab td:last-child{display:block;width:100%;padding:2px 0 0 18px}
   .row-bad td:last-child{padding-left:0;margin-left:18px}
+  /* v2.9.1.1：数字列改块级各占一行+label 前缀，修手机端三数字咬合重叠 */
+  .sptab td.num{display:block;width:100%;padding:1px 0 1px 18px}
+  .row-bad td.num{padding-left:0;margin-left:18px}
+  .sptab .lbl{display:inline;color:var(--sub);font-size:12px;margin-right:4px;font-weight:400}
 }
+.sptab .lbl{display:none}
 button.act.lnk{border-color:var(--line);color:var(--sub)}
 .empty{text-align:center;padding:18px 0;color:var(--sub);font-size:13px}
 .empty .ic{font-size:26px;display:block;margin-bottom:6px;opacity:.7}
@@ -362,10 +367,10 @@ function spRow(x){
   const dot = `<span class="dot" style="background:var(--${x.ok?'ok':'bad'})"></span>`;
   const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'');
   if(!x.ok){
-    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num">-</td><td class="num">-</td><td class="num">${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
+    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><span class="lbl">建连</span>-</td><td class="num"><span class="lbl">握手</span>-</td><td class="num"><span class="lbl">总耗时</span>${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
   }
   const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${nm}</td><td class="num">${x.tcp_ms}ms</td><td class="num">${x.tls_ms}ms</td><td class="num"><span class="${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></td><td>${stc}</td></tr>`;
+  return `<tr><td>${dot}${nm}</td><td class="num"><span class="lbl">建连</span>${x.tcp_ms}ms</td><td class="num"><span class="lbl">握手</span>${x.tls_ms}ms</td><td class="num"><span class="lbl">总耗时</span><span class="${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></td><td>${stc}</td></tr>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
