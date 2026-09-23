@@ -1655,9 +1655,11 @@ def _today_done_loop() -> None:
     新任务在列表顶部先翻先见），整轮完成原子替换+盖时间戳。
     poll_once 只读缓存（0 翻页），慢轮周期回归 2 分钟级。
     v2.8.24 根治：succeeded 服务端无索引深翻页每页 10 秒（9/22 实测 118 页 918 秒），
-    全量重扫会把发布缓存滞后拉到 15 分钟级。改为「停页线扫描」：今日口径只需翻到
-    整页最旧 finished_at 早于今日 0 点-1h 即停（页内乱序由 -1h 余量吸收，与
-    _dayweek_scan_day 同一口径）；扫描轮空窗由 poll_once 的持久化兜底值顶住。"""
+    全量重扫会把发布缓存滞后拉到 15 分钟级。改为「停页线扫描」。
+    v2.9.2.13 修正停页线方向：旧版判「整页最旧 finished_at 早于今日 0 点-1h 即停」，
+    但该列表并非按 finished_at 单调（第 1 页就混着 4 天前的条目）→ 第 1 页即命中 →
+    整轮只扫 100 条（实测今日 451 条只收进 90 条）。改为「整页最新都早于今日 0 点」才停，
+    实测今日任务集中在 offset 0~600，7 页收全。"""
     while True:
         if _today_done['scanning']:
             time.sleep(5)
@@ -1665,7 +1667,6 @@ def _today_done_loop() -> None:
         _today_done['scanning'] = True
         try:
             today_prefix = _today_prefix()
-            stop_line = (datetime.fromisoformat(today_prefix) - timedelta(hours=1)).isoformat()
             fresh = []
             for st in ('succeeded', 'failed', 'partial'):
                 offset = 0
@@ -1675,11 +1676,11 @@ def _today_done_loop() -> None:
                     if not items:
                         break
                     _n_new = 0
-                    _page_min = ''
+                    _page_max = ''
                     for it in items:
                         fin = it.get('finished_at') or it.get('created_at') or ''
-                        if not _page_min or fin < _page_min:
-                            _page_min = fin
+                        if not _page_max or fin > _page_max:
+                            _page_max = fin
                         if fin < today_prefix:
                             continue
                         fresh.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
@@ -1696,8 +1697,11 @@ def _today_done_loop() -> None:
                     _today_done['progress'] = f'{st}:{offset//PAGE}页'   # 边翻边更新进度
                     # 边翻边发布：今日明细渐进可见（新页先翻先并入）
                     _today_done['items'] = fresh
-                    # v2.8.24 停页线：整页最旧已早于今日 0 点-1h → 今日口径已收全
-                    if _page_min < stop_line:
+                    # v2.9.2.13 停页线改用「整页最新」：该列表并非按 finished_at 单调
+                    # （第 1 页里就混着 4 天前的条目，见 _dayweek_rebuild 注释），
+                    # 用「整页最旧」会在第 1 页就命中 → 整轮只扫 100 条。
+                    # 改成「整页最新都早于今日 0 点」才停，才真正收全今日。
+                    if _page_max and _page_max < today_prefix:
                         break
                 if offset >= 30000:
                     break
@@ -1718,11 +1722,9 @@ def collect_today_done(today_prefix: str):
     服务端按时间倒序返回，一旦某页最旧记录已早于今日 0 点，更深的页必然更旧，直接停。
     """
     out = []
-    # v2.8.25：同步兜底也加停页线（今日 0 点-1h）+ 15 页硬预算——9/22 任务量破万后
-    # 本函数在首轮 poll_once 里全量翻 succeeded 168 页×10s ≈ 28 分钟，是慢轮
-    # 25 分钟+ 不收敛的真根因（重线程版已带停页线，此为冷启动第一轮的同口径收口）。
-    # 页内乱序由 -1h 余量吸收；漏算深页今日项风险由持久化兜底闸（宁旧勿零）覆盖。
-    _stop = (datetime.fromisoformat(today_prefix) - timedelta(hours=1)).isoformat()
+    # v2.9.2.13：停页线由「整页最旧」改为「整页最新都早于今日 0 点」才停。
+    # 旧版用整页最旧 + 今日 0 点-1h 余量，但该列表并非按 finished_at 单调
+    # （第 1 页混着 4 天前的条目）→ 第 1 页就命中 → 只扫 100 条。
     for st in ('succeeded', 'failed', 'partial'):
         offset = 0
         _pages = 0
@@ -1734,11 +1736,11 @@ def collect_today_done(today_prefix: str):
             items = b.get('items', []) if isinstance(b, dict) else []
             if not items:
                 break
-            _page_min = ''
+            _page_max = ''
             for it in items:
                 fin = it.get('finished_at') or it.get('created_at') or ''
-                if not _page_min or fin < _page_min:
-                    _page_min = fin
+                if not _page_max or fin > _page_max:
+                    _page_max = fin
                 if fin < today_prefix:
                     continue
                 out.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
@@ -1751,7 +1753,7 @@ def collect_today_done(today_prefix: str):
                             'stage': (it.get('failure_stage_title') or '')[:12],
                             'finished_at': fin})
             offset += PAGE
-            if _page_min < _stop:   # v2.8.25 停页线：整页最旧已早于今日 0 点-1h
+            if _page_max and _page_max < today_prefix:   # v2.9.2.13：整页最新都早于今日才停
                 break
             if offset >= 30000:   # v2.7.1 安全闸：防接口异常时的无限翻页（正常今日远小于此）
                 break
@@ -1762,7 +1764,9 @@ def collect_today_done(today_prefix: str):
 # bad_tasks=今日失败/部分任务数；unrec_today=今日新增未识别（后两项为日内口径，跨日须清零）
 _dayweek_cache = {'ts': 0.0, 'date': '', 'day': None, 'week': None, 'rebuilding': False,
                   'unrec': 0, 'bad_tasks': 0, 'unrec_today': 0, 'by_kind_fail': {}}
-_DAYWEEK_INTERVAL = 900   # v2.8.17b：15 分钟一轮（全量翻页 ~350s/轮，无停页精确口径）
+_DAYWEEK_INTERVAL = 60    # v2.9.2.13：1 分钟一轮（旧值 900 是为全量翻页 ~350s/轮让路；
+                          # 现改为 2 个轻量记录接口，一轮 0.2s，今日完成可近实时——
+                          # 该数字每天都在涨，刷新间隔直接决定它与 ETKN 记录页的偏差）
 
 
 def _dayweek_daily_path() -> str:
@@ -1832,47 +1836,43 @@ def _dayweek_daily_save(tbl: dict) -> None:
         pass
 
 
-def _dayweek_scan_day(day_prefix: str, stop_line: str, offset: int = 0,
-                      end_prefix: str = None, max_pages: int = 0) -> tuple:
-    """v2.8.17 核心扫描：带状态翻页累加 [day_prefix, end_prefix) 界内 succ（刮削入库口径）。
-    安全停页=页内全部 created_at 最小值 < stop_line（界-1h 余量吸收页内批间乱序；
-    带 status 翻页跨页单调已实证 9/21）。end_prefix=次日 0 点（回填用，今日扫描=None=无上界）。
-    v2.8.25：max_pages>0 时为硬翻页预算（9/22 实测任务量破万后今日扫描须翻 168 页×10s
-    ≈28 分钟，直接卡死 poll_once 慢轮 25 分钟+；预算用完即返回已扫描值，配合调用方
-    「保守取大」闸，首轮先用持久键顶住，后续轮次继续精算）。
-    返回 (succ合计, 是否触底)。"""
-    ok = 0
-    pages = 0
-    while offset < 20000:
-        pages += 1
-        if max_pages and pages > max_pages:
-            return ok, False
-        s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
-        items = b.get('items', []) if isinstance(b, dict) else []
-        if not items:
-            return ok, True
-        cas = [(it.get('created_at') or it.get('finished_at') or '') for it in items]
-        for it, ca in zip(items, cas):
-            if not (it.get('display_title') or '').startswith(INGEST_PREFIXES):
-                continue
-            fin = it.get('finished_at') or ca or ''
-            if fin >= day_prefix and (not end_prefix or fin < end_prefix):
-                ok += it.get('succeeded_count') or 0
-        offset += PAGE
-        if stop_line and min(cas) < stop_line:   # v2.8.17b：stop_line=None=全量无停页
-            return ok, False
-    return ok, False
+def _records_success_since(iso_from: str):
+    """v2.9.2.13 整理记录口径：返回 processed_at >= iso_from 且 status=success 的记录条数。
+
+    ⚠️ 必须用 record_total，不能用 total —— ETKN 的 total 是「分页分组数」
+    （电视剧 success 记录按 tmdb_id+分类+季+入库方式归成一组，p115_repository.list_records
+    的 page_key），record_total 才是 sum(group_size)=记录条数。实测同一请求
+    total=7520 而 record_total=77500。
+    请求失败返回 None（调用方负责保旧值，绝不落 0）。"""
+    q = urllib.parse.quote(iso_from)
+    s, b = api_get(f'/api/p115/records?per_page=1&page=1&status=success&processed_from={q}')
+    if s != 200 or not isinstance(b, dict):
+        return None
+    try:
+        return int(b.get('record_total'))
+    except (TypeError, ValueError):
+        return None
 
 
 def _dayweek_rebuild() -> None:
-    """v2.8.17 终版：今日/本周 = 「今日 fast 翻页（秒级）+ daily.json 7 日滚动」。
-    历史方案缺陷（今日/本周反复清零根因）：
-    15c 全量翻页随任务量线性变慢（51 页 342 秒，每天 +50 页）→ 超新鲜度闸永真清零；
-    周窗口 fast 翻页在数据大头面前≈全量（翻穿全部较新任务 8 分钟+，同样恶化）；
-    容器重启内存缓存清零+0 点翻转空窗。
-    终版：每天 0 点把当日值归档进 daily.json（持久化，重启不丢）；
-    今日值=扫到今日 0 点-1h 即停（通常第 1~2 页，5 秒）；本周=Σ(历史 6 天)+今日。
-    首次部署回填：daily.json 缺历史日时按日回填（每日一次停页扫描，只跑一次）。"""
+    """v2.9.2.13：今日/本周完成改为「整理记录口径」直读 ETKN 记录接口（2 个轻量请求）。
+
+    为什么废弃 v2.8.17 的 workflows 翻页扫描（今日值长期偏低的真根因）：
+    旧方案按 `/api/workflows?status=succeeded` 翻页、累加 batch_ingest(刮削入库) 的
+    succeeded_count，并用「整页最旧 finished_at 早于今日 0 点-1h 即停」当停页线。
+    但实测该列表**不是按 finished_at 单调排序**——第 1 页里就混着 finished_at 为 4 天前
+    的条目（2026-09-23 实测第 1 页 min=09-19T23:02，而同页 max=09-24T00:02，
+    疑似「链仍活跃」的旧 run 被顶到列表顶部）。于是停页线在第 1 页就命中 →
+    整轮只扫了 100 条 → 今日值严重偏低。实测对照（09-23 当日）：
+
+        面板显示            672
+        旧口径真值(刮削入库)  1681
+        整理记录口径真值      1597
+
+    而卡片上「本周完成」的文案一直写着「整理记录口径」——即实现与文案本来就不一致。
+    新实现与文案、以及 ETKN 自己 UI 的「本周处理」（stats.thisWeek，近 7 天）对齐，
+    只是这里只取 status=success（已识别/完成），与「完成」二字一致。
+    另：daily.json 里仍写今日 succ（记录口径），供历史回溯与预热使用。"""
     if _dayweek_cache['rebuilding']:
         return
     _dayweek_cache['rebuilding'] = True
@@ -1880,102 +1880,49 @@ def _dayweek_rebuild() -> None:
         today0 = _today_prefix()
         today_d = today0[:10]
         tbl = _dayweek_daily_load()
-        # ①回填/归档：缺的日期一次翻页分桶补齐（翻到最早缺日-1h 停页，绝不逐日重翻）
-        need = []
-        for k in range(1, 7):
-            dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
-            if dd not in tbl:
-                need.append(dd)
-        if need:
-            oldest = min(need)               # 最早缺日
-            oldest0 = oldest + 'T00:00:00+08:00'
-            stop = (datetime.fromisoformat(oldest0) - timedelta(hours=1)).isoformat()
-            buckets = {dd: {'succ': 0, 'unrec': 0, 'bad_tasks': 0, 'unrec_today': 0} for dd in need}
-            offset = 0
-            while offset < 20000:
-                s, b = api_get(f'/api/workflows?status=succeeded&limit={PAGE}&offset={offset}')
-                items = b.get('items', []) if isinstance(b, dict) else []
-                if not items:
-                    break
-                cas = [(it.get('created_at') or it.get('finished_at') or '') for it in items]
-                for it, ca in zip(items, cas):
-                    if not (it.get('display_title') or '').startswith(INGEST_PREFIXES):
-                        continue
-                    fin = it.get('finished_at') or ca or ''
-                    dd = fin[:10]
-                    if dd in buckets:
-                        buckets[dd] += it.get('succeeded_count') or 0
-                offset += PAGE
-                if min(cas) < stop:
-                    break
-            tbl.update(buckets)
-            _dayweek_daily_save(tbl)
-        # ②今日扫描：v2.8.24c 加停页线（今日 0 点-1h）——9/22 实测任务量破万后
-        # succeeded 每页 10s、全量无停页要 34 分钟，直接卡死 poll_once 慢轮 25 分钟+。
-        # 订阅预处理跨页乱序由 -1h 余量吸收（9/21 实锤的 1.5 天跨度是 created_at 乱序
-        # 特例，现任务分布已变；误停漏算风险由「保守取大」闸覆盖：扫描值+持久值取大）。
-        stop_line = (datetime.fromisoformat(today0) - timedelta(hours=1)).isoformat()
-        day_ok, _ = _dayweek_scan_day(today0, stop_line, max_pages=15)
-        # v2.8.21 闸1（持久值写盘闸）：扫描=0 且落盘旧值>0=疑似空窗口（etkn 重启后
-        # DB 未就绪/列表短暂空，9/22 03:19 实锤：3 分钟窗口扫 0 →无条件写盘→面板清零
-        # 11 分钟）。连续 2 轮确认才落 0；期间缓存保旧值（宁旧勿零）。
-        # v2.8.22：值升级三元组——异常统计（unrec/bad_tasks）随今日键一起持久化；
-        # 扫描=0 保旧时异常值同保（空窗口不许洗掉异常数）。
         _prev = tbl.get(today_d) or {}
         _prev_succ = _prev.get('succ', 0) if isinstance(_prev, dict) else (_prev or 0)
-        # v2.8.24c：保守取大——停页线可能漏算深页今日项，扫描值不回退持久值
-        # （succ 只增不减；真实回落由次日归档自然重置）
-        if day_ok < _prev_succ:
+
+        # ①今日完成（整理记录口径：success 且 processed_from=今日 0 点）
+        day_ok = _records_success_since(today0)
+        if day_ok is None:                       # 接口失败 → 宁显旧不显零
             day_ok = _prev_succ
-        # 异常值现值（0 翻页）：unrec=poll 直读 total 的最近一次缓存；bad_tasks=今日明细缓存；
-        # v2.8.23：unrec_today=今日新增未识别缓存（poll 直读，同 bad_tasks 口径）
+        # ②本周完成（同口径、近 7 天滚动窗口，与 ETKN UI「本周处理」同窗口）
+        week_from = (_now() - timedelta(days=7)).isoformat(timespec='seconds')
+        week_ok = _records_success_since(week_from)
+        if week_ok is None:
+            week_ok = _dayweek_cache.get('week')
+
+        # ③异常值：unrec=累计未识别（poll 直读 total 的最近一次缓存）；bad_tasks=今日失败/部分任务数；
+        #    unrec_today=今日新增未识别（后两项日内口径，跨日清零）
         _cur_unrec = _dayweek_cache.get('unrec') or 0
         _cur_bad = _dayweek_cache.get('bad_tasks') or 0
         _cur_urtd = _dayweek_cache.get('unrec_today') or 0
         _new_rec = {'succ': day_ok, 'unrec': _cur_unrec, 'bad_tasks': _cur_bad,
                     'unrec_today': _cur_urtd,
                     'by_kind_fail': dict(_dayweek_cache.get('by_kind_fail') or {})}
-        if day_ok == 0 and _prev_succ > 0:
-            _zero_streak = _dayweek_cache.get('zero_streak', 0) + 1
-            _dayweek_cache['zero_streak'] = _zero_streak
-            if _zero_streak < 2:
-                print('今日扫描=0 但旧值=%d（第 %d 次），疑似空窗口不落盘，保旧值'
-                      % (_prev_succ, _zero_streak), flush=True)
-            else:
-                tbl[today_d] = _new_rec
-                _dayweek_daily_save(tbl)
-                print('今日连续 2 轮=0，确认落盘清零', flush=True)
-        else:
-            if day_ok > 0:
-                _dayweek_cache['zero_streak'] = 0
-            # 异常值闸：现值异常跳水（unrec/bad_tasks/unrec_today 比持久旧值少 50%+）→ 保旧值
-            _prev_unrec = _prev.get('unrec', 0) if isinstance(_prev, dict) else 0
-            _prev_bad = _prev.get('bad_tasks', 0) if isinstance(_prev, dict) else 0
-            _prev_urtd = _prev.get('unrec_today', 0) if isinstance(_prev, dict) else 0
-            if _prev_unrec > 0 and _cur_unrec < _prev_unrec * 0.5:
-                _new_rec['unrec'] = _prev_unrec
-            if _prev_bad > 0 and _cur_bad < _prev_bad * 0.5:
-                _new_rec['bad_tasks'] = _prev_bad
-            if _prev_urtd > 0 and _cur_urtd < _prev_urtd * 0.5:
-                _new_rec['unrec_today'] = _prev_urtd
-            # v2.8.24：分类失败数兜底——持久旧值各分类取 max（重启窗口不许洗掉）
-            _prev_bkf = _prev.get('by_kind_fail', {}) if isinstance(_prev, dict) else {}
-            if isinstance(_prev_bkf, dict) and _prev_bkf:
-                _cur_bkf = dict(_new_rec.get('by_kind_fail') or {})
-                for _k, _v in _prev_bkf.items():
-                    if _v > (_cur_bkf.get(_k) or 0):
-                        _cur_bkf[_k] = _v
-                _new_rec['by_kind_fail'] = _cur_bkf
-            tbl[today_d] = _new_rec
-            _dayweek_daily_save(tbl)
-        # ③本周=今日+昨日~6 天前（口径=含今日共 7 天）
+        # 异常值闸：现值异常跳水（比持久旧值少 50%+）→ 保旧值（etkn 重启窗口不许洗掉异常数）
+        _prev_unrec = _prev.get('unrec', 0) if isinstance(_prev, dict) else 0
+        _prev_bad = _prev.get('bad_tasks', 0) if isinstance(_prev, dict) else 0
+        _prev_urtd = _prev.get('unrec_today', 0) if isinstance(_prev, dict) else 0
+        if _prev_unrec > 0 and _cur_unrec < _prev_unrec * 0.5:
+            _new_rec['unrec'] = _prev_unrec
+        if _prev_bad > 0 and _cur_bad < _prev_bad * 0.5:
+            _new_rec['bad_tasks'] = _prev_bad
+        if _prev_urtd > 0 and _cur_urtd < _prev_urtd * 0.5:
+            _new_rec['unrec_today'] = _prev_urtd
+        # 分类失败数兜底——持久旧值各分类取 max（重启窗口不许洗掉）
+        _prev_bkf = _prev.get('by_kind_fail', {}) if isinstance(_prev, dict) else {}
+        if isinstance(_prev_bkf, dict) and _prev_bkf:
+            _cur_bkf = dict(_new_rec.get('by_kind_fail') or {})
+            for _k, _v in _prev_bkf.items():
+                if _v > (_cur_bkf.get(_k) or 0):
+                    _cur_bkf[_k] = _v
+            _new_rec['by_kind_fail'] = _cur_bkf
+        tbl[today_d] = _new_rec
+        _dayweek_daily_save(tbl)
+
         _today_rec = tbl.get(today_d) or {}
-        week_ok = _new_rec['succ']
-        for k in range(1, 7):
-            dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
-            _hd = tbl.get(dd) or {}
-            week_ok += _hd.get('succ', 0) if isinstance(_hd, dict) else (_hd or 0)
-        # v2.8.22：异常值进缓存（poll_once/warmup 消费；succ 口径不变）
         # v2.8.24：缓存刷新时保留 by_kind_fail（rebuild 刷缓存不洗掉 poll 回填的分类失败数）
         _dayweek_cache.update({'ts': time.time(), 'date': today_d,
                                'day': _new_rec['succ'], 'week': week_ok,
@@ -3087,23 +3034,12 @@ def _warmup_from_cache() -> None:
                                                   'bad_media': 0, 'fail_tasks': 0})
                     if _pv > (_pe.get('fail_tasks') or 0):
                         _pe['fail_tasks'] = _pv
-    if today_d in tbl and tbl[today_d] is not None:
-        _td = tbl[today_d]
-        _td_succ = _td.get('succ', 0) if isinstance(_td, dict) else (_td or 0)
-        week = _td_succ
-        for k in range(1, 7):
-            dd = (datetime.strptime(today_d, '%Y-%m-%d') - timedelta(days=k)).strftime('%Y-%m-%d')
-            _hd = tbl.get(dd) or {}
-            week += _hd.get('succ', 0) if isinstance(_hd, dict) else (_hd or 0)
-        _dayweek_cache.update({'ts': time.time(), 'date': today_d,
-                               'day': _td_succ, 'week': week,
-                               'unrec': _td.get('unrec', 0) if isinstance(_td, dict) else 0,
-                               'bad_tasks': _td.get('bad_tasks', 0) if isinstance(_td, dict) else 0,
-                               'unrec_today': _td.get('unrec_today', 0) if isinstance(_td, dict) else 0,
-                               'by_kind_fail': dict((_td.get('by_kind_fail') or {}) if isinstance(_td, dict) else {})})
-        # 预热值标注 stale_ts：poll_once 的 _dw_fresh 判定用 ts，这里给足新鲜度窗口
-        print('预热完成：快照 ts=%s，今日=%s，本周=%s' % (snap.get('ts', '无'),
-              _dayweek_cache['day'], _dayweek_cache['week']), flush=True)
+    # v2.9.2.13：今日/本周不再按 daily.json 逐日求和预热——口径已换成整理记录，
+    # 而 daily.json 里的历史键是旧口径残留值，求和会先显示一个错的周值。
+    # 直接同步跑一轮 rebuild（2 个轻量请求，0.2s 级）拿到正确值。
+    _dayweek_rebuild()
+    print('预热完成：快照 ts=%s，今日=%s，本周=%s' % (snap.get('ts', '无'),
+          _dayweek_cache['day'], _dayweek_cache['week']), flush=True)
 
 
 def main():
