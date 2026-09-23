@@ -2166,11 +2166,151 @@ def _etkn_net_env(force: bool = False):
     return _etkn_net_cache
 
 
+# v2.9.2.7 ETKN「在用域名」取样。用户规则：
+#   目标 ∈ ETKN 在用的域名  → 跟随 ETKN 口径（经 ETKN 的代理 CONNECT）
+#   目标 ∉ ETKN 在用的域名  → 走软路由口径（不经 ETKN 代理），含 em 以后新加的目标
+# 这个集合必须**动态取样**：用户改了 ETKN 的配置，em 自动跟着变，em 侧不改任何配置。
+_etkn_deps_cache = {'ts': 0.0, 'hosts': set(),
+                    'src': u'未取到 ETKN 在用域名（回退：一律跟随 ETKN）'}
+
+# ETKN 配置里带 URL 的字段（GET /api/configuration/<key> 的 payload）
+_ETKN_URL_SOURCES = (
+    ('/api/configuration/tmdb', 'base_url'),
+    ('/api/configuration/bangumi', 'base_url'),
+    ('/api/configuration/fanart', 'base_url'),
+    ('/api/configuration/p115', 'base_url'),
+    ('/api/shared-pool/status', 'center_url'),
+)
+# 隐含域名：ETKN 配置里只有开关、URL 写在 ETKN 代码里，配置查不到，只能内置映射
+_ETKN_IMPLIED = {'tmdb': 'image.tmdb.org', 'fanart': 'assets.fanart.tv'}
+
+
+def _pick(d, key):
+    """取配置值：可能在顶层，也可能在 payload 里。
+
+    实测（v2.9.2.7）：`/api/configuration/<key>` 把当前值放在 **payload** 内
+    （如 payload.base_url），而 `/api/shared-pool/status` 的 center_url 在**顶层**。
+    两种都得兼容，否则 tmdb/bangumi/fanart/p115 会全部漏掉。
+    """
+    if not isinstance(d, dict):
+        return None
+    v = d.get(key)
+    if v not in (None, ''):
+        return v
+    p = d.get('payload')
+    return (p or {}).get(key) if isinstance(p, dict) else None
+
+
+def _url_host(v) -> str:
+    """从 http(s)://host[:port]/path 取 host（小写、去端口与用户信息）。"""
+    m = re.match(r'^[a-z][a-z0-9+.-]*://([^/\s?#]+)', str(v or ''), re.I)
+    if not m:
+        return ''
+    return m.group(1).split('@')[-1].split(':')[0].strip().lower().rstrip('.')
+
+
+def _etkn_deps(force: bool = False):
+    """ETKN 当前在用的外部域名集合（从 ETKN 自己的 API 取样，缓存 300s）。
+
+    取样失败时 hosts 为空 —— 调用方必须回退到 v2.9.2.2 的旧行为（一律跟随 ETKN），
+    绝不能把空集合当成「ETKN 什么都不用」，否则会把全部目标误判成走软路由。
+    总预算 12s：ETKN 挂掉时不能把测速拖死。
+    """
+    now = time.time()
+    if not force and _etkn_deps_cache['ts'] and now - _etkn_deps_cache['ts'] < 300:
+        return _etkn_deps_cache
+    hosts, hit, miss = set(), 0, []
+    deadline = time.time() + 12
+    for path, key in _ETKN_URL_SOURCES:
+        if time.time() > deadline:
+            miss.append(u'超时')
+            break
+        try:
+            st, d = api_get(path)
+        except Exception:
+            st, d = -1, {}
+        if st == 200:
+            hit += 1
+            h = _url_host(_pick(d, key))
+            if h:
+                hosts.add(h)
+        else:
+            miss.append(path.rsplit('/', 1)[-1])
+    if time.time() <= deadline:
+        try:      # 隐含：metadata.image_source → 图片域名
+            st, md = api_get('/api/configuration/metadata')
+            if st == 200:
+                hit += 1
+                src = str(((md or {}).get('payload') or {}).get('image_source') or '')
+                if _ETKN_IMPLIED.get(src):
+                    hosts.add(_ETKN_IMPLIED[src])
+        except Exception:
+            pass
+        try:      # 隐含：telegram_notifications 配了频道 = 在用 api.telegram.org
+            st, tg = api_get('/api/configuration/telegram_notifications')
+            if st == 200:
+                hit += 1
+                if ((tg or {}).get('payload') or {}).get('telegram_channel_id'):
+                    hosts.add('api.telegram.org')
+        except Exception:
+            pass
+    if hit:
+        src = u'ETKN 在用 %d 个域名' % len(hosts)
+        if miss:
+            src += u'（%s 取样失败）' % ','.join(sorted(set(miss)))
+    else:
+        src = u'未取到 ETKN 在用域名（回退：一律跟随 ETKN）'
+    _etkn_deps_cache.update({'ts': now, 'hosts': hosts, 'src': src})
+    return _etkn_deps_cache
+
+
+_etkn_deps_lock = threading.Lock()
+_etkn_deps_busy = {'on': False}
+
+
+def _etkn_deps_refresh_bg():
+    try:
+        _etkn_deps(force=True)
+    finally:
+        _etkn_deps_busy['on'] = False
+
+
+def _etkn_deps_async():
+    """非阻塞取用：缓存新鲜就直接给；过期就踢一个后台线程去刷，本次仍返回旧值。
+
+    必须有这一层 —— `/api/speed-history` 是**页面加载**时调用的，若在那里同步取样，
+    ETKN 慢或挂掉会把首屏拖住最多 12s。冷启动时 hosts 为空，_speedtest_proxy 会
+    安全回退到「一律跟随 ETKN」。
+    """
+    d = _etkn_deps_cache
+    if time.time() - (d['ts'] or 0) < 300:
+        return d
+    with _etkn_deps_lock:
+        if not _etkn_deps_busy['on']:
+            _etkn_deps_busy['on'] = True
+            threading.Thread(target=_etkn_deps_refresh_bg, daemon=True).start()
+    return d
+
+
+def _etkn_deps_public():
+    """给接口用（set 不能直接 json.dumps）。"""
+    d = _etkn_deps_async()
+    return {'hosts': sorted(d['hosts']), 'src': d['src']}
+
+
 def _speedtest_proxy(host: str, explicit):
-    """定这一项走不走代理：显式配置优先，否则跟随 ETKN env（命中 no_proxy 则直连）。"""
+    """定这一项走不走代理（v2.9.2.7 用户规则）：
+       1) 显式配置优先（手动覆盖）
+       2) ETKN 在用的域名 → 跟随 ETKN 代理（命中 ETKN no_proxy 则直连）
+       3) 其余（ETKN 不用的，含 em 以后新加的）→ 直连，由软路由按自己的规则出
+    取样失败（hosts 为空）时回退到 v2.9.2.2 行为：一律跟随 ETKN。"""
     if explicit:
         return explicit, u'proxy·指定'
     env = _etkn_net_env()
+    deps = _etkn_deps_async()
+    h = (host or '').lower().rstrip('.')
+    if deps['hosts'] and h not in deps['hosts']:
+        return None, u'direct·软路由'
     if not env['proxy']:
         return None, u'direct'
     if _noproxy_hit(host, env['noproxy']):
@@ -2181,7 +2321,7 @@ def _speedtest_proxy(host: str, explicit):
 # ---------- 手动测速（无定时；默认直连，proxy 指定域经代理 CONNECT 隧道） ----------
 def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
     r = {'host': host, 'ok': False, 'tcp_ms': None, 'connect_ms': None, 'tls_ms': None,
-         'http_ms': None,
+         'http_ms': None, 'proxy_ms': None,
          'total_ms': None, 'status': None, 'error': None, 'via': 'proxy' if proxy else 'direct'}
     t0 = time.perf_counter()
     try:
@@ -2190,7 +2330,10 @@ def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
             phost, pport = proxy.rsplit(':', 1)
             sock = socket.create_connection((phost, int(pport)), timeout=timeout)
             t1 = time.perf_counter()
-            r['tcp_ms'] = round((t1 - t0) * 1000)   # 阶段1：到代理的连接
+            # v2.9.2.7：这一跳只是 em→本地代理（局域网，实测中位 0.115ms），不是目标建连，
+            # 单列为 proxy_ms。tcp_ms 保持 None —— 代理口径下目标建连由代理侧完成、本地测不到，
+            # UI 显示「—」。原来把它填进 tcp_ms，整列恒 0ms，误导成"所有目标建连都是零"。
+            r['proxy_ms'] = round((t1 - t0) * 1000)
             sock.sendall(f'CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n'
                          f'Proxy-Connection: keep-alive\r\n\r\n'.encode())
             buf = b''
@@ -2646,7 +2789,8 @@ class Handler(BaseHTTPRequestHandler):
                 'text/html; charset=utf-8')
         if p == '/api/speed-history':
             return self._send(200, json.dumps({'items': list(_speed_hist),
-                                               'etkn_net': _etkn_net_env()},
+                                               'etkn_net': _etkn_net_env(),
+                                               'etkn_deps': _etkn_deps_public()},
                                               ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
@@ -2766,13 +2910,15 @@ class Handler(BaseHTTPRequestHandler):
             results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results,
-                 'etkn_net': _etkn_net_env()},
+                 'etkn_net': _etkn_net_env(),
+                 'etkn_deps': _etkn_deps_public()},
                 ensure_ascii=False).encode())
         if p == '/api/speedtest':
             results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results,
-                 'etkn_net': _etkn_net_env()},
+                 'etkn_net': _etkn_net_env(),
+                 'etkn_deps': _etkn_deps_public()},
                 ensure_ascii=False).encode())
         if p == '/trigger/organize':          # v2.5.5 确认执行（忙锁+令牌+防连点）
             b = self._body()
