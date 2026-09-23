@@ -399,7 +399,11 @@ const VIA_ZH={'proxy·ETKN':'ETKN','proxy·ETKN 试算':'ETKN 试算','direct·�
   'proxy·指定':'指定','direct·ETKN no_proxy':'直连','direct':'直连'};
 /* 只在非 ETKN 口径时打标签：ETKN 是常态，不加噪 */
 function viaTxt(v){const z=VIA_ZH[v]||v||'';return z==='ETKN'?'':z;}
-const spdCls=ms=>ms<800?'spd-ok':(ms<1500?'spd-warn':'spd-bad');
+/* v2.9.2.10 配色放宽：原来 800/1500 两档太严，境外目标常年 1500~2400ms → 整列标红太扎眼。
+   现在红色只在超过告警阈值（后端 settings.speed_threshold_ms，默认 5000ms）时出现。
+   注意：这里刻意用常量而非读后端阈值——spRow 是纯渲染函数、拿不到 settings；
+   若哪天在设置页改了「测速告警阈值」，记得同步改这里。 */
+const spdCls=ms=>ms<1500?'spd-ok':(ms<5000?'spd-warn':'spd-bad');
 function spRow(x){
   const dot = `<span class="dot" style="background:var(--${x.ok?'ok':'bad'})"></span>`;
   const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'')
