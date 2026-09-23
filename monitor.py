@@ -1085,7 +1085,10 @@ def run_speed_round(alert: bool = True):
         return []
     results = []
     for t in targets:
-        r = speedtest_one(t['host'], proxy=t['proxy'])
+        px, via = _speedtest_proxy(t['host'], t.get('proxy'))   # v2.9.2 跟随 ETKN 口径
+        r = speedtest_one(t['host'], proxy=px)
+        r['via'] = via
+        r['proxy_used'] = px
         if t.get('note'):
             r['note'] = t['note']
         results.append(r)
@@ -2081,6 +2084,100 @@ def compute_eta(done_recent: list, remaining_media: int, running_task: dict = No
             'eta_text': eta_text, 'window_min': wmin, 'done_media_in_window': done_media}
 
 
+# ---------- v2.9.2 测速口径跟随 ETKN（不硬编码代理） ----------
+# 面板的测速必须和 ETKN 业务走同一条路：ETKN 的代理写在它容器的
+# HTTP_PROXY/HTTPS_PROXY/NO_PROXY 里（compose env）。这里通过已有的宿主 SSH 通道读
+# etkn 容器的**实时 env**（不落盘、不硬编码）——用户在 ETKN 侧换代理，面板下一轮自动跟随。
+_etkn_net_cache = {'ts': 0.0, 'proxy': None, 'noproxy': [], 'src': u'未取到 ETKN 代理（按直连）'}
+
+
+def _host_password() -> str:
+    """宿主凭据：compose env_file 注入优先，其次 hermes/.env（与自动重启同一来源）。"""
+    pw = str(os.environ.get('SUDO_PASSWORD') or '')
+    for line in ('/hermes/.env', '/app/hermes/.env', '/vol1/@appdata/trim.hermes/hermes/.env'):
+        try:
+            with open(line, encoding='utf-8') as f:
+                for ln in f:
+                    if ln.startswith('SUDO_PASSWORD='):
+                        pw = ln.split('=', 1)[1].strip()
+                        break
+        except OSError:
+            continue
+        if pw:
+            break
+    return pw
+
+
+def _host_ssh(cmd: str, timeout: int = 20):
+    """走宿主通道跑一条只读命令（monitor 容器内无 docker/sock）。返回 (ok, stdout)。"""
+    pw = _host_password()
+    if not pw:
+        return False, ''
+    full = ("sshpass -p %s ssh -p %s -o StrictHostKeyChecking=no -o ConnectTimeout=8 "
+            "-o LogLevel=ERROR %s@%s %s") % (
+                shlex.quote(pw), shlex.quote(os.environ.get('SSH_PORT', '66')),
+                shlex.quote(os.environ.get('SSH_USER', 'YisBoss')),
+                shlex.quote(os.environ.get('SSH_HOST', '192.168.1.22')),
+                shlex.quote(cmd))
+    try:
+        r = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=timeout)
+        return (r.returncode == 0, (r.stdout or '').strip())
+    except Exception:
+        return False, ''
+
+
+def _noproxy_hit(host: str, patterns) -> bool:
+    """host 是否命中 ETKN 的 no_proxy（精确 / 后缀 / *.后缀）。"""
+    h = (host or '').lower().rstrip('.')
+    for p in patterns or []:
+        q = str(p).strip().lower().rstrip('.')
+        if not q:
+            continue
+        if q.startswith('*.'):
+            q = q[2:]
+        if h == q or h.endswith('.' + q):
+            return True
+    return False
+
+
+def _etkn_net_env(force: bool = False):
+    """etkn 容器当前的代理口径。{'proxy':'host:port'|None,'noproxy':[...],'src':说明}。缓存 300s。"""
+    now = time.time()
+    if not force and _etkn_net_cache['ts'] and now - _etkn_net_cache['ts'] < 300:
+        return _etkn_net_cache
+    cname = os.environ.get('ETKN_CONTAINER', 'etkn')
+    ok, out = _host_ssh("docker inspect %s --format '{{json .Config.Env}}'" % cname)
+    proxy, noproxy, src = None, [], u'未取到 ETKN 代理（按直连）'
+    if ok and out:
+        try:
+            d = {}
+            for kv in json.loads(out.splitlines()[-1]):
+                if isinstance(kv, str) and '=' in kv:
+                    k, v = kv.split('=', 1)
+                    d[k.strip().lower()] = v.strip()
+            m = re.match(r'^[a-z0-9]+://([^/\s]+)', d.get('https_proxy') or d.get('http_proxy') or '', re.I)
+            if m:
+                proxy = m.group(1)
+            noproxy = [x for x in re.split(r'[,\s]+', d.get('no_proxy', '')) if x]
+            src = (u'跟随 ETKN 代理 ' + proxy) if proxy else u'ETKN 未设代理（按直连）'
+        except Exception:
+            src = u'解析 ETKN env 失败（按直连）'
+    _etkn_net_cache.update({'ts': now, 'proxy': proxy, 'noproxy': noproxy, 'src': src})
+    return _etkn_net_cache
+
+
+def _speedtest_proxy(host: str, explicit):
+    """定这一项走不走代理：显式配置优先，否则跟随 ETKN env（命中 no_proxy 则直连）。"""
+    if explicit:
+        return explicit, u'proxy·指定'
+    env = _etkn_net_env()
+    if not env['proxy']:
+        return None, u'direct'
+    if _noproxy_hit(host, env['noproxy']):
+        return None, u'direct·ETKN no_proxy'
+    return env['proxy'], u'proxy·ETKN'
+
+
 # ---------- 手动测速（无定时；默认直连，proxy 指定域经代理 CONNECT 隧道） ----------
 def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
     r = {'host': host, 'ok': False, 'tcp_ms': None, 'tls_ms': None, 'http_ms': None,
@@ -2472,7 +2569,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.1', 'readonly': False,
+                'version': 'v2.9.2', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -2544,7 +2641,8 @@ class Handler(BaseHTTPRequestHandler):
                 token=tok_q, snap=snap_line, gen=secrets.token_hex(8)).encode(),
                 'text/html; charset=utf-8')
         if p == '/api/speed-history':
-            return self._send(200, json.dumps({'items': list(_speed_hist)},
+            return self._send(200, json.dumps({'items': list(_speed_hist),
+                                               'etkn_net': _etkn_net_env()},
                                               ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
@@ -2663,12 +2761,14 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/api/speed-now':
             results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
-                {'ts': _now().isoformat(timespec='seconds'), 'results': results},
+                {'ts': _now().isoformat(timespec='seconds'), 'results': results,
+                 'etkn_net': _etkn_net_env()},
                 ensure_ascii=False).encode())
         if p == '/api/speedtest':
             results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
-                {'ts': _now().isoformat(timespec='seconds'), 'results': results},
+                {'ts': _now().isoformat(timespec='seconds'), 'results': results,
+                 'etkn_net': _etkn_net_env()},
                 ensure_ascii=False).encode())
         if p == '/trigger/organize':          # v2.5.5 确认执行（忙锁+令牌+防连点）
             b = self._body()
@@ -2850,7 +2950,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.2，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
     srv.serve_forever()
