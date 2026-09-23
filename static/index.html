@@ -808,7 +808,7 @@ async function refresh(){
 let _pollTimer=null;
 function scheduleNext(){clearTimeout(_pollTimer);_pollTimer=setTimeout(pollLoop,Math.max(POLL,1)*1000);}
 async function pollLoop(){try{await refresh();}catch(e){}scheduleNext();}
-scheduleNext();
+/* v2.9.1.5：首轮立即跑（修 v2.9.1 Bug C 留下的 15 秒延迟）；之后走 scheduleNext 的 setTimeout 链 */pollLoop();
 // 后台节流对策：回到前台立即刷新一次
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 </script>
