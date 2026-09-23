@@ -63,7 +63,8 @@ SPEEDTEST_VIA_NOTE: dict = {}               # （v2.8.7 退役）面板口径备
 def _norm_speed_targets(raw) -> list:
     """清洗用户配置的测速目标列表：{host:域名或URL, note:可选备注, proxy:可选代理}。
     host 支持裸域名或 http(s) URL（剥协议取域名）；备注≤20 字；proxy 仅接受 host:port；
-    host 重复去重；最多 12 项。非法项剔除（不静默整表拒存）。"""
+    host 重复去重；最多 20 项（v2.9.2.9 从 12 提到 20——ETKN 真实依赖已不止 12 个，
+    旧上限会让第 13 项起**静默消失**）。非法项剔除（不静默整表拒存）。"""
     out, seen = [], set()
     if not isinstance(raw, list):
         return out
@@ -92,7 +93,7 @@ def _norm_speed_targets(raw) -> list:
         elif px and not re.fullmatch(r'[A-Za-z0-9._-]+:\d{1,5}', px):
             px = ''
         out.append({'host': h, 'note': note, 'proxy': px or None})
-        if len(out) >= 12:
+        if len(out) >= 20:      # v2.9.2.9：原为 12，会静默丢弃第 13 项起的目标
             break
     return out
 
@@ -2183,10 +2184,18 @@ _ETKN_URL_SOURCES = (
     ('/api/configuration/bangumi', 'base_url'),
     ('/api/configuration/fanart', 'base_url'),
     ('/api/configuration/p115', 'base_url'),
+    ('/api/configuration/ai', 'ai_base_url'),
     ('/api/shared-pool/status', 'center_url'),
 )
+# v2.9.2.9：某些取样源还隐含「同模块的另一个域名」，配置里不体现，按源补上
+#   fanart 模块在用 → 元数据走 webservice.fanart.tv，图片走 assets.fanart.tv（两张网）
+_ETKN_SOURCE_EXTRA = {'/api/configuration/fanart': ('assets.fanart.tv',)}
 # 隐含域名：ETKN 配置里只有开关、URL 写在 ETKN 代码里，配置查不到，只能内置映射
 _ETKN_IMPLIED = {'tmdb': 'image.tmdb.org', 'fanart': 'assets.fanart.tv'}
+# v2.9.2.9 硬编码域名：ETKN 代码里的常量 URL，配置里完全没有，只能内置
+#   auth.55565576.xyz   = platform/entitlements.py 的 ETK_PRO_AUTH_URL（Pro 授权）
+#   hdhive.55565576.xyz = integrations/re0.py 的 DEFAULT_RELAY_URL（re0 订阅中继）
+_ETKN_HARDCODED = ('auth.55565576.xyz', 'hdhive.55565576.xyz')
 
 
 def _pick(d, key):
@@ -2238,6 +2247,7 @@ def _etkn_deps(force: bool = False):
             h = _url_host(_pick(d, key))
             if h:
                 hosts.add(h)
+                hosts.update(_ETKN_SOURCE_EXTRA.get(path, ()))  # v2.9.2.9
         else:
             miss.append(path.rsplit('/', 1)[-1])
     if time.time() <= deadline:
@@ -2245,9 +2255,13 @@ def _etkn_deps(force: bool = False):
             st, md = api_get('/api/configuration/metadata')
             if st == 200:
                 hit += 1
-                src = str(((md or {}).get('payload') or {}).get('image_source') or '')
+                mp = (md or {}).get('payload') or {}
+                src = str(mp.get('image_source') or '')
                 if _ETKN_IMPLIED.get(src):
                     hosts.add(_ETKN_IMPLIED[src])
+                # v2.9.2.9：豆瓣评分域名硬编码在 ETKN 代码里，配置里只有开关
+                if mp.get('douban_rating_enabled'):
+                    hosts.add('frodo.douban.com')
         except Exception:
             pass
         try:      # 隐含：telegram_notifications 配了频道 = 在用 api.telegram.org
@@ -2258,6 +2272,7 @@ def _etkn_deps(force: bool = False):
                     hosts.add('api.telegram.org')
         except Exception:
             pass
+        hosts.update(_ETKN_HARDCODED)   # v2.9.2.9：代码常量 URL，配置查不到
     if hit:
         src = u'ETKN 在用 %d 个域名' % len(hosts)
         if miss:
