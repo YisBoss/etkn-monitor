@@ -89,13 +89,13 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
   .sptab td:first-child{display:block;width:100%;max-width:none;margin-bottom:2px;font-weight:600}
   .sptab td:last-child{display:block;width:100%;padding:2px 0 0 18px}
   .row-bad td:last-child{padding-left:0;margin-left:18px}
-  /* v2.9.1.1：数字列改块级各占一行+label 前缀，修手机端三数字咬合重叠 */
-  .sptab td.num{display:block;width:100%;padding:1px 0 1px 18px;text-align:left!important}
-  .row-bad td.num{padding-left:0;margin-left:18px}
-  .sptab .lbl{display:inline-block;min-width:3.2em;color:var(--sub);font-size:13px;margin-right:6px;font-weight:500;opacity:.85}
-  .sptab .spline{display:flex;align-items:baseline;gap:6px;justify-content:flex-start}
-  .sptab .spline>.lbl{flex:0 0 3.2em;color:var(--sub);font-size:13px;font-weight:500;opacity:.85}
-  .sptab .spline>.spval{flex:1;text-align:left}
+  /* v2.9.2.1：数字列改横向 inline-flex——用户要求横排（整宽卡放得下三组），省竖向空间 */
+  .sptab td.num{display:inline-block;width:auto;padding:1px 12px 1px 0;text-align:left!important;vertical-align:baseline}
+  .row-bad td.num{padding-left:0}
+  .sptab .lbl{display:inline-block;min-width:auto;color:var(--sub);font-size:12px;margin-right:3px;font-weight:500;opacity:.85}
+  .sptab .spline{display:inline-flex;align-items:baseline;gap:3px;justify-content:flex-start}
+  .sptab .spline>.lbl{flex:none;min-width:auto;color:var(--sub);font-size:12px;font-weight:500;opacity:.85}
+  .sptab .spline>.spval{flex:none;text-align:left}
 }
 @media (min-width:481px){.sptab .lbl{display:none}}
 button.act.lnk{border-color:var(--line);color:var(--sub)}
@@ -153,12 +153,12 @@ input[type=number]{width:90px}
   .ops .opsr button{min-width:0;width:100%;padding:8px 6px;font-size:12px;line-height:1.3;white-space:normal;height:auto}
 }
 /* 窄列适配：测速结果紧凑显示，避免压垮手动操作卡高度 */
-@media (max-width:900px){#kSp{margin-top:6px}#kSp .sptab{font-size:11.5px}#kSp .sptab td{padding:1px 4px}#kSp .sptab tr{padding:4px 0;border-bottom-width:1px}#kSp .sptab .sub{margin-bottom:2px}}
+@media (max-width:900px){#kSp{margin-top:6px}#kSp .sptab{font-size:12px}#kSp .sptab tr{padding:7px 0}#kSp .sptab .sub{margin-bottom:2px}}
 /* 480px 以下更窄：卡 padding 缩 2px，并排再缩 gap */
 @media (max-width:480px){.duo{gap:6px}.card{padding:10px}}
 /* v2.9.0：导航分级——主导航收窄为紧凑 tab；设置子导航降一级（小一号、弱底色） */
 .tabs button{font-size:14px}
-.tabs.compact{display:inline-flex;padding:3px;border-radius:10px}
+.tabs.compact{display:flex;padding:3px;border-radius:10px}
 .tabs.compact button{padding:6px 16px;font-size:13.5px;border-radius:8px;white-space:nowrap}
 .tabs.sub{display:inline-flex;background:transparent;border:none;padding:0 0 8px;gap:6px}
 .tabs.sub button{flex:0 0 auto;padding:4px 12px;font-size:12px;border-radius:8px;background:transparent;border:1px solid var(--line);opacity:.72;box-shadow:none}
