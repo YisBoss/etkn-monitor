@@ -79,8 +79,10 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
 .sp{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--line)}
 .sp:last-child{border-bottom:none}
 .sptab{margin-top:2px}
+/* v2.9.2.7：非 ETKN 口径的小标签（软路由 / 指定 / 直连） */
+.sptab .via{display:inline-block;margin-left:4px;padding:0 4px;border:1px solid var(--line);border-radius:3px;font-size:11px;font-weight:500;color:var(--sub);vertical-align:1px}
 .sptab td{white-space:nowrap}
-.sptab td:first-child{max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.sptab td:first-child{max-width:200px;overflow:hidden;text-overflow:ellipsis}
 .row-bad td{color:var(--bad)}
 @media (max-width:480px){
   .sptab thead{display:none}
@@ -383,15 +385,24 @@ async function doRetry(id){
    v2.9.1 Bug A：spdCls 原是 cfgLoadSpeed 内的局部 const，spRow 引用不到 → 点「开始测速」直接 ReferenceError、按钮卡死；提升为顶层定义 */
 /* v2.9.2：测速口径跟随 ETKN——把当前用哪个代理显出来，避免"面板数字好看、业务其实不同路" */
 function spNet(net){return net&&net.src?'　·　口径：'+esc(net.src):'';}
+/* v2.9.2.7：ETKN「在用域名」取样结果——哪些走 ETKN、哪些走软路由，一眼可见 */
+function spDeps(d){return d&&d.src?'　·　'+esc(d.src):'';}
+/* v2.9.2.7：代理口径下「建连」测不到目标（显示 —）；软路由口径下才是到目标的真实 TCP */
+function msTxt(v){return v==null?'<span class="sub">—</span>':v+'ms';}
+const VIA_ZH={'proxy·ETKN':'ETKN','direct·软路由':'软路由','proxy·指定':'指定',
+  'direct·ETKN no_proxy':'直连','direct':'直连'};
+/* 只在非 ETKN 口径时打标签：ETKN 是常态，不加噪 */
+function viaTxt(v){const z=VIA_ZH[v]||v||'';return z==='ETKN'?'':z;}
 const spdCls=ms=>ms<800?'spd-ok':(ms<1500?'spd-warn':'spd-bad');
 function spRow(x){
   const dot = `<span class="dot" style="background:var(--${x.ok?'ok':'bad'})"></span>`;
-  const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'');
+  const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'')
+           + (viaTxt(x.via)?`<span class="via">${esc(viaTxt(x.via))}</span>`:'');
   if(!x.ok){
-    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${x.error||'失败'}</td></tr>`;
+    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${x.error||'失败'}</td></tr>`;
   }
   const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">${x.tcp_ms}ms</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">${x.tls_ms}ms</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
+  return `<tr><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">${msTxt(x.tcp_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">${msTxt(x.tls_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">${msTxt(x.http_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
@@ -408,8 +419,9 @@ async function runSpeedtest(){
       ['btnSp1','btnSp2'].forEach(id=>{const c=document.getElementById(id);if(c){c.disabled=false;c.textContent='开始测速';}});
       return;
     }
-    const rendered=`<div class="sub" style="margin-bottom:4px">测于 ${ (b.ts||'').slice(11,16) }${spNet(b.etkn_net)}</div>`+
-      `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`;
+    const rendered=`<div class="sub" style="margin-bottom:4px">测于 ${ (b.ts||'').slice(11,16) }${spNet(b.etkn_net)}${spDeps(b.etkn_deps)}</div>`+
+      `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连</th><th class="num">握手</th><th class="num">首字节</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`+
+      `<div class="sub" style="margin-top:4px">「建连」在 ETKN 口径下是 em→本地代理那一跳（恒 ~0ms，显示 —），目标建连由代理侧完成、已并入「握手」；软路由口径下「建连」才是到目标的真实 TCP。</div>`;
     box.innerHTML=rendered; if(box2)box2.innerHTML=rendered;
     opsStamp('手动测速');
     cfgLoadSpeed();   // v2.9.1：测速历史已移至任务统计页卡片，测完同步刷新
@@ -728,7 +740,7 @@ async function cfgLoadSpeed(){
     const b=await (await fetch('/api/speed-history',{cache:'no-store'})).json();
     const rows=(b.items||[]);
     // v2.9.2：未手动测速时，测速结果卡先显示当前口径（跟随 ETKN 的哪个代理）
-    const _net=(b.etkn_net&&b.etkn_net.src)?`<div class="sub">口径：${esc(b.etkn_net.src)}</div>`:'';
+    const _net=(b.etkn_net&&b.etkn_net.src)?`<div class="sub">口径：${esc(b.etkn_net.src)}${spDeps(b.etkn_deps)}</div>`:'';
     ['kSp','kSp2'].forEach(id=>{const el=document.getElementById(id);if(el&&!el.innerHTML.trim())el.innerHTML=_net;});
     const cell=r=>!r||r.ok==null?'-':(!r.ok?'<span class="bad">失败</span>':`<span class="${spdCls(r.total_ms??9999)}">${r.total_ms??'-'}ms</span>`);
     // v2.8.7：测速目标配置化后轮次含的域名可不同——列头取该轮自己的域名序列（最大 6 列防溢出）
