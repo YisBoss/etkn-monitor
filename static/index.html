@@ -93,6 +93,9 @@ button.act:disabled{opacity:.45;border-color:var(--sub);color:var(--sub);cursor:
   .sptab td.num{display:block;width:100%;padding:1px 0 1px 18px;text-align:left!important}
   .row-bad td.num{padding-left:0;margin-left:18px}
   .sptab .lbl{display:inline-block;min-width:3.2em;color:var(--sub);font-size:13px;margin-right:6px;font-weight:500;opacity:.85}
+  .sptab .spline{display:flex;align-items:baseline;gap:6px;justify-content:flex-start}
+  .sptab .spline>.lbl{flex:0 0 3.2em;color:var(--sub);font-size:13px;font-weight:500;opacity:.85}
+  .sptab .spline>.spval{flex:1;text-align:left}
 }
 @media (min-width:481px){.sptab .lbl{display:none}}
 button.act.lnk{border-color:var(--line);color:var(--sub)}
@@ -367,10 +370,10 @@ function spRow(x){
   const dot = `<span class="dot" style="background:var(--${x.ok?'ok':'bad'})"></span>`;
   const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'');
   if(!x.ok){
-    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><span class="lbl">建连</span>-</td><td class="num"><span class="lbl">握手</span>-</td><td class="num"><span class="lbl">总耗时</span>${x.total_ms??'-'}ms</td><td class="bad">${x.error||'失败'}</td></tr>`;
+    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${x.error||'失败'}</td></tr>`;
   }
   const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${nm}</td><td class="num"><span class="lbl">建连</span>${x.tcp_ms}ms</td><td class="num"><span class="lbl">握手</span>${x.tls_ms}ms</td><td class="num"><span class="lbl">总耗时</span><span class="${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></td><td>${stc}</td></tr>`;
+  return `<tr><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连</span><span class="spval">${x.tcp_ms}ms</span></div></td><td class="num"><div class="spline"><span class="lbl">握手</span><span class="spval">${x.tls_ms}ms</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
