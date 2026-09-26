@@ -398,6 +398,10 @@ _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时
 
 FEED_TREE_TTL = 600                    # v2.8.6：回到短缓存（v2.8.4/v2.8.5 逐夹计数已撤销——
                                        # 每次喂料只打 1 次列目录请求，无需 24h 树缓存）
+FEED_FALLBACK_INTERVAL = 150           # v2.9.3：喂料兜底轮询间隔（秒）。
+                                       # 原实现只有「清空提醒推送成功」一个触发点，被 120s 冷却
+                                       # 拦下就永久停摆（9/26 07:53 实证：清空距上轮仅 67s →
+                                       # 静默丢弃 → 之后 35 分钟零记录）。兜底轮询补这个洞。
 
 
 def _feed_scan_entries(src: str):
@@ -580,16 +584,23 @@ def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_fil
             body[:100], '请到面板手动触发「手动整理网盘文件」'])
 
 
-def _feed_run() -> None:
-    """喂料主流程（清空提醒推送成功后调用）：扫描→计划→转移→触发原生整理。
-    转移失败/触发失败→飞书告警卡片；空源目录→飞书提示。全程忙锁+冷却。"""
+def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
+    """喂料主流程：扫描→计划→转移→触发原生整理。
+    转移失败/触发失败→飞书告警卡片；空源目录→飞书提示。全程忙锁+冷却。
+
+    两个入口：
+      ① 事件驱动——清空提醒推送成功后（原唯一入口，v2.7 起）；
+      ② 兜底轮询——_feed_loop 每 FEED_FALLBACK_INTERVAL 秒（v2.9.3 新增，修死锁）。
+    force=True        绕过 2 分钟冷却（兜底轮询专用；事件驱动仍走冷却防重复进）
+    quiet_empty=True  源目录为空时不推卡（兜底轮询每 150s 就扫一次，推卡会刷屏）
+    返回值仅供 _feed_loop 记日志用，其它调用点忽略。"""
     if not (SETTINGS['push_enabled'] and SETTINGS['feed_enabled']):
-        return
-    if _feed_state['moving'] or time.time() - _feed_state['last_run'] < 120:
-        return                         # 忙锁 + 2 分钟冷却（清空重试窗口内不重复进）
+        return 'off'
+    if _feed_state['moving'] or (not force and time.time() - _feed_state['last_run'] < 120):
+        return 'busy'                  # 忙锁 + 2 分钟冷却（清空重试窗口内不重复进）
     with _feed_lock:
         if _feed_state['moving']:
-            return
+            return 'busy'
         _feed_state['moving'] = True
     try:
         src = SETTINGS['feed_src_dir'].rstrip('/')
@@ -599,14 +610,15 @@ def _feed_run() -> None:
         if scanned is None:
             _alert_push('feed_err', '自动喂料失败', [
                 f'源目录不可读：{src}', '多半是 /cloud115 挂载未生效或权限变化，请检查容器挂载'])
-            return
+            return 'err'
         dirs, loose = scanned
         # v2.8.12：夹+散文件都空才算「源目录已空」（用户 9/19 晚定案：散文件参与转移）
         if not dirs and not loose:
-            _alert_push('feed_empty', '源目录已空，可放新文件', [
-                f'{src} 当前没有待整理文件夹', '放入新剧/电影后，下次清空提醒会自动喂料'],
-                buttons=_card_buttons(), tcolor='blue')
-            return
+            if not quiet_empty:
+                _alert_push('feed_empty', '源目录已空，可放新文件', [
+                    f'{src} 当前没有待整理文件夹', '放入新剧/电影后，下次清空提醒会自动喂料'],
+                    buttons=_card_buttons(), tcolor='blue')
+            return 'empty'
         # v2.8.12 计划：夹优先、散文件补足配额，合计 ≤ limit（按个数累加，一个夹=1 项=一个散文件）
         picks_dirs = dirs[:limit]
         picks_files = loose[:max(0, limit - len(picks_dirs))]
@@ -615,18 +627,18 @@ def _feed_run() -> None:
         moved_dirs, err, skip_d = _feed_move_batch(src, dst, picks_dirs)
         if err:
             _feed_err_partial(picks_dirs, picks_files, moved_dirs, [], total_items, err)
-            return
+            return 'fail'
         moved_files, err, skip_f = _feed_move_batch(src, dst, picks_files)
         if err:
             _feed_err_partial(picks_dirs, picks_files, moved_dirs, moved_files, total_items, err)
-            return
+            return 'fail'
         if not moved_dirs and not moved_files:
             _feed_cache_drop(list(skip_d) + list(skip_f))   # 全是幽灵文件：剔缓存防空转
             _alert_push('feed_err', '自动喂料转移失败', [
                 f'本批 {total_items} 项全部跳过：源文件在 115 端已不存在（多半是列表缓存残影，'
                 '上一批已转走或源已删除）', '已把这些条目从扫描缓存剔除，下轮不再误报'],
                 buttons=_card_buttons(), tcolor='yellow')
-            return
+            return 'skip'
         _feed_cache_drop(list(moved_dirs) + list(moved_files) + list(skip_d) + list(skip_f))
         # v2.8.14：喂料合并单卡——转移完成+触发整理合一推送，不再连发两张卡
         _delay = int(SETTINGS.get('feed_trigger_delay', 10) or 0)
@@ -656,9 +668,54 @@ def _feed_run() -> None:
         t.daemon = True
         _feed_trigger['timer'] = t
         t.start()
+        return 'ok'
     finally:
         _feed_state['moving'] = False
         _feed_state['last_run'] = time.time()
+
+
+def _feed_loop() -> None:
+    """v2.9.3：喂料兜底轮询——修「事件驱动单点」死锁（2026-09-26 实证）。
+
+    缺陷：_feed_run 全项目只有一个调用点（清空提醒推送成功之后），入口还有 120 秒冷却。
+    9/26 07:52:02 转完 7 项 → 07:53:09 清空提醒触发 → 距上轮仅 67 秒 → 被冷却静默丢弃；
+    此后没有新的整理任务、也就没有新的清空事件 → _feed_run 永不再被调用，喂料彻底停摆
+    （07:53 之后 35 分钟零记录，源目录 259 个散文件 + 2 个剧夹原地不动）。
+
+    本线程每 FEED_FALLBACK_INTERVAL 秒兜底一次，条件与「清空」同口径：
+      ① 喂料/推送开关都开；
+      ② 当前没有整理类任务在跑或排队（网盘整理/刮削入库/手动整理网盘文件）——
+         与清空判定同源数据，避免整理还没做完就往待整理目录里灌；
+      ③ 快轮询已出过至少一轮（防启动竞速把「还没采集」误判成「队列为空」）。
+    满足则 _feed_run(force=True, quiet_empty=True)：绕冷却、源目录为空不推卡。
+    三条都不满足时安静跳过，不产生任何请求与推送。
+    """
+    while True:
+        time.sleep(FEED_FALLBACK_INTERVAL)
+        try:
+            if not (SETTINGS.get('push_enabled') and SETTINGS.get('feed_enabled')):
+                continue
+            if _feed_state['moving']:
+                continue
+            fast = _state.get('fast') or {}
+            if not fast:
+                continue                       # 快轮询还没出第一轮，等下一轮再判
+            by = ((fast.get('active') or {}).get('by_kind') or {})
+            busy = sum((by.get(k) or {}).get('running', 0) + (by.get(k) or {}).get('queued', 0)
+                       for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
+            if busy > 0:
+                continue                       # 整理任务没清空，等清空事件或下轮兜底
+            if time.time() - _feed_state['last_run'] < 90:
+                continue                       # 距上次喂料不足 90s（多半刚被事件驱动喂过），
+                                               # 不抢——避开「喂料→延迟触发整理」之间的空窗
+            _before = _feed_state['last_run']
+            st = _feed_run(force=True, quiet_empty=True)
+            if st == 'ok':
+                _bt = (datetime.fromtimestamp(_before, TZ).strftime('%H:%M')
+                       if _before else '无')
+                print(f'[feed_loop] 兜底轮询补跑喂料成功（上次喂料 {_bt}）', flush=True)
+        except Exception as e:                 # 兜底线程绝不允许因单次异常退出
+            print(f'[feed_loop] 兜底轮询异常：{type(e).__name__}: {e}', flush=True)
 
 
 # ============ v2.7 静止告警自动处置（只 restart etkn，禁重建） ============
@@ -2696,7 +2753,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.2', 'readonly': False,
+                'version': 'v2.9.3', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -3067,11 +3124,13 @@ def main():
     threading.Thread(target=_hosts_loop, daemon=True).start()   # v2.8 hosts 每小时巡检
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
+    threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.2，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.3，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
-          f'喂料=CD2 WebDAV 通道，hosts 巡检=每小时', flush=True)
+          f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
+          flush=True)
     srv.serve_forever()
 
 
