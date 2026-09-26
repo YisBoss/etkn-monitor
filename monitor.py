@@ -591,7 +591,9 @@ def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
     两个入口：
       ① 事件驱动——清空提醒推送成功后（原唯一入口，v2.7 起）；
       ② 兜底轮询——_feed_loop 每 FEED_FALLBACK_INTERVAL 秒（v2.9.3 新增，修死锁）。
-    force=True        绕过 2 分钟冷却（兜底轮询专用；事件驱动仍走冷却防重复进）
+    force=True        绕过 2 分钟冷却（v2.9.4 起：清空事件驱动与兜底轮询都用——
+                      清空=新批次起点必须立即喂；兜底防的是与事件双触发重复，
+                      由忙锁+last_run 双保险兜住）
     quiet_empty=True  源目录为空时不推卡（兜底轮询每 150s 就扫一次，推卡会刷屏）
     返回值仅供 _feed_loop 记日志用，其它调用点忽略。"""
     if not (SETTINGS['push_enabled'] and SETTINGS['feed_enabled']):
@@ -1498,7 +1500,11 @@ def check_organize_running(now=None):
                                         'started_at': None, 'last': None, 'last_ts': None,
                                         'flow': {}, 'other_fail': []}
             if ok:
-                _feed_run()               # v2.7：清空提醒送达后自动喂料（事件驱动）
+                # v2.9.4：事件驱动改 force 绕冷却——清空=新批次起点，理应立即喂料。
+                # 原先走 120s 冷却：批次提速后（2~3 分钟/轮）36% 轮次被拒（9/26 实证
+                # 11 轮中 4 轮延迟 60~100s，全落在「清空距上轮喂料 <120s」窗口），
+                # 拖到 150s 兜底轮询才补跑。忙锁仍在，无重复进风险。
+                _feed_run(force=True)
         elif total_cur > 0:
             batch['active'] = True            # 有整理任务在跑/在排=批次进行中
             if batch['started_at'] is None:
@@ -2753,7 +2759,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.3', 'readonly': False,
+                'version': 'v2.9.4', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -3127,7 +3133,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.3，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.4，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
