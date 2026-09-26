@@ -1940,8 +1940,12 @@ def _dayweek_rebuild() -> None:
         整理记录口径真值      1597
 
     而卡片上「本周完成」的文案一直写着「整理记录口径」——即实现与文案本来就不一致。
-    新实现与文案、以及 ETKN 自己 UI 的「本周处理」（stats.thisWeek，近 7 天）对齐，
-    只是这里只取 status=success（已识别/完成），与「完成」二字一致。
+    新实现与文案对齐，只取 status=success（已识别/完成），与「完成」二字一致。
+
+    v2.9.4.1（2026-09-26 用户拍板）：窗口由「近 7 天滚动」改为**自然周**
+    （周一 00:00 起，北京时间）。⚠️ 这与 ETKN 自己 UI 的「本周处理」口径**不再一致**——
+    实测 ETKN `stats.thisWeek` = 「近 7 天滚动 × 全状态（含未识别）」，
+    而这里是「自然周 × 仅 success」。这是**有意分歧**，别再照着 ETKN UI 去「对齐」。
     另：daily.json 里仍写今日 succ（记录口径），供历史回溯与预热使用。"""
     if _dayweek_cache['rebuilding']:
         return
@@ -1957,8 +1961,9 @@ def _dayweek_rebuild() -> None:
         day_ok = _records_success_since(today0)
         if day_ok is None:                       # 接口失败 → 宁显旧不显零
             day_ok = _prev_succ
-        # ②本周完成（同口径、近 7 天滚动窗口，与 ETKN UI「本周处理」同窗口）
-        week_from = (_now() - timedelta(days=7)).isoformat(timespec='seconds')
+        # ②本周完成（整理记录口径 × 自然周：本周一 00:00 起，北京时间）
+        # v2.9.4.1：原为 (_now() - 7天) 滚动窗口；用户 2026-09-26 拍板改自然周。
+        week_from = (_today00() - timedelta(days=_today00().weekday())).isoformat(timespec='seconds')
         week_ok = _records_success_since(week_from)
         if week_ok is None:
             week_ok = _dayweek_cache.get('week')
@@ -2759,7 +2764,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.4', 'readonly': False,
+                'version': 'v2.9.4.1', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -3133,7 +3138,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.4，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.4.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)

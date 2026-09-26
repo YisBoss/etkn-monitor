@@ -816,7 +816,7 @@ async function refresh(){
     document.getElementById('cQueuedSub').textContent=`${a.tasks||0} 任务（排队+运行）`;
     document.getElementById('cDone').innerHTML=fmtCard(rec.success||0,'媒体');
     document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务（含流程类，与媒体数不同口径）`;
-    document.getElementById('cDoneWk').textContent=`本周完成 ${(s.week?.media??'-')} 媒体（整理记录口径 · 近 7 天已识别）`;
+    document.getElementById('cDoneWk').textContent=`本周完成 ${(s.week?.media??'-')} 媒体（整理记录口径 · 周一 0 点起）`;
     // v2.8.23 异常卡改版：主数=今日异常（今日新增未识别+失败/部分任务）；拆分副行；累计未识别转次要小字
     const _urToday=rec.unrecognized_today??0, _badT=dn.bad_tasks??(s.failed_today?.length||0);
     document.getElementById('cBad').innerHTML=fmtCard(_urToday+_badT,'今日');
