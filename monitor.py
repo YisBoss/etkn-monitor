@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.10 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.11 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -634,7 +634,10 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
                                 'btntxt': _WECOM_TC_BTNTXT}, 'safe': 0}
     else:
         # ---- 方案二：text（2048 字节；先给页脚留位再裁正文）----
-        plain = ('%s\n%s' % (title, text)) if title else text
+        # v2.9.11 修：这里原来用 text 而不是去重后的 body，导致 text 分支标题与正文首行
+        # 重复（实际踩到：「测试企业微信」的自检消息显示成
+        # 「ℹ️ 企业微信通道自检 / ℹ️ ETKN 告警 · 企微通道自检 / …」）。
+        plain = ('%s\n%s' % (title, body)) if title else text
         if link_line:
             plain = '%s\n\n%s' % (plain, link_line)
         room = _WECOM_TEXT_MAX - len(ts.encode('utf-8')) - 2   # 2 = 分隔的两个换行
@@ -3570,7 +3573,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.10', 'readonly': False,
+                'version': 'v2.9.11', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4048,7 +4051,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.10，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.11，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
