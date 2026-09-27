@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.17 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.18 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -604,7 +604,7 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
     |---|---|---|
     | `markdown` | 正常 | ❌「暂不支持此消息类型」 |
     | `text` | 正常 | 正常，但**不渲染 markdown**（`**粗体**`/`[名字](url)` 原样露出） |
-    | `textcard` | 正常（标题 + 描述 + 一个可点 URL） | 正常（同上） |
+    | `textcard` | 正常（标题 + 描述 + 一个可点 URL） | 正常（同上）；🔴 btntxt 按钮**不渲染**（9/27 实锤）——整条消息可点=开 URL，文案别再写「点下方按钮」 |
     | `news` | 正常（标题 + 描述 + 一行行可点名字） | ⚠️ **公众号图文版式**：大图占位 + 标题横幅，**description 不显示** |
 
     🔴 v2.9.13 踩过的坑（**别再来一遍**）：把告警改成 `news` 之后，`news` 在**部分客户端**
@@ -2405,7 +2405,10 @@ def check_organize_running(now=None):
                 _trigger_token['exp'] = time.time() + 1800
                 btns = _card_buttons(tok)
                 tail_feishu = '（30 分钟内有效，点卡片上的「整理下一批」按钮）'
-                tail_wecom = '（30 分钟内有效，点本条卡片下方的「确认整理」按钮）'
+                # v2.9.18：微信插件端 textcard 不渲染 btntxt 按钮（9/27 用户截图实锤），
+                # 整条消息可点=打开确认页。文案改成「点本条消息」——企微 App 里点按钮
+                # 或点消息体、微信插件里点消息体，都到同一个确认页。
+                tail_wecom = '（30 分钟内有效，点本条消息确认整理）'
             base = '\n'.join(lines)
             text = '%s\n%s' % (base, tail_feishu) if tail_feishu else base
             text_w = '%s\n%s' % (base, tail_wecom) if tail_wecom else base
@@ -3741,7 +3744,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.17', 'readonly': False,
+                'version': 'v2.9.18', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4199,7 +4202,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.17，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.18，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
