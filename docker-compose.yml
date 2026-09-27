@@ -1,26 +1,28 @@
 services:
   etkn-monitor:
-    build: .                  # v2.8.10：改为本地构建（Dockerfile 装 sshpass）；镜像名固定
+    build: .                  # 本地构建（Dockerfile 里装 sshpass + openssh-client，供 hosts 巡检 SSH 用）
     image: etkn-monitor:latest
     container_name: etkn-monitor
     restart: unless-stopped
     working_dir: /app
     command: python -u monitor.py
+    # 首次克隆时还没有 .env 也能正常启动（required: false 需要 Docker Compose ≥ 2.24）
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - MONITOR_PORT=8620
-      # 设置持久化目录（宿主机仓库内 data/，容器重建不丢配置；v2.5.5 修复：原先落
-      # 容器可写层 /data，13:11 容器重建后 webhook_url/push_enabled 全部归零）
+      # 设置持久化目录（宿主机仓库内 data/，容器重建不丢配置）
       - SETTINGS_PATH=/app/data/settings.json
-      # 可选：ETKN_ETA_WINDOW=10 / POLL_INTERVAL=15（不填走 monitor.py 默认）
+      # 其它可选变量写在 .env 里，见 .env.example
     ports:
       - "8620:8620"
     volumes:
       - ./:/app:ro
       - ./data:/app/data
-      # v2.7 自动喂料：CloudDrive 115 云盘挂载（fuse；同挂载内 os.rename=115 秒级移动）
-      - /vol1/1000/CloudNAS/CloudDrive/115:/cloud115:rw
+      # 可选：自动喂料要在「同一挂载内」做 os.rename（115 云盘秒级移动）。
+      # 在 .env 里写 CLOUD115_DIR=/你的/CloudDrive/115 才启用；不写则自动喂料不可用（其余功能不受影响）。
+      - ${CLOUD115_DIR:-./cloud115-not-configured}:/cloud115:rw
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8620/api/meta >/dev/null 2>&1 || exit 1"]
       interval: 60s

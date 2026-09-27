@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.5.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
-                        +设置页+飞书Webhook告警中心：500检测/定时测速/积压告警）
-配置全部走环境变量（零密钥）：
-  ETKN_BASE_URL   ETKN 地址        默认 http://192.168.1.22:5257
-  ETKN_USERNAME   登录用户名        默认 YisBoss
-  ETKN_PASSWORD   登录密码          必填（部署者自填，不落盘）
-  ETKN_ETA_WINDOW 分钟              ETA 滚动窗口，默认 10
-  POLL_INTERVAL   秒                慢速全量轮询间隔，默认 120
-  FAST_INTERVAL   秒                快速活跃队列轮询间隔，默认 2
-  MONITOR_PORT    监听端口          默认 8620
+etkn-monitor v2.9.6 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+                        +设置页+飞书Webhook/企业微信应用 双通道告警中心）
+配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
+  ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
+  ETKN_USERNAME     登录用户名        默认空（部署者自填）
+  ETKN_PASSWORD     登录密码          必填（部署者自填，不落盘）
+  ETKN_PUBLIC_URL   ETKN 外网入口     默认同 ETKN_BASE_URL（卡片「打开ETKN」按钮）
+  ETKN_SITE_URL     ETKN 站点根地址   默认空（面板「打开 ETKN 原站」按钮，空则提示未配置）
+  MONITOR_LAN_HOST  面板内网地址      默认空（回落 127.0.0.1:<MONITOR_PORT>）
+  ETKN_ETA_WINDOW   分钟              ETA 滚动窗口，默认 10
+  POLL_INTERVAL     秒                慢速全量轮询间隔，默认 120
+  FAST_INTERVAL     秒                快速活跃队列轮询间隔，默认 2
+  MONITOR_PORT      监听端口          默认 8620
+  CLOUD115_DIR      115 目录挂载点    默认 ./cloud115-not-configured（只读挂载用）
 v2.3.1 说明（滞后修复）：
   - 旧版单线程串行拉全部数据：诊断汇总固定 ~13s + succeeded 深翻页(千页级 ~97s)，
     单轮 110s+，快照滞后 2-3 分钟（2026-09-16 实测复现）。
@@ -40,16 +44,13 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-BASE = os.environ.get('ETKN_BASE_URL', 'http://192.168.1.22:5257').rstrip('/')
-LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '192.168.1.22:8620')   # 内网面板地址（清空提醒链接用）
-ETKN_PUBLIC_URL = 'https://etkn.example.com'   # v2.6 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
+BASE = os.environ.get('ETKN_BASE_URL', 'http://127.0.0.1:5257').rstrip('/')
+LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '')   # 内网面板地址（清空提醒链接用），空则回落 127.0.0.1:端口
+ETKN_PUBLIC_URL = os.environ.get('ETKN_PUBLIC_URL', BASE).rstrip('/')   # 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
+ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板「打开 ETKN 原站」按钮（空=提示未配置）
 
-CARD_LINKS_DEFAULT = [  # v2.7（六）：卡片按钮可配置，「整理下一批」固定带令牌不在此列
-    {'text': 'ETKN监控', 'url': 'https://etknjk.example.com/'},
-    {'text': 'ETKN', 'url': 'https://etkn.example.com/'},
-    {'text': 'CloudDrive2', 'url': 'https://cd2.example.com/'},
-]
-USERNAME = os.environ.get('ETKN_USERNAME', 'YisBoss')
+CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
+USERNAME = os.environ.get('ETKN_USERNAME', '')
 PASSWORD = os.environ.get('ETKN_PASSWORD', '')
 ETA_WINDOW_MIN = float(os.environ.get('ETKN_ETA_WINDOW', '10'))
 POLL_INTERVAL = float(os.environ.get('POLL_INTERVAL', '120'))   # 慢速全量轮询
@@ -127,14 +128,14 @@ SETTINGS_DEFAULTS = {
     'finish_scope': 'all',         # 推送范围：ok=汇总隐藏失败行 / all=含失败行
     # ---- v2.5.5 一键整理入口（清空提醒富文本） ----
     'trigger_enabled': False,      # 清空提醒附「整理下一批」按钮（令牌链接）
-    'trigger_public_base': '',     # 外网基础地址（如 https://etknjk.example.com），空=内网地址
+    'trigger_public_base': '',     # 外网基础地址（如 https://monitor.example.com），空=内网地址
     # ---- v2.7 自动喂料（清空后源目录→待整理目录自动分批转移） ----
     'feed_enabled': False,         # 自动喂料开关（默认关）
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
     'feed_batch_limit': 500,       # 每批文件夹上限（v2.8.6：一个剧夹=1 项，整夹转移）
     # ---- v2.8 喂料通道：CloudDrive2 WebDAV（不碰 fuse，凭据存设置不硬编码） ----
-    'cd2_dav_url': 'http://192.168.1.22:19798/dav',
+    'cd2_dav_url': '',             # 例：http://<CD2主机>:19798/dav
     'cd2_user': '',
     'cd2_pass': '',
     # ---- v2.8 hosts 自动更新（域名漂移自愈） ----
@@ -163,7 +164,7 @@ SETTINGS_DEFAULTS = {
     'wecom_aeskey': '',            # 回调 EncodingAESKey（不回传前端；留空=不修改）
     'wecom_touser': '@all',        # 默认接收人（@all，或 userid 多个用 | 分隔）
     'wecom_api_proxy': '',         # 调企微 API 走的 HTTP 代理（对齐「企业可信IP」用，空=直连）
-    'wecom_panel_url': '',         # 面板公网地址（菜单「打开面板」用，如 https://etknjk.relay.example.com:666）
+    'wecom_panel_url': '',         # 面板公网地址（菜单「打开面板」用，如 https://monitor.example.com）
 }
 
 
@@ -482,6 +483,25 @@ def _wecom_cfg() -> dict:
             'panel': (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')}
 
 
+def _notify_state() -> dict:
+    """通知渠道状态（v2.9.6：面板首页要能直接看到「告警发得出去吗」）。
+
+    只做静态配置判断 + 回显最近一次企微发送结果，不发任何网络请求
+    （这个函数挂在 /api/status 上，每 2 秒就会被调一次）。
+    """
+    c = _wecom_cfg()
+    fx = bool((SETTINGS.get('webhook_url') or '').strip())
+    wc_on = bool(SETTINGS.get('wecom_enabled'))
+    wc_cfg = bool(c['corpid'] and c['secret'] and c['agentid'])
+    return {'enabled': bool(SETTINGS.get('push_enabled')),
+            'feishu': fx,
+            'wecom_on': wc_on,
+            'wecom_cfg': wc_cfg,
+            'wecom': wc_on and wc_cfg,          # 真正能送达企微
+            'wecom_proxy': bool(c['proxy']),
+            'last': dict(_wecom_last)}
+
+
 def _wecom_http(url: str, payload=None, timeout: int = 15):
     """企微 API 请求。wecom_api_proxy 非空时走 HTTP 代理——
     用途：把调用来源 IP 固定成「企业可信IP」里登记的那个（NAS 直连出网 IP 会漂）。"""
@@ -568,17 +588,40 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
     return ok, errs
 
 
-# ---------- 菜单（3 个一级：打开面板 / 查询状态 / 运维操作） ----------
+# ---------- 菜单（3 个一级：看面板 / 查状态 / 运维操作） ----------
+# ⚠️ 企微限制：一级/二级菜单 name 均**不超过 16 个字节**（UTF-8；一个汉字 3 字节、
+# 一个 emoji 4 字节）——注意是字节不是字符，超了直接 40058 拒收。
+# 下面每个名字都按 ≤16 字节设计，改名字前先 `len(name.encode('utf-8'))` 数一遍。
 _WECOM_MENU = {'button': [
-    {'type': 'view', 'name': '📊 打开面板', 'url': ''},
-    {'type': 'click', 'name': '📈 查询状态', 'key': 'STATUS'},
-    {'name': '🔧 运维操作', 'sub_button': [
-        {'type': 'click', 'name': '🔍 检测 TMDB 500', 'key': 'CHECK500'},
-        {'type': 'click', 'name': '⚡ 立即测速', 'key': 'SPEED'},
-        {'type': 'click', 'name': '🌐 重新检测 IP', 'key': 'HOSTS'},
-        {'type': 'click', 'name': '🗂 整理下一批', 'key': 'ORGANIZE'},
+    {'type': 'view', 'name': '📊看面板', 'url': ''},            # 13B
+    {'type': 'click', 'name': '📈查状态', 'key': 'STATUS'},      # 13B
+    {'name': '🔧运维操作', 'sub_button': [                       # 16B
+        {'type': 'click', 'name': '🔍检测500', 'key': 'CHECK500'},   # 13B
+        {'type': 'click', 'name': '⚡立即测速', 'key': 'SPEED'},      # 15B
+        {'type': 'click', 'name': '🌐重检IP', 'key': 'HOSTS'},       # 12B
+        {'type': 'click', 'name': '📁整理一批', 'key': 'ORGANIZE'},  # 16B
     ]},
 ]}
+_WECOM_NAME_MAX = 16     # 企微 menu name 字节上限（不是字符数）
+
+
+def _wecom_menu_check(menu):
+    """按企微口径先本地校验菜单（字节长度/数量），返回错误串，合法返回 ''。"""
+    def _walk(btns, top):
+        if len(btns) > (3 if top else 5):
+            return '一级菜单最多 3 个、二级最多 5 个'
+        for b in btns:
+            n = b.get('name') or ''
+            if len(n.encode('utf-8')) > _WECOM_NAME_MAX:
+                return ('菜单名「%s」为 %d 字节，超过企微 %d 字节上限'
+                        % (n, len(n.encode('utf-8')), _WECOM_NAME_MAX))
+            subs = b.get('sub_button')
+            if subs:
+                e = _walk(subs, False)
+                if e:
+                    return e
+        return ''
+    return _walk(menu.get('button') or [], True)
 
 
 def wecom_menu_apply():
@@ -593,6 +636,9 @@ def wecom_menu_apply():
         return False, err
     menu = json.loads(json.dumps(_WECOM_MENU))
     menu['button'][0]['url'] = c['panel'] + '/'
+    _e = _wecom_menu_check(menu)
+    if _e:
+        return False, _e
     try:
         d = _wecom_http('%s/cgi-bin/menu/create?access_token=%s&agentid=%s'
                         % (_WECOM_BASE, tok, c['agentid']), menu)
@@ -1187,9 +1233,9 @@ def _auto_restart_etkn() -> tuple:
         return False, '宿主凭据不可读（hermes/.env 缺 SUDO_PASSWORD）'
     cmd = ("sshpass -p %s ssh -p %s -o StrictHostKeyChecking=no -o ConnectTimeout=10 "
            "%s@%s \"echo %s | sudo -S -p '' docker restart etkn\"" % (
-               shlex.quote(PW), shlex.quote(os.environ.get('SSH_PORT', '66')),
-               shlex.quote(os.environ.get('SSH_USER', 'YisBoss')),
-               shlex.quote(os.environ.get('SSH_HOST', '192.168.1.22')),
+               shlex.quote(PW), shlex.quote(os.environ.get('SSH_PORT', '22')),
+               shlex.quote(os.environ.get('SSH_USER', 'root')),
+               shlex.quote(os.environ.get('SSH_HOST', '')),
                shlex.quote(PW)))
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=90)
@@ -1515,8 +1561,9 @@ def _hosts_loop() -> None:
 
 
 def _panel_base() -> str:
-    """面板外网基址（卡片「打开面板」按钮用）。"""
-    return (SETTINGS.get('trigger_public_base') or f'http://{LAN_HOST}').rstrip('/')
+    """面板外网基址（卡片「打开面板」按钮用）。未配置内网地址时回落 127.0.0.1:端口。"""
+    fb = LAN_HOST or ('127.0.0.1:%d' % int(os.environ.get('MONITOR_PORT', '8620')))
+    return (SETTINGS.get('trigger_public_base') or f'http://{fb}').rstrip('/')
 
 
 def _norm_card_links(raw) -> list:
@@ -2577,9 +2624,9 @@ def _host_ssh(cmd: str, timeout: int = 20):
         return False, ''
     full = ("sshpass -p %s ssh -p %s -o StrictHostKeyChecking=no -o ConnectTimeout=8 "
             "-o LogLevel=ERROR %s@%s %s") % (
-                shlex.quote(pw), shlex.quote(os.environ.get('SSH_PORT', '66')),
-                shlex.quote(os.environ.get('SSH_USER', 'YisBoss')),
-                shlex.quote(os.environ.get('SSH_HOST', '192.168.1.22')),
+                shlex.quote(pw), shlex.quote(os.environ.get('SSH_PORT', '22')),
+                shlex.quote(os.environ.get('SSH_USER', 'root')),
+                shlex.quote(os.environ.get('SSH_HOST', '')),
                 shlex.quote(cmd))
     try:
         r = subprocess.run(full, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -3198,12 +3245,14 @@ class Handler(BaseHTTPRequestHandler):
                 if fs.get('diag'):
                     out['diag'] = {**snap.get('diag', {}), **fs['diag']}
             out['slow_ts'] = snap.get('ts')
+            out['notify'] = _notify_state()          # v2.9.6：通知渠道状态（面板首页展示）
             return self._send(200, json.dumps(out, ensure_ascii=False).encode())
         if p == '/api/meta':
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.5', 'readonly': False,
+                'version': 'v2.9.6', 'readonly': False,
+                'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
@@ -3627,7 +3676,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.5，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.6，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
