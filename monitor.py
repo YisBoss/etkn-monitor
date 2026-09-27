@@ -649,13 +649,15 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
         arts += [{'title': b.get('text', '打开')[:40], 'url': b['url']} for b in btns[:7]]
         return wecom_push_news(arts, touser=touser)
 
-    # ---- ② text 兜底（2048 字节；先给页脚留位再裁正文）----
+    # ---- ② text 兜底（2048 字节；正文先裁，链接行与页脚必须活下来）----
+    # v2.9.13 修：旧写法把「正文 + 链接行」当一整块裁，正文一长链接行就被截没了——
+    # 而链接恰恰是这条消息唯一能操作的东西。现在先算尾巴占多少字节，再从正文里扣。
     plain = ('%s\n%s' % (title, body)) if title else text
-    if link_line:
-        plain = '%s\n\n%s' % (plain, link_line)
-    room = _WECOM_TEXT_MAX - len(ts.encode('utf-8')) - 2   # 2 = 分隔的两个换行
+    tail = ('\n\n%s' % link_line) if link_line else ''
+    tail += '\n\n%s' % ts
+    room = max(0, _WECOM_TEXT_MAX - len(tail.encode('utf-8')))
     payload = {'touser': touser, 'msgtype': 'text', 'agentid': aid,
-               'text': {'content': '%s\n\n%s' % (_wecom_trim(plain, room), ts)}, 'safe': 0}
+               'text': {'content': _wecom_trim(plain, room) + tail}, 'safe': 0}
 
     def _once(t):
         try:
