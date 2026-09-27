@@ -192,8 +192,11 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
 .setrow>select,.setrow>input[type=number]{flex:0 0 120px}
 .setrow>input[type=checkbox]{flex:0 0 auto}
 /* v2.9.0：设置分组折叠 */
-.setgroup{cursor:pointer;user-select:none}
-.setgroup .tgl{float:right;font-size:11px;opacity:.6}
+/* v2.9.16 设置分组＝抽屉（与任务中心同一套交互：点一下展开、再点一下收起） */
+.setgroup{cursor:pointer;user-select:none;display:flex;align-items:center;
+  justify-content:space-between;gap:8px}
+.setgroup .tgl{font-size:10px;opacity:.6;flex:0 0 auto;transition:transform .15s}
+.setgroup.open .tgl{transform:rotate(90deg)}
 .setbody.collapsed{display:none}
 /* v2.9.0：底部 sticky 保存条 */
 .stickybar{position:sticky;bottom:0;z-index:30;background:var(--card);border-top:1px solid var(--line);
@@ -274,7 +277,8 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
   <div class="grid">
     <div class="card w">
       <div id="cfgForm">
-        <div class="setgroup" data-g="1">【推送】<span class="tgl">收起 ▲</span></div>
+        <div class="sub" style="margin:4px 0 2px">点分组名展开／收起</div>
+        <div class="setgroup" data-g="1" onclick="tglGroup(this)">【推送】<span class="tgl">▶</span></div>
         <div class="setrow"><label>推送总开关<span class="why">关闭则全部静默（飞书 + 企微一起停）</span></label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
         <div class="setrow"><label>飞书通知渠道<span class="why">独立开关；与企微各自独立，任一通道送达即算成功</span></label><label class="switch"><input type="checkbox" id="cfgFeishuEn"><span class="slider"></span></label></div>
         <div class="setrow"><label>飞书 Webhook 地址<span class="why">机器人 Incoming 地址</span></label></div>
@@ -283,7 +287,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
           <div style="flex:1"><div id="clList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button></div></div></div>
         <div class="setrow"><label>外网面板地址<span class="why">空=内网面板地址</span></label><input type="text" id="cfgTrgBase" placeholder="https://monitor.example.com" style="max-width:260px"></div>
-        <div class="setgroup" data-g="6">【企业微信】<span class="tgl">收起 ▲</span></div>
+        <div class="setgroup" data-g="6" onclick="tglGroup(this)">【企业微信】<span class="tgl">▶</span></div>
         <div class="setrow"><label>企业微信通知渠道<span class="why">自建应用；与飞书可同时开，任一通道送达即算成功</span></label><label class="switch"><input type="checkbox" id="cfgWxEn"><span class="slider"></span></label></div>
         <div class="setrow"><label>企业ID / AgentId<span class="why">企业ID 形如 ww…；AgentId 是数字</span></label><div class="setbox"><input type="text" id="cfgWxCorp" placeholder="ww…" style="max-width:230px"><input type="text" id="cfgWxAgent" placeholder="1000011" style="max-width:130px"></div></div>
         <div class="setrow"><label>应用 Secret<span class="why">只存本机，不回传前端；留空=不修改</span></label><input type="password" id="cfgWxSecret" placeholder="留空=不修改" style="max-width:360px"></div>
@@ -304,7 +308,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
           ⚠️ 另：若管理端给应用设了「在微工作台中始终进入主页」，微信端<b>只能收文本且限 20 字节</b>，卡片会被转成文本并提示去企微查看 —— 这条是企微官方限制，本程序无法绕过。<br>
           ℹ️ 消息类型：微信端<b>只认 text / textcard</b>（markdown 会显示成「暂不支持此消息类型」）。本程序已按此选型——短告警发 textcard 卡片，超长正文回落 text。
         </div></div>
-        <div class="setgroup" data-g="2">【告警】<span class="tgl">收起 ▲</span></div>
+        <div class="setgroup" data-g="2" onclick="tglGroup(this)">【告警】<span class="tgl">▶</span></div>
         <div class="setrow"><label>TMDB HTTP 500 检测<span class="why">频率+异常才推送</span></label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
         <div class="setrow"><label>队列积压告警<span class="why">任一类型排队 ≥ N 推送</span></label><div class="setbox"><input type="number" id="cfgTbl" min="1"><span class="sub">条</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>500 命中阈值<span class="why">今日条数</span></label><input type="number" id="cfgT500" min="1"></div>
@@ -313,14 +317,14 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
         <div class="setrow"><label>整理任务清空提醒<span class="why">汇总含/隐藏失败行</span></label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>一键整理入口<span class="why">清空提醒附「整理下一批」，令牌30分钟一次性</span></label><label class="switch"><input type="checkbox" id="cfgTrg"><span class="slider"></span></label></div>
         <div class="setrow"><label>静止告警自动重启 etkn<span class="why">仅 restart；30分钟冷却+24小时≤2次；默认关</span></label><label class="switch"><input type="checkbox" id="cfgAutoRst"><span class="slider"></span></label></div>
-        <div class="setgroup" data-g="3">【测速】<span class="tgl">收起 ▲</span></div>
+        <div class="setgroup" data-g="3" onclick="tglGroup(this)">【测速】<span class="tgl">▶</span></div>
         <div class="setrow"><label>定时测速<span class="why">异常才推送</span></label><div class="setbox"><select id="cfgISp"><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 60 分钟</option><option value="120">每 120 分钟</option></select><label class="switch"><input type="checkbox" id="cfgASp"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>测速异常阈值<span class="why">总耗时毫秒</span></label><input type="number" id="cfgTsp" min="1000"></div>
         <div class="setrow"><label>测速目标<span class="why">≤12 项；域名必填，备注/代理可选</span></label>
           <div style="flex:1"><div id="stList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="stAdd()">＋新增测速目标</button>
           <span class="sub" style="align-self:center">列表为空=不测速不推送；代理留空=直连</span></div></div></div>
-        <div class="setgroup" data-g="4">【喂料】<span class="tgl">收起 ▲</span></div>
+        <div class="setgroup" data-g="4" onclick="tglGroup(this)">【喂料】<span class="tgl">▶</span></div>
         <div class="setrow"><label>自动喂料<span class="why">清空提醒后自动分批转移，经 CD2 WebDAV 通道</span></label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
         <div class="setrow"><label>喂料源目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
         <div class="setrow"><label>喂料目标目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
@@ -328,7 +332,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
         <div class="setrow"><label>喂料转移后延迟秒数<span class="why">隔 N 秒触发整理，0=立即</span></label><input type="number" id="cfgFeedDelay" min="0" style="max-width:120px"></div>
         <div class="setrow"><label>CD2 WebDAV 地址<span class="why">CloudDrive2 挂载通道</span></label><input type="text" id="cfgCd2Url" style="max-width:340px" placeholder="http://&lt;CD2主机&gt;:19798/dav"></div>
         <div class="setrow"><label>CD2 账号 / 密码<span class="why">密码留空=不修改</span></label><div class="setbox"><input type="text" id="cfgCd2User" style="max-width:220px" placeholder="CloudDrive2 登录邮箱"><input type="password" id="cfgCd2Pass" style="max-width:200px" placeholder="留空=不修改"></div></div>
-        <div class="setgroup" data-g="5">【hosts】<span class="tgl">收起 ▲</span></div>
+        <div class="setgroup" data-g="5" onclick="tglGroup(this)">【hosts】<span class="tgl">▶</span></div>
         <div class="setrow"><label>监控域名<span class="why">支持逗号分隔多个，逐域名监控漂移；解析比对路由器 /etc/hosts，漂移改行+重启 dnsmasq；留空=不监控</span></label><div class="setbox"><input type="text" id="cfgHostsDomain" placeholder="a.com,b.com" style="max-width:260px"><button class="act" id="btnHostsRe" onclick="hostsRecheck()">重新检测 IP</button></div></div>
         <div class="setrow"><label>当前绑定<span class="why">路由器 /etc/hosts 实际绑定 IP（点「重新检测 IP」后刷新）</span></label><div id="hostsIps" style="font-size:12px;opacity:.75;text-align:right">待检测</div></div>
         <div class="setrow"><label>路由器连接<span class="why">公版配置本机保存；留空=巡检跳过不告警</span></label>
@@ -641,22 +645,27 @@ const PUSH_KIND={'t500':'TMDB 500','speed':'测速异常','backlog':'队列积�
 /* v2.8.7：推送史图标对齐飞书卡片——feed 成功/触发类=绿对勾，*_err 失败类=黄三角，其余按色系 */
 const PUSH_ICON=k=>k==='feed'?'✅':k==='feed_empty'||k==='test'||k==='hosts'?'✅':k.endsWith('_err')||k==='stall'||k==='t500'||k==='speed'||k==='backlog'?'⚠️':'ℹ️';
 function openCfg(){ sw(3); hostsStatus(); }
-/* v2.9.0：设置分组折叠（按 setgroup 动态包裹后续 setrow，DOM 稳定） */
+/* v2.9.16：设置分组＝抽屉，交互与任务中心一致（点一下展开、再点一下收起）。
+   默认全部收起（设置页一屏能看全 6 个分组），展开状态存 SETG_OPEN，重进设置页保持。
+   实现仍是「按 setgroup 动态包裹后续 setrow」（v2.9.0 起如此），DOM 不动、只是 display 切换。 */
+const SETG_OPEN=new Set();
+function setgApply(){
+  document.querySelectorAll('#cfgForm .setgroup').forEach(g=>{
+    const open=SETG_OPEN.has(g.dataset.g);
+    g.classList.toggle('open',open);
+    let n=g.nextElementSibling;
+    while(n&&!n.classList.contains('setgroup')){n.style.display=open?'':'none';n=n.nextElementSibling;}
+  });
+}
 function tglGroup(g){
-  let n=g.nextElementSibling,open=true;
-  while(n&&!n.classList.contains('setgroup')){
-    const hid=n.style.display==='none';
-    if(hid){n.style.display='';}else{n.style.display='none';open=false;}
-    n=n.nextElementSibling;
-  }
-  const t=g.querySelector('.tgl');if(t)t.textContent=open?'展开 ▼':'收起 ▲';
+  const k=g.dataset.g;
+  if(SETG_OPEN.has(k))SETG_OPEN.delete(k);else SETG_OPEN.add(k);
+  setgApply();
 }
 function tglAll(show){
-  document.querySelectorAll('#cfgForm .setgroup').forEach(g=>{
-    let n=g.nextElementSibling;
-    while(n&&!n.classList.contains('setgroup')){n.style.display=show?'':'none';n=n.nextElementSibling;}
-    const t=g.querySelector('.tgl');if(t)t.textContent=show?'收起 ▲':'展开 ▼';
-  });
+  SETG_OPEN.clear();
+  if(show)document.querySelectorAll('#cfgForm .setgroup').forEach(g=>SETG_OPEN.add(g.dataset.g));
+  setgApply();
 }
 function clRender(items){
   const box=document.getElementById('clList');box.innerHTML='';
@@ -1072,6 +1081,7 @@ async function pollLoop(){try{await refresh();}catch(e){}scheduleNext();}
 /* v2.9.2.11：首屏「测速结果」卡原本永远空白——cfgLoadSpeed() 只在进「任务统计」页
    或手动测速后才被调用，page1 的 kSp 一直没人填。这里补一次首屏加载。 */
 cfgLoadSpeed();
+setgApply();                 // v2.9.16：设置分组默认全部收起
 renderTaskCenter();          // v2.9.10：任务中心（两页各渲染一份，目录来自 /api/task-catalog）
 loadTaskCatalog();           // 拉取与企微菜单同源的 5 分类目录后重渲染
 // 后台节流对策：回到前台立即刷新一次

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.15 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.16 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -733,13 +733,18 @@ def wecom_push_news(articles: list, touser: str = ''):
     return ok, e
 
 
-def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'blue'):
+def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'blue',
+              wecom_text: str = None):
     """v2.9.5 双通道分发：飞书 webhook + 企业微信应用消息（各自按独立开关）。
     返回 (ok, err)——任一条送达即 ok；两条都失败时 err 里带上两边原因。
 
     v2.9.7：飞书补上独立开关 feishu_enabled（与 wecom_enabled 对称，默认开=行为不变）。
     开关层级：push_enabled 是总闸（各告警线程的闸），feishu_enabled / wecom_enabled
-    是两条通道各自的开关，互不影响。"""
+    是两条通道各自的开关，互不影响。
+
+    v2.9.16：新增 wecom_text——两条通道的**按钮形态不同**，涉及「按钮叫什么」的文案必须分开写。
+    例：飞书是 markdown 交互卡片，按钮叫「整理下一批」；企微是 textcard，那个唯一按钮叫「确认整理」。
+    不传 = 两条用同一份正文（默认行为不变）。"""
     res = []
     if SETTINGS.get('feishu_enabled', True):
         if buttons:
@@ -748,7 +753,8 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
             f_ok, f_err = feishu_push(text)
         res.append(('飞书', f_ok, f_err))
     if SETTINGS.get('wecom_enabled'):
-        w_ok, w_err = wecom_push(text, title=title, buttons=buttons)
+        w_ok, w_err = wecom_push(wecom_text if wecom_text is not None else text,
+                                 title=title, buttons=buttons)
         res.append(('企微', w_ok, w_err))
     if not res:
         return False, '飞书与企微通道都已关闭'
@@ -1404,7 +1410,7 @@ def _watch_shell_run(rid: int, source: str) -> None:
                         _alert_push('feed_err', '疑似 115 配额受限，未真正开始整理', [
                             f'手动整理壳任务 #{rid} 已成功，但 3 分钟内未派生任何整理任务（引擎扫描 115 空转）',
                             '待整理目录文件不会丢，全部原样等待',
-                            '建议等 115 配额窗口恢复后再点「整理下一批」；持续出现请夜间低峰重试'])
+                            '建议等 115 配额窗口恢复后再触发一次整理；持续出现请夜间低峰重试'])
                     return
         except Exception:
             pass                                # 监视线程绝不影响主流程
@@ -1437,7 +1443,7 @@ def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_fil
     if ('访问上限' in body) or ('429' in body) or ('限流' in body) or ('Too Many' in body):
         _alert_push('feed_err', '自动喂料触发整理失败（115 限流）', [
             f'本批 {moved_n} 项（剧夹+散文件）已转移成功，但整理触发撞 115 访问上限',
-            '文件不会丢：全部在待整理目录等待', '稍后（约 10-30 分钟）到面板点「整理下一批」即可',
+            '文件不会丢：全部在待整理目录等待', '稍后（约 10-30 分钟）再触发一次整理即可（面板「手动整理网盘文件」）',
             f'错误：{body[:90]}'])
     else:
         _alert_push('feed_err', '自动喂料触发整理失败', [
@@ -2387,15 +2393,23 @@ def check_organize_running(now=None):
                 if len(_of) > 3:
                     lines.append(f'· …共 {len(_of)} 条，详见面板任务统计页')
             btns = _card_buttons()
+            # v2.9.16：这句「怎么触发」的提示必须按通道分开写——两条通道的按钮形态不一样：
+            #   飞书 = markdown 交互卡片，按钮文字就是「整理下一批」；
+            #   企微 = textcard，那个唯一按钮的文案是「确认整理」（btntxt）。
+            # 旧版共用一句「点击「整理下一批」确认后触发」，在企微/微信端对不上按钮名（用户报的）。
+            tail_feishu = tail_wecom = ''
             if SETTINGS['trigger_enabled'] and not a_run and not a_que:
                 # v2.6 卡片按钮入口：一次性令牌 30 分钟；每次清空轮换，旧令牌作废
                 tok = secrets.token_urlsafe(24)
                 _trigger_token['val'] = tok
                 _trigger_token['exp'] = time.time() + 1800
                 btns = _card_buttons(tok)
-                lines.append('（30 分钟内有效，点击「整理下一批」确认后触发）')
-            text = '\n'.join(lines)
-            ok, err = push_both(text, buttons=btns,
+                tail_feishu = '（30 分钟内有效，点卡片上的「整理下一批」按钮）'
+                tail_wecom = '（30 分钟内有效，点本条卡片下方的「确认整理」按钮）'
+            base = '\n'.join(lines)
+            text = '%s\n%s' % (base, tail_feishu) if tail_feishu else base
+            text_w = '%s\n%s' % (base, tail_wecom) if tail_wecom else base
+            ok, err = push_both(text, buttons=btns, wecom_text=text_w,
                                 title='✅ 整理任务已清空', tcolor='green')
             record_push('clear', text, ok, err)
             _organize_state['last_clear_at'] = now
@@ -3727,7 +3741,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.15', 'readonly': False,
+                'version': 'v2.9.16', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4185,7 +4199,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.15，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.16，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
