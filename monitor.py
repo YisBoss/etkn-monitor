@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.14 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.15 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -766,14 +766,20 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
 # v2.9.10：「任务中心」二级改成 ETKN 工具箱的 5 个分类（正好用满二级上限 5 个）。
 #         点分类 → 服务端推一条图文消息（news）展开该类的子任务（企微菜单只有两级，
 #         「分类里再展开子任务」菜单本身做不到，只能靠消息展开）。
-_WECOM_MENU = {'button': [
-    {'type': 'click', 'name': '📈查状态', 'key': 'STATUS'},      # 13B
+# v2.9.15 菜单重排（用户要求）：
+#   ① 一级「📈查状态」→「🔗快捷入口」：二级 = **面板设置里配的卡片链接**（view 型，点了直接跳）。
+#      链接是动态的，所以菜单不再固定 → 改设置后要重下发（见 _wecom_menu_sig）。
+#   ② 一级「🔧运维操作」重做：只留「面板上真有的动作」+ 一个合并的体检，按常用度排。
+#      原「🔍检测500」「🌐重检IP」两个各占一格、都只推一条报告，合并成「🩺一键体检」一条出全结论。
+_WECOM_LINK_MENU_NAME = '🔗快捷入口'      # 4+12 = 16B
+_WECOM_LINK_MENU_MAX = 5                 # 企微二级菜单上限 5（面板卡片链接最多可配 6）
+_WECOM_MENU_TAIL = [
     {'name': '🔧运维操作', 'sub_button': [                       # 16B
-        {'type': 'click', 'name': '🔍检测500', 'key': 'CHECK500'},   # 13B
+        {'type': 'click', 'name': '📁整理一批', 'key': 'ORGANIZE'},   # 16B
         {'type': 'click', 'name': '⚡立即测速', 'key': 'SPEED'},      # 15B
-        {'type': 'click', 'name': '🌐重检IP', 'key': 'HOSTS'},       # 12B
-        {'type': 'click', 'name': '📁整理一批', 'key': 'ORGANIZE'},  # 16B
-        {'type': 'click', 'name': '🧹清理临时', 'key': 'CLEAN_TMP'}, # 16B
+        {'type': 'click', 'name': '🗂清空登记', 'key': 'PURGE'},      # 16B
+        {'type': 'click', 'name': '🩺一键体检', 'key': 'HEALTH'},     # 16B
+        {'type': 'click', 'name': '🧹清理临时', 'key': 'CLEAN_TMP'},  # 16B
     ]},
     {'name': '📚任务中心', 'sub_button': [                       # 16B
         {'type': 'click', 'name': '🎬媒体维护', 'key': 'CAT_MEDIA'},     # 16B
@@ -782,7 +788,32 @@ _WECOM_MENU = {'button': [
         {'type': 'click', 'name': '📚媒体库', 'key': 'CAT_LIBRARY'},     # 13B
         {'type': 'click', 'name': '🔑账号系统', 'key': 'CAT_ACCOUNT'},   # 16B
     ]},
-]}
+]
+# 本版菜单的「指纹」：卡片链接变了就重下发（v2.9.15 恢复 v2.9.7 的自动重下发，只针对链接）
+_wecom_menu_sig = {'v': None}
+
+
+def _menu_links_sig() -> str:
+    """快捷入口当前内容的指纹（没配链接时是空串）。"""
+    links = (_norm_card_links(SETTINGS.get('card_links')) or CARD_LINKS_DEFAULT)
+    links = links[:_WECOM_LINK_MENU_MAX]
+    return '|'.join('%s>%s' % (x['text'], x['url']) for x in links)
+
+
+def _wecom_build_menu() -> dict:
+    """按当前设置生成菜单。快捷入口为空时**整项不出现**（一级只剩 2 个，企微允许）。"""
+    links = (_norm_card_links(SETTINGS.get('card_links')) or CARD_LINKS_DEFAULT)
+    links = links[:_WECOM_LINK_MENU_MAX]
+    btns = []
+    if links:
+        btns.append({'name': _WECOM_LINK_MENU_NAME,
+                     'sub_button': [{'type': 'view',
+                                     'name': _wecom_trim(x['text'], _WECOM_NAME_MAX),
+                                     'url': x['url']} for x in links]})
+    btns += json.loads(json.dumps(_WECOM_MENU_TAIL))
+    return {'button': btns}
+
+
 _WECOM_NAME_MAX = 16     # 企微 menu name 字节上限（不是字符数）
 
 
@@ -817,7 +848,7 @@ def wecom_menu_apply():
     tok, err = wecom_token()
     if not tok:
         return _menu_record(False, err)
-    menu = json.loads(json.dumps(_WECOM_MENU))
+    menu = _wecom_build_menu()
     _e = _wecom_menu_check(menu)
     if _e:
         return _menu_record(False, _e)
@@ -827,6 +858,7 @@ def wecom_menu_apply():
     except Exception as e:
         return _menu_record(False, '菜单请求失败：%s' % str(e)[:100])
     if d.get('errcode') == 0:
+        _wecom_menu_sig['v'] = _menu_links_sig()      # v2.9.15：记下已下发的链接指纹
         return _menu_record(True, '菜单已下发（企微端需重新进入应用生效）')
     return _menu_record(False, '%s %s' % (d.get('errcode'), d.get('errmsg')))
 
@@ -946,8 +978,9 @@ def _wecom_status_text() -> str:
 
 _WECOM_HELP = ('🤖 ETKN 机器人\n'
                '直接回复关键词即可：\n'
-               '· `状态` — 今日/本周完成 + 队列\n'
-               '· `菜单` — 显示这条帮助\n'
+               '· 状态 — 今日/本周完成 + 队列\n'
+               '· 体检 — 一键体检（hosts + 500 + 队列）\n'
+               '· 菜单 — 显示这条帮助\n'
                '也可以点应用底部的自定义菜单。')
 
 
@@ -1017,6 +1050,58 @@ def _wecom_run_action(key: str):
             ok, err = wecom_push_news(arts)
             if not ok:
                 wecom_push('⚠️ 展开「%s」失败：%s' % (cat['label'], err))
+        elif key == 'PURGE':
+            # v2.9.15：与面板「清空共享登记积压」同一个函数，绝不碰 running
+            wecom_push('已触发清空共享登记积压，稍后推送结果…')
+            r = _purge_register_queued()
+            lines = ['🗂 清空共享登记积压',
+                     '· 找到排队 %d 条，已取消 %d 条' % (r['found'], r['cancelled'])]
+            if r['failed']:
+                lines.append('· 失败 %d 条（可在 ETKN 任务中心手动处理）' % len(r['failed']))
+            if not r['found']:
+                lines.append('· 当前没有排队的共享登记任务，无需清理')
+            wecom_push('\n'.join(lines))
+        elif key == 'HEALTH':
+            # v2.9.15：把原「🔍检测500」+「🌐重检IP」合成一条体检报告，一次点出全结论
+            wecom_push('已触发一键体检，稍后推送结果…')
+            lines = ['🩺 一键体检']
+            # ① hosts 解析
+            if SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS():
+                try:
+                    out = _hosts_recheck() or []
+                    ch = [r for r in out if r.get('changed')]
+                    lines.append('· hosts：%d 个域名%s'
+                                 % (len(out), ('，已改写 %d 个' % len(ch)) if ch else '，无需改写'))
+                    for r in out[:3]:
+                        lines.append('　　%s → %s%s' % (r.get('domain', '-'), r.get('ip', '-'),
+                                                      '（已改写）' if r.get('changed') else ''))
+                except Exception as e:
+                    lines.append('· hosts：检测失败（%s）' % str(e)[:60])
+            else:
+                lines.append('· hosts：未启用或未配置域名，已跳过')
+            # ② TMDB 500 签名
+            try:
+                cnt, samples = _count_500()
+                th = SETTINGS['count_500_threshold']
+                lines.append('· TMDB 500：今日命中 %d 条（阈值 %d）%s'
+                             % (cnt, th, '，正常' if cnt < th else '，偏高'))
+                if samples:
+                    lines.append('　　样例：' + '、'.join(samples))
+            except Exception as e:
+                lines.append('· TMDB 500：检测失败（%s）' % str(e)[:60])
+            # ③ 队列一句话
+            try:
+                fast = _state.get('fast') or {}
+                by = ((fast.get('active') or {}).get('by_kind') or {})
+
+                def _kk(k):
+                    d = by.get(k) or {}
+                    return '%s/%s' % (d.get('running', 0), d.get('queued', 0))
+                lines.append('· 队列：刮削 %s · 网盘 %s · 共享 %s · 追剧 %s'
+                             % (_kk('刮削入库'), _kk('网盘整理'), _kk('共享登记'), _kk('追剧刷新')))
+            except Exception:
+                pass
+            wecom_push('\n'.join(lines))
         elif key in _WECOM_ACTION_TASKS:
             # 「运维操作」里直连的任务（目前只有 🧹清理临时），点了直接触发
             tkey = _WECOM_ACTION_TASKS[key]
@@ -1051,6 +1136,8 @@ def _wecom_handle_msg(xml: str):
         txt = _xml_field(xml, 'Content')
         if txt in ('状态', 'status', 'STATUS'):
             wecom_push(_wecom_status_text(), touser=user)
+        elif txt in ('体检', '一键体检', 'health', 'HEALTH'):
+            threading.Thread(target=_wecom_run_action, args=('HEALTH',), daemon=True).start()
         else:
             wecom_push(_WECOM_HELP, touser=user)
         return
@@ -1889,12 +1976,44 @@ def _card_buttons(tok: str = '') -> list:
     return btns
 
 
-def check_500():
-    """今日异常明细中 500 签名命中 ≥ 阈值 → 推送一次；归零自动重新布防。"""
+def _purge_register_queued(limit: int = 500) -> dict:
+    """清空共享登记积压：只取消 status=queued 的共享登记运行（绝不碰 running）。
+
+    v2.9.15：从 /api/purge-register-queued 抽出来，供企微菜单「🗂清空登记」复用。
+    「共享登记」=display_title 前缀（其 workflow_type 是 manual_task，与追剧刷新同型），
+    因此按标题前缀识别而非 workflow_type。逐条调用原生 cancel；单条失败不中断。
+    """
+    targets, offset = [], 0
+    while offset < 1000:
+        s0, b0 = api_get(f'/api/workflows?status=queued&limit={PAGE}&offset={offset}')
+        items = b0.get('items', []) if isinstance(b0, dict) else []
+        if not items:
+            break
+        for x in items:
+            if (x.get('status') == 'queued'
+                    and (x.get('display_title') or '').startswith('共享登记')):
+                targets.append(x['id'])
+        offset += PAGE
+        if len(items) < PAGE:
+            break
+    ok_ids, fails = [], []
+    for rid in targets[:max(1, int(limit))]:
+        try:
+            s1, b1 = api_post(f'/api/workflows/{rid}/cancel', {})
+            if s1 in (200, 201, 202):
+                ok_ids.append(rid)
+            else:
+                fails.append({'id': rid, 'status': s1, 'body': b1})
+        except Exception as e:      # 单条失败不中断
+            fails.append({'id': rid, 'error': str(e)[:120]})
+    return {'found': len(targets), 'cancelled': len(ok_ids), 'failed': fails, 'ids': ok_ids}
+
+
+def _count_500():
+    """今日异常明细里命中 500 签名的条数 + 样例。返回 (cnt, samples)。
+
+    v2.9.15：从 check_500 抽出来，供「一键体检」复用（体检要拿到数字，不能只看是否触发告警）。"""
     day = _today00().date().isoformat()
-    if _alm['t500_day'] != day:
-        _alm['t500_day'] = day
-        _alm['t500_fired'] = False
     cnt, samples = 0, []
     for st in ('unrecognized', 'failed'):
         s, b = api_get(f'/api/p115/records?page=1&per_page=50&status={st}'
@@ -1907,6 +2026,16 @@ def check_500():
                 cnt += 1
                 if len(samples) < 3:
                     samples.append((x.get('original_name') or '-')[:28])
+    return cnt, samples
+
+
+def check_500():
+    """今日异常明细中 500 签名命中 ≥ 阈值 → 推送一次；归零自动重新布防。"""
+    day = _today00().date().isoformat()
+    if _alm['t500_day'] != day:
+        _alm['t500_day'] = day
+        _alm['t500_fired'] = False
+    cnt, samples = _count_500()
     if cnt >= SETTINGS['count_500_threshold'] and not _alm['t500_fired']:
         _alm['t500_fired'] = True
         _alert_push('t500', 'TMDB HTTP 500', [
@@ -3598,7 +3727,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.14', 'readonly': False,
+                'version': 'v2.9.15', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -3804,11 +3933,17 @@ class Handler(BaseHTTPRequestHandler):
         if (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret')) != _w_before:
             _wecom_tok['v'] = ''        # 换了企业/应用 → 缓存的 access_token 立即作废
         SETTINGS.pop('wecom_panel_url', None)   # v2.9.8：设置已移除，顺手清掉旧残留
+        # v2.9.15：「🔗快捷入口」的 URL 直接来自 card_links，链接变了菜单必须重下发。
+        # 旧版（v2.9.8）菜单里没有动态 URL，所以没有这套逻辑；现在按指纹判断，没变就不打扰企微。
+        _need_menu = (SETTINGS.get('wecom_enabled')
+                      and _menu_links_sig() != _wecom_menu_sig['v'])
         try:
             settings_save()
         except Exception as e:
             return self._send(500, json.dumps({'error': f'保存失败：{e}'[:120]},
                                               ensure_ascii=False).encode())
+        if _need_menu:
+            threading.Thread(target=wecom_menu_apply, daemon=True).start()
         return self._do_settings_get()
 
     def do_POST(self):
@@ -3966,37 +4101,10 @@ class Handler(BaseHTTPRequestHandler):
                      'task_title': ETKN_TASK_WHITELIST.get(tkey, ''),
                      'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
         if p == '/api/purge-register-queued':
-            # 清空共享登记积压：只取消 status=queued 的共享登记运行（绝不碰 running）。
-            # 「共享登记」=display_title 前缀（其 workflow_type 是 manual_task，与追剧刷新同型），
-            # 因此按标题前缀识别而非 workflow_type。逐条调用原生 cancel；单条失败不中断。
             limit = int(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                         .get('limit', ['500'])[0])
-            targets, offset = [], 0
-            while offset < 1000:
-                s0, b0 = api_get(f'/api/workflows?status=queued&limit={PAGE}&offset={offset}')
-                items = b0.get('items', []) if isinstance(b0, dict) else []
-                if not items:
-                    break
-                for x in items:
-                    if (x.get('status') == 'queued'
-                            and (x.get('display_title') or '').startswith('共享登记')):
-                        targets.append(x['id'])
-                offset += PAGE
-                if len(items) < PAGE:
-                    break
-            ok_ids, fails = [], []
-            for rid in targets:
-                try:
-                    s1, b1 = api_post(f'/api/workflows/{rid}/cancel', {})
-                    if s1 in (200, 201, 202):
-                        ok_ids.append(rid)
-                    else:
-                        fails.append({'id': rid, 'status': s1, 'body': b1})
-                except Exception as e:  # 单条失败不中断
-                    fails.append({'id': rid, 'error': str(e)[:120]})
-            return self._send(200, json.dumps(
-                {'found': len(targets), 'cancelled': len(ok_ids), 'failed': fails,
-                 'ids': ok_ids}, ensure_ascii=False).encode())
+            return self._send(200, json.dumps(_purge_register_queued(limit),
+                                              ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
 
@@ -4077,7 +4185,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.14，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.15，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
