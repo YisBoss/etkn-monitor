@@ -38,6 +38,9 @@ body{background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,"PingFang 
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;box-shadow:var(--shadow)}
 .card.w{grid-column:1/-1}
 .k{color:var(--sub);font-size:12px;font-weight:600;letter-spacing:.02em}
+.tcat{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
+.tcat:first-of-type{border-top:0;margin-top:6px;padding-top:0}
+.tcatk{color:var(--acc);font-size:12.5px;font-weight:600}
 .v{font-size:26px;font-weight:800;margin:2px 0;font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .v small{font-size:12px;color:var(--sub);font-weight:400;margin-left:4px;font-family:inherit}
 .sub{font-size:12px;color:var(--sub)}
@@ -279,7 +282,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
         <div class="setrow"><label>接收人<span class="why">@all 或 userid，多个用 | 分隔</span></label><input type="text" id="cfgWxUser" placeholder="@all" style="max-width:230px"></div>
         <div class="setrow"><label>回调 Token<span class="why">企微后台「接收消息服务器配置」里的 Token；留空=不修改</span></label><input type="text" id="cfgWxToken" placeholder="留空=不修改" style="max-width:360px"></div>
         <div class="setrow"><label>EncodingAESKey<span class="why">43 位；留空=不修改</span></label><input type="password" id="cfgWxAes" placeholder="留空=不修改" style="max-width:360px"></div>
-        <div class="setrow"><label>API 代理<span class="why">对齐「企业可信IP」；空=直连。NAS 出网 IP 会漂，固定走代理更稳</span></label><input type="text" id="cfgWxProxy" placeholder="http://203.0.113.1:7897" style="max-width:320px"></div>
+        <div class="setrow"><label>API 代理<span class="why">对齐「企业可信IP」；空=直连。NAS 出网 IP 会漂，固定走代理更稳</span></label><input type="text" id="cfgWxProxy" placeholder="http://user:pass@1.2.3.4:7897" style="max-width:320px"></div>
         <div class="setrow"><label>回调 URL<span class="why">填到企微后台「接收消息服务器配置」的 URL（按你当前访问面板的地址生成）</span></label><div class="setbox"><input type="text" id="cfgWxCb" readonly style="max-width:430px"><button class="act" onclick="wxCopyCb()">复制</button></div></div>
         <div class="setrow"><label>菜单 / 自检<span class="why">菜单为覆盖式下发；自检只走企微、不发飞书</span></label><div class="setbox"><button class="act" id="btnWxMenu" onclick="wxMenu()">下发自定义菜单</button><button class="act" id="btnWxTest" onclick="wxTest()">测试企业微信</button><span class="sub" id="wxLast">—</span></div></div>
         <div class="setrow"><label>菜单下发结果<span class="why">最近一次下发的时间与结果</span></label><span class="sub" id="wxMenuLast">—</span></div>
@@ -290,7 +293,8 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
           ③ 企微管理后台 → 微信插件 → <b>不要勾选</b>「成员使用微信插件时需要使用企业微信客户端」；<br>
           ④ 企微手机端 → 左上角「≡」→ 设置 → 消息通知 → <b>不要勾选</b>「仅在企业微信中接收消息」；<br>
           ⑤ 应用不能被停用。<br>
-          ⚠️ 另：若管理端给应用设了「在微工作台中始终进入主页」，微信端<b>只能收文本且限 20 字节</b>，markdown 等会被转成文本并提示去企微查看 —— 这条是企微官方限制，本程序无法绕过。
+          ⚠️ 另：若管理端给应用设了「在微工作台中始终进入主页」，微信端<b>只能收文本且限 20 字节</b>，卡片会被转成文本并提示去企微查看 —— 这条是企微官方限制，本程序无法绕过。<br>
+          ℹ️ 消息类型：微信端<b>只认 text / textcard</b>（markdown 会显示成「暂不支持此消息类型」）。本程序已按此选型——短告警发 textcard 卡片，超长正文回落 text。
         </div></div>
         <div class="setgroup" data-g="2">【告警】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>TMDB HTTP 500 检测<span class="why">频率+异常才推送</span></label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
@@ -536,35 +540,41 @@ const taskBusy = {};
 function opsStamp(name,ok=true){
   const t=new Date().toTimeString().slice(0,5);
   const txt=`${ok?'✅':'❌'} ${name} · ${t}`;
-  ['opsLast1','opsLast2','opsLastT1','opsLastT2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=txt;});
+  document.querySelectorAll('[id^=opsLast]').forEach(el=>{el.textContent=txt;});
   try{localStorage.setItem('em_ops_last',txt);}catch(e){}
 }
 try{const _ol=localStorage.getItem('em_ops_last');if(_ol){['opsLast1','opsLast2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=_ol;});}}catch(e){}
 /* v2.9.8 任务中心：ETKN 原生任务一键触发（与企微菜单「任务中心」同源）。
    两个页面各渲染一份，按钮 id 带页号避免重复。 */
-const TASK_CENTER=[
-  {key:'generate-virtual-library-covers', name:'生成媒体库封面', desc:'按封面生成配置批量更新媒体库封面（全库批量）。'},
-  {key:'refresh-virtual-libraries',       name:'刷新媒体库',     desc:'刷新全部虚拟媒体库（榜单/合集内容）。'},
-  {key:'fill-video-screenshots',          name:'补齐视频截图',   desc:'为缺截图的媒体补齐视频截图。'},
-  {key:'refresh-tmdb-ratings',            name:'刷新 TMDb 评分', desc:'重新拉取 TMDb 评分并写回媒体信息。'},
-  {key:'refresh-watchlist',               name:'刷新智能追剧',   desc:'刷新智能追剧订阅。'},
-  {key:'cleanup-p115-temp-directory',     name:'清理播放临时目录', desc:'清理主号和小号池 3 小时前的 115 临时视频。'},
-];
+const TASK_CATALOG=[];   /* v2.9.10：由 /api/task-catalog 填充（与企微菜单同一份目录） */
 function renderTaskCenter(){
   [1,2].forEach(n=>{
     const host=document.getElementById('taskCenter'+n); if(!host)return;
-    host.innerHTML='<div class="k">任务中心（ETKN 原生任务）</div><div class="ops">'+
-      '<span class="opsl" id="opsLastT'+n+'"></span><span class="opsr">'+
-      TASK_CENTER.map((t,i)=>'<button class="act" id="btnTC'+n+'_'+i+'" data-tc="'+t.key+'">'+t.name+'</button>').join('')+
-      '</span></div>';
+    if(!TASK_CATALOG.length){ host.innerHTML='<div class="k">任务中心（ETKN 原生任务）</div>'+
+      '<div class="sub">加载中…</div>'; return; }
+    host.innerHTML='<div class="k">任务中心（ETKN 原生任务 · 按工具箱分类）</div>'+
+      TASK_CATALOG.map((c,ci)=>'<div class="tcat"><div class="tcatk">'+c.icon+' '+c.label+'</div>'+
+        '<div class="ops"><span class="opsl" id="opsLastT'+n+'_'+ci+'"></span><span class="opsr">'+
+        c.tasks.map((t,ti)=>'<button class="act" id="btnTC'+n+'_'+ci+'_'+ti+'" data-tc="'+t.key+'">'+t.title+'</button>').join('')+
+        '</span></div></div>').join('');
     host.querySelectorAll('button[data-tc]').forEach(btn=>{
       btn.addEventListener('click',()=>{
-        const t=TASK_CENTER.find(x=>x.key===btn.dataset.tc); if(!t)return;
-        mOpen(t.name, t.desc+'<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',
-              ()=>runTask(t.key,[btn.id],'提交中…',t.name));
+        let t=null; TASK_CATALOG.forEach(c=>c.tasks.forEach(x=>{if(x.key===btn.dataset.tc)t=x;})); if(!t)return;
+        mOpen(t.title, t.desc+'<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',
+              ()=>runTask(t.key,[btn.id],'提交中…',t.title));
       });
     });
   });
+}
+async function loadTaskCatalog(){
+  try{
+    const r=await fetch('/api/task-catalog',{cache:'no-store'});
+    const d=await r.json();
+    if(d && Array.isArray(d.categories) && d.categories.length){
+      TASK_CATALOG.length=0; d.categories.forEach(c=>TASK_CATALOG.push(c));
+      renderTaskCenter();
+    }
+  }catch(e){ /* 拿不到目录就保持占位，不阻断其它面板 */ }
 }
 async function runTask(key, btnIds, busyText, resetText){
   if(taskBusy[key]) return; taskBusy[key]=true;
@@ -1044,7 +1054,8 @@ async function pollLoop(){try{await refresh();}catch(e){}scheduleNext();}
 /* v2.9.2.11：首屏「测速结果」卡原本永远空白——cfgLoadSpeed() 只在进「任务统计」页
    或手动测速后才被调用，page1 的 kSp 一直没人填。这里补一次首屏加载。 */
 cfgLoadSpeed();
-renderTaskCenter();          // v2.9.8：任务中心按钮（两个页面各渲染一份）
+renderTaskCenter();          // v2.9.10：任务中心（两页各渲染一份，目录来自 /api/task-catalog）
+loadTaskCatalog();           // 拉取与企微菜单同源的 5 分类目录后重渲染
 // 后台节流对策：回到前台立即刷新一次
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 </script>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.8 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.10 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -551,11 +551,15 @@ def wecom_token(force: bool = False):
         return _wecom_tok['v'], ''
 
 
-_WECOM_MD_MAX = 2048     # 企微 markdown content 字节上限（官方：最长不超过 2048 字节，UTF-8）
+# 企微应用消息的字节上限（官方口径，UTF-8，一个汉字 3 字节）：
+_WECOM_TEXT_MAX = 2048       # text.content
+_WECOM_TC_TITLE_MAX = 128    # textcard.title
+_WECOM_TC_DESC_MAX = 512     # textcard.description
+_WECOM_TC_BTNTXT = '打开面板'  # textcard.btntxt，官方限 4 个汉字
 
 
-def _wecom_md_trim(s: str, limit: int = _WECOM_MD_MAX) -> str:
-    """按【字节】裁剪 markdown——企微按字节计数，中文一个字 3 字节；
+def _wecom_trim(s: str, limit: int) -> str:
+    """按【字节】裁剪——企微按字节计数，中文一个字 3 字节；
     且不能把多字节字符截成半个（decode ignore 兜底）。"""
     b = s.encode('utf-8')
     if len(b) <= limit:
@@ -563,15 +567,41 @@ def _wecom_md_trim(s: str, limit: int = _WECOM_MD_MAX) -> str:
     return b[:limit].decode('utf-8', 'ignore')
 
 
-def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = None):
-    """企业微信应用消息（markdown）。返回 (ok, err)。
+_MD_LINK_RE = re.compile(r'\[([^\]\n]+)\]\((https?://[^)\s]+)\)')
 
-    v2.9.7 三处对齐飞书：
-      ① 正文底部 markdown 链接行（buttons → `[文字](url)`，对齐飞书卡片的链接行）；
-      ② 末尾追加「推送时间 YYYY-MM-DD HH:MM:SS」灰色小字（`<font color="comment">`，
-         对齐飞书卡片的 note 时间戳）；
-      ③ 按【字节】裁到 2048（旧版按字符 `[:4000]`——中文 3 字节，实际会超限被企微截断，
-         且时间戳会被截没）。裁剪时先给时间戳留位置，保证页脚永远在。
+
+def _wecom_plain(s: str) -> str:
+    """把「给飞书写的 markdown 正文」转成企微能正常显示的纯文本。
+
+    v2.9.10：企微的 text 与 textcard 都**不渲染 markdown**（而 markdown 类型微信端
+    又不支持），不转的话用户会看到字面的 `**加粗**` 与 `[文字](链接)`——
+    实际踩到过：菜单「立即测速」的结果消息显示成 `**⚡ 测速结果**`。
+    """
+    s = _MD_LINK_RE.sub(lambda m: '%s %s' % (m.group(1), m.group(2)), s)
+    s = re.sub(r'\*\*(.+?)\*\*', r'\1', s, flags=re.S)
+    s = re.sub(r'`([^`\n]+)`', r'\1', s)
+    s = re.sub(r'<font[^>]*>(.*?)</font>', r'\1', s, flags=re.S)
+    s = re.sub(r'^#{1,6}[ \t]*', '', s, flags=re.M)
+    s = re.sub(r'^>[ \t]?', '', s, flags=re.M)
+    return s
+
+
+def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = None):
+    """企业微信应用消息。返回 (ok, err)。
+
+    v2.9.9 换 msgtype（重要）：v2.9.7 起这里发的是 markdown——在**企业微信 App**
+    显示正常，但在**微信 App（微信插件）**一律只显示一行
+    「暂不支持此消息类型，请在企业微信中查看」。2026-09-27 三组对照实验（同一接收人，
+    只改 msgtype）结论：
+        markdown  → 微信端「暂不支持」   （企业微信端正常）
+        text      → 两端都正常显示
+        textcard  → 两端都正常显示（卡片形态：标题 + 描述 + 可点 URL）
+    所以这里不再发 markdown：
+      · 有标题 + 有可点 URL + 描述塞得进 512 字节 → textcard（卡片观感，最接近飞书卡片）；
+      · 否则 → text（2048 字节，按字节裁；链接行与「推送时间」页脚永远保留）。
+
+    链接行由 buttons 生成（卡片按钮 → 文本链接行），页脚追加推送时间——
+    这两点沿用 v2.9.7 对齐飞书的做法。
     """
     c = _wecom_cfg()
     if not c['agentid']:
@@ -579,20 +609,37 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
     tok, err = wecom_token()
     if not tok:
         return False, err
-    body = ('**%s**\n%s' % (title, text)) if title else text
-    if buttons:
-        link_line = ' · '.join(
-            '[%s](%s)' % (b.get('text', '打开'), b['url'])
-            for b in buttons if b.get('url'))
+
+    aid = int(c['agentid']) if c['agentid'].isdigit() else c['agentid']
+    touser = touser or c['touser']
+    ts = '推送时间 %s' % _now().strftime('%Y-%m-%d %H:%M:%S')
+    title = _wecom_plain(title)
+    text = _wecom_plain(text)
+    btns = [b for b in (buttons or []) if b.get('url')]
+    url = btns[0]['url'] if btns else ''
+    # 链接行用纯文本（企微两端都不渲染 markdown，写 [文字](url) 会原样露出来）
+    link_line = ' · '.join('%s %s' % (b.get('text', '打开'), b['url']) for b in btns)
+
+    # ---- 正文（去掉与卡片标题重复的首行：「⚠️ ETKN 告警 · X」里 X 就是标题）----
+    body = text
+    if title and 'ETKN 告警' in body.split('\n', 1)[0]:
+        body = body.split('\n', 1)[1] if '\n' in body else ''
+
+    # ---- 方案一：textcard（描述 512 字节内）----
+    desc = '%s\n%s' % (body, ts) if not link_line else '%s\n%s\n%s' % (body, link_line, ts)
+    if title and url and len(desc.encode('utf-8')) <= _WECOM_TC_DESC_MAX:
+        payload = {'touser': touser, 'msgtype': 'textcard', 'agentid': aid,
+                   'textcard': {'title': _wecom_trim(title, _WECOM_TC_TITLE_MAX),
+                                'description': desc, 'url': url,
+                                'btntxt': _WECOM_TC_BTNTXT}, 'safe': 0}
+    else:
+        # ---- 方案二：text（2048 字节；先给页脚留位再裁正文）----
+        plain = ('%s\n%s' % (title, text)) if title else text
         if link_line:
-            body = '%s\n\n%s' % (body, link_line)
-    ts_line = ('<font color="comment">推送时间 %s</font>'
-               % _now().strftime('%Y-%m-%d %H:%M:%S'))
-    room = _WECOM_MD_MAX - len(ts_line.encode('utf-8')) - 2   # 2 = 分隔的两个换行
-    content = '%s\n\n%s' % (_wecom_md_trim(body, room), ts_line)
-    payload = {'touser': touser or c['touser'], 'msgtype': 'markdown',
-               'agentid': int(c['agentid']) if c['agentid'].isdigit() else c['agentid'],
-               'markdown': {'content': content}, 'safe': 0}
+            plain = '%s\n\n%s' % (plain, link_line)
+        room = _WECOM_TEXT_MAX - len(ts.encode('utf-8')) - 2   # 2 = 分隔的两个换行
+        payload = {'touser': touser, 'msgtype': 'text', 'agentid': aid,
+                   'text': {'content': '%s\n\n%s' % (_wecom_trim(plain, room), ts)}, 'safe': 0}
 
     def _once(t):
         try:
@@ -601,6 +648,51 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
             return {'errcode': -1, 'errmsg': str(e)[:100]}
     d = _once(tok)
     if d.get('errcode') in (40014, 42001, 41001):      # token 失效 → 强刷一次
+        tok, err = wecom_token(force=True)
+        if tok:
+            d = _once(tok)
+    if d.get('errcode') == 0:
+        iu = d.get('invaliduser') or ''
+        ok, e = (True, '') if not iu else (False, '部分接收人无效：%s' % iu)
+    else:
+        ok, e = False, '%s %s' % (d.get('errcode'), d.get('errmsg'))
+    _wecom_last.update({'ts': _now().isoformat(timespec='seconds'), 'ok': ok, 'err': e})
+    return ok, e
+
+
+def wecom_push_news(articles: list, touser: str = ''):
+    """图文消息（news）——v2.9.10 新增，用于「任务中心」点分类展开子任务。
+
+    为什么用 news：只有它能让**每条子任务各带一个可点 URL**（text/textcard 都只有一个
+    URL，template_card 微信端收不到）。2026-09-27 实测：news 在微信 App 与企微 App
+    都能正常渲染。
+    ⚠️ 两个实测到的限制：
+      · articles 最多 8 篇（企微官方），调用方自己保证；
+      · **微信端只渲染每篇的 title**（第一篇额外显示 description），所以 title 必须
+        能独立看懂，不能把关键信息只放在 description 里。
+    """
+    c = _wecom_cfg()
+    if not c['agentid']:
+        return False, '未配置 AgentId'
+    arts = [{'title': _wecom_plain(a.get('title', ''))[:120],
+             'description': _wecom_plain(a.get('description', ''))[:500],
+             'url': a['url']} for a in (articles or [])[:8] if a.get('url')]
+    if not arts:
+        return False, '没有可发送的图文条目'
+    tok, err = wecom_token()
+    if not tok:
+        return False, err
+    payload = {'touser': touser or c['touser'], 'msgtype': 'news',
+               'agentid': int(c['agentid']) if c['agentid'].isdigit() else c['agentid'],
+               'news': {'articles': arts}, 'safe': 0}
+
+    def _once(t):
+        try:
+            return _wecom_http('%s/cgi-bin/message/send?access_token=%s' % (_WECOM_BASE, t), payload)
+        except Exception as e:
+            return {'errcode': -1, 'errmsg': str(e)[:100]}
+    d = _once(tok)
+    if d.get('errcode') in (40014, 42001, 41001):
         tok, err = wecom_token(force=True)
         if tok:
             d = _once(tok)
@@ -643,6 +735,9 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
 # 下面每个名字都按 ≤16 字节设计，改名字前先 `len(name.encode('utf-8'))` 数一遍。
 # v2.9.8：去掉原第一项「📊看面板」（view）——它和告警消息底部的 markdown 链接重复，
 #         且为它维护「面板公网地址」设置不值当；腾出的位置给「任务中心」。
+# v2.9.10：「任务中心」二级改成 ETKN 工具箱的 5 个分类（正好用满二级上限 5 个）。
+#         点分类 → 服务端推一条图文消息（news）展开该类的子任务（企微菜单只有两级，
+#         「分类里再展开子任务」菜单本身做不到，只能靠消息展开）。
 _WECOM_MENU = {'button': [
     {'type': 'click', 'name': '📈查状态', 'key': 'STATUS'},      # 13B
     {'name': '🔧运维操作', 'sub_button': [                       # 16B
@@ -653,11 +748,11 @@ _WECOM_MENU = {'button': [
         {'type': 'click', 'name': '🧹清理临时', 'key': 'CLEAN_TMP'}, # 16B
     ]},
     {'name': '📚任务中心', 'sub_button': [                       # 16B
-        {'type': 'click', 'name': '🎬生成封面', 'key': 'GEN_COVERS'},      # 16B
-        {'type': 'click', 'name': '🔄刷新媒体', 'key': 'REFRESH_LIB'},     # 16B
-        {'type': 'click', 'name': '📷补齐截图', 'key': 'FILL_SHOTS'},      # 16B
-        {'type': 'click', 'name': '⭐刷新评分', 'key': 'REFRESH_RATING'},  # 15B
-        {'type': 'click', 'name': '🔁刷新追剧', 'key': 'REFRESH_WATCHLIST'},  # 16B
+        {'type': 'click', 'name': '🎬媒体维护', 'key': 'CAT_MEDIA'},     # 16B
+        {'type': 'click', 'name': '📁115整理', 'key': 'CAT_ORGANIZE'},  # 13B
+        {'type': 'click', 'name': '📺订阅追剧', 'key': 'CAT_SUBSCRIPTION'},  # 16B
+        {'type': 'click', 'name': '📚媒体库', 'key': 'CAT_LIBRARY'},     # 13B
+        {'type': 'click', 'name': '🔑账号系统', 'key': 'CAT_ACCOUNT'},   # 16B
     ]},
 ]}
 _WECOM_NAME_MAX = 16     # 企微 menu name 字节上限（不是字符数）
@@ -708,28 +803,71 @@ def wecom_menu_apply():
     return _menu_record(False, '%s %s' % (d.get('errcode'), d.get('errmsg')))
 
 
-# ---------- v2.9.8 ETKN 原生任务（面板「任务中心」+ 企微菜单「任务中心」同源） ----------
-# 白名单而非透传：/api/run-task/<key> 会原样转发到 ETKN，
+# ---------- v2.9.10 ETKN 原生任务（面板「任务中心」+ 企微菜单「任务中心」同源） ----------
+# 白名单而非透传：/api/run-task/<key> 与 /run-task/<key> 都会原样转发到 ETKN，
 # 不做白名单等于给面板开了个「任意任务代理」，别人拿到面板地址就能触发删除类任务。
-# 这里只收 toolbox 型、可安全手动触发的维护任务（不含 delete-* / execute-* 等破坏性任务）。
-ETKN_TASK_WHITELIST = {
-    'organize-p115': '手动整理网盘文件',
-    'generate-virtual-library-covers': '生成媒体库封面',
-    'refresh-virtual-libraries': '刷新媒体库',
-    'fill-video-screenshots': '补齐视频截图',
-    'refresh-tmdb-ratings': '刷新 TMDb 评分',
-    'refresh-watchlist': '刷新智能追剧',
-    'cleanup-p115-temp-directory': '清理播放临时目录',
-}
-# 企微菜单 click key → ETKN task_key（与上面白名单同源，改一处即可）
-_WECOM_TASK_KEYS = {
-    'GEN_COVERS': 'generate-virtual-library-covers',
-    'REFRESH_LIB': 'refresh-virtual-libraries',
-    'FILL_SHOTS': 'fill-video-screenshots',
-    'REFRESH_RATING': 'refresh-tmdb-ratings',
-    'REFRESH_WATCHLIST': 'refresh-watchlist',
-    'CLEAN_TMP': 'cleanup-p115-temp-directory',
-}
+#
+# v2.9.10：按 ETKN 任务中心「工具箱」的 5 个分类组织（categories 接口返回 4 个 label，
+# 但 items 里实际有第 5 个 account，以 items 为准）。每类只收**业务主链路 + 非破坏性**任务：
+#   · 排除破坏性：delete-115-shares（删除分享入库）、execute-duplicate-media（执行去重）、
+#     apply-auto-tags（自动打标）、manually-correct-organize-records（手动重组记录）等；
+#   · 排除未实现：ETKN 里 implementation_status=planned 的一律不收。
+# 每类条数 ≤8：企微图文消息（news）单条最多 8 篇，多了塞不下。
+TASK_CATALOG = [
+    {'key': 'media', 'label': '媒体维护', 'icon': '🎬', 'tasks': [
+        ('backfill-media-metadata', '补齐媒体元数据', '把缺元数据的媒体补齐'),
+        ('fill-video-screenshots', '补齐视频截图', '为缺截图的媒体补图'),
+        ('refresh-tmdb-ratings', '刷新 TMDb 评分', '重新拉取 TMDb 评分并写回'),
+        ('sync-douban-ratings', '同步豆瓣评分', '同步豆瓣评分到媒体信息'),
+        ('enrich-actor-data', '补充演员数据', '补齐演员信息'),
+        ('rebuild-search-index', '重建索引', '重建媒体搜索索引'),
+        ('scan-media-library', '扫描媒体目录', '扫描媒体目录变更'),
+    ]},
+    {'key': 'organize', 'label': '115 与整理', 'icon': '📁', 'tasks': [
+        ('organize-p115', '手动整理网盘文件', '触发一批网盘整理'),
+        ('import-115-share', '分享入库', '把 115 分享入库'),
+        ('check-115-shares', '检查分享链接', '检查分享链接是否有效'),
+        ('sync-115-directory-tree', '同步网盘目录', '同步 115 目录树'),
+        ('rebuild-strm', '全量生成 STRM', '全量重建 STRM（耗时较长）'),
+        ('repair-organize-records', '补齐整理记录', '补齐缺失的整理记录'),
+        ('cleanup-p115-temp-directory', '清理播放临时目录', '清理 3 小时前的临时视频'),
+    ]},
+    {'key': 'subscription', 'label': '订阅', 'icon': '📺', 'tasks': [
+        ('refresh-watchlist', '刷新智能追剧', '刷新智能追剧订阅'),
+        ('refresh-completed-series', '刷新完结剧集', '刷新完结剧集'),
+        ('refresh-actor-subscriptions', '刷新演员订阅', '刷新演员订阅'),
+        ('process-subscriptions', '统一订阅处理', '统一处理订阅'),
+        ('subscription-assistant-maintenance', '订阅助手巡检', '订阅助手巡检'),
+    ]},
+    {'key': 'library', 'label': '媒体库与封面', 'icon': '📚', 'tasks': [
+        ('refresh-virtual-libraries', '刷新媒体库', '刷新全部虚拟媒体库'),
+        ('generate-virtual-library-covers', '生成媒体库封面', '按封面配置批量更新'),
+        ('refresh-native-collections', '刷新合集', '刷新原生合集'),
+    ]},
+    {'key': 'account', 'label': '账号与系统', 'icon': '🔑', 'tasks': [
+        ('re0-checkin', 're0 自动签到', '触发 re0 签到'),
+        ('notify-library-success', '发送入库通知', '补发入库成功通知'),
+        ('register-shared-source', '登记共享资源', '登记共享资源'),
+        ('shared-resource-maintenance', '共享资源维护', '共享资源维护'),
+    ]},
+]
+# 由分类目录派生平铺白名单（/api/run-task 校验用；改分类只改上面一处）
+ETKN_TASK_WHITELIST = {t[0]: t[1] for c in TASK_CATALOG for t in c['tasks']}
+# 企微菜单 click key → 分类（点分类 = 推一条图文消息展开该类的子任务）
+_WECOM_CAT_KEYS = {'CAT_%s' % c['key'].upper(): c for c in TASK_CATALOG}
+# 「运维操作」里点了直接触发的任务（不走「分类→图文消息」这一层）
+_WECOM_ACTION_TASKS = {'CLEAN_TMP': 'cleanup-p115-temp-directory'}
+
+# 任务中心链接令牌：进程级长期有效（图文消息里点开可能过很久），容器重启即轮换。
+# 只防「链接被预取/被猜到」，与面板其它接口同级的暴露面。
+_run_token = {'val': secrets.token_urlsafe(24)}
+
+
+def _run_task_url(task_key: str) -> str:
+    """子任务的可点链接：指向确认页（不是直接触发）——微信/企微打开链接时会预取，
+    直接触发等于「一打开消息就跑 26 个任务」。确认页是 GET，预取只会看到按钮。"""
+    return '%s/run-task/%s?token=%s' % (_panel_base(), task_key, _run_token['val'])
+
 
 
 def etkn_run_task(task_key: str):
@@ -765,7 +903,7 @@ def _wecom_status_text() -> str:
     by = act.get('by_kind') or {}
     _d = dw.get('day') if dw.get('day') is not None else '-'
     _w = dw.get('week') if dw.get('week') is not None else '-'
-    lines = ['**📈 ETKN 状态** %s' % (_state.get('fast_ts') or snap.get('ts') or '-'),
+    lines = ['📈 ETKN 状态 %s' % (_state.get('fast_ts') or snap.get('ts') or '-'),
              '今日完成 %s 媒体 ｜ 本周完成 %s 媒体' % (_d, _w),
              '未识别累计 %s ｜ 今日新增 %s' % (rec.get('unrecognized', '-'),
                                          rec.get('unrecognized_today', '-')),
@@ -778,7 +916,7 @@ def _wecom_status_text() -> str:
     return '\n'.join(lines)
 
 
-_WECOM_HELP = ('**🤖 ETKN 机器人**\n'
+_WECOM_HELP = ('🤖 ETKN 机器人\n'
                '直接回复关键词即可：\n'
                '· `状态` — 今日/本周完成 + 队列\n'
                '· `菜单` — 显示这条帮助\n'
@@ -799,12 +937,16 @@ def _wecom_run_action(key: str):
             if not res:
                 wecom_push('测速未产生结果（可能未配置测速目标）。')
             else:
-                rows = ['**⚡ 测速结果**']
+                rows = ['⚡ 测速结果']
+                # v2.9.10 修：旧代码读 r['ms']，但测速结果里根本没有 ms 字段（是 total_ms），
+                # 取不到就一律落到 else 分支 → **成功也报「失败」**（实际踩到过：6 个域名
+                # 全 ok，消息里却全是「失败」）。改成看 ok/total_ms。
                 for r in res[:12]:
-                    rows.append('· %s %s%s' % (r.get('host', '-'),
-                                               r.get('ms', '-'),
-                                               ' ms' if r.get('ms') is not None else
-                                               ' ' + str(r.get('error') or '失败')))
+                    if r.get('ok') and r.get('total_ms') is not None:
+                        rows.append('· %s %s ms' % (r.get('host', '-'), r['total_ms']))
+                    else:
+                        rows.append('· %s 失败%s' % (r.get('host', '-'),
+                                                    '（%s）' % r['error'] if r.get('error') else ''))
                 wecom_push('\n'.join(rows))
         elif key == 'HOSTS':
             if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
@@ -812,7 +954,7 @@ def _wecom_run_action(key: str):
             else:
                 wecom_push('已触发 hosts 重新检测…')
                 out = _hosts_recheck() or []
-                rows = ['**🌐 hosts 检测结果**']
+                rows = ['🌐 hosts 检测结果']
                 for r in out[:12]:
                     rows.append('· %s → %s%s' % (r.get('domain', '-'), r.get('ip', '-'),
                                                  '（已改写）' if r.get('changed') else ''))
@@ -837,9 +979,19 @@ def _wecom_run_action(key: str):
                 wecom_push('✅ 已触发整理下一批（run %s）。' % b['workflow_run_id'])
             else:
                 wecom_push('⚠️ 触发整理失败：ETKN 返回 %s %s' % (s, str(b)[:120]))
-        elif key in _WECOM_TASK_KEYS:
-            # v2.9.8 任务中心：触发 ETKN 原生任务，结果用应用消息回执
-            tkey = _WECOM_TASK_KEYS[key]
+        elif key in _WECOM_CAT_KEYS:
+            # v2.9.10 任务中心：点分类 → 推一条图文消息，每条 = 该分类下一个子任务。
+            # 子任务链接指向**确认页**（GET 只渲染按钮，预取不会误触发）。
+            cat = _WECOM_CAT_KEYS[key]
+            arts = [{'title': '%s %s' % (cat['icon'], t[1]),
+                     'description': '%s（点开确认后执行）' % t[2],
+                     'url': _run_task_url(t[0])} for t in cat['tasks']]
+            ok, err = wecom_push_news(arts)
+            if not ok:
+                wecom_push('⚠️ 展开「%s」失败：%s' % (cat['label'], err))
+        elif key in _WECOM_ACTION_TASKS:
+            # 「运维操作」里直连的任务（目前只有 🧹清理临时），点了直接触发
+            tkey = _WECOM_ACTION_TASKS[key]
             name = ETKN_TASK_WHITELIST.get(tkey, tkey)
             ok, msg, _s, _b = etkn_run_task(tkey)
             if ok:
@@ -3314,6 +3466,60 @@ min-height:100vh;align-items:center;justify-content:center;margin:0}
 <div class="c"><b>链接已失效或已使用</b><div style="margin-top:8px">令牌一次性、30 分钟有效；<br>请使用最新一条清空提醒里的按钮</div></div>
 </body></html>"""
 
+# v2.9.10 任务中心：子任务确认页（企微图文消息里点开的落地页）。
+# 刻意做成「先确认再执行」而不是点开即跑——微信/企微打开链接会预取，
+# 点开即跑等于打开一条消息就把整类任务全触发。
+_RUN_PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title} · 确认</title><style>
+body{{font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+background:#0f1420;color:#e8ecf3;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
+.card{{background:#171e2e;border:1px solid #2a3450;border-radius:14px;padding:28px 30px;max-width:420px;width:92%}}
+h1{{font-size:19px;margin:0 0 6px}} .sub{{color:#8b96ad;font-size:13px;margin-bottom:14px}}
+.tag{{display:inline-block;background:#1d2740;border:1px solid #33436b;border-radius:8px;
+padding:2px 8px;font-size:12px;color:#9fb3d9;margin-bottom:12px}}
+.btns{{display:flex;gap:10px}} button{{flex:1;padding:11px 0;border-radius:9px;border:0;font-size:15px;cursor:pointer}}
+.b-ok{{background:#2f81f7;color:#fff}} .b-no{{background:#232c42;color:#c3cbdc}}
+#msg{{margin-top:14px;font-size:13px;min-height:18px}}
+.ok{{color:#3fb950}} .bad{{color:#f85149}}</style></head><body>
+<div class="card"><div class="tag">{cat}</div>
+<h1>{title}</h1><div class="sub">{desc}</div>
+<div class="btns">
+<button type="button" class="b-no" autofocus onclick="location.href='about:blank'">取消</button>
+<button type="button" class="b-ok" id="bOk" onclick="doGo()">确认执行</button>
+</div><div id="msg"></div></div>
+<script>
+async function doGo(){{
+  const m=document.getElementById('msg'),o=document.getElementById('bOk');
+  o.disabled=true;m.textContent='提交中…';m.className='';
+  try{{
+    const r=await fetch(location.pathname,{{method:'POST',
+      headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{token:new URLSearchParams(location.search).get('token')||''}})}});
+    const d=await r.json().catch(()=>({{}}));
+    if(r.ok&&d.ok){{m.textContent='✅ '+d.msg;m.className='ok';}}
+    else{{m.textContent='❌ '+(d.error||d.msg||('失败 '+r.status));m.className='bad';o.disabled=false;}}
+  }}catch(e){{m.textContent='❌ '+e;m.className='bad';o.disabled=false;}}
+}}
+</script></body></html>"""
+
+_RUN_PAGE_BAD = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>链接已失效</title>
+<style>body{font-family:system-ui,sans-serif;background:#0f1420;color:#e8ecf3;display:flex;
+min-height:100vh;align-items:center;justify-content:center;margin:0}
+.c{text-align:center;color:#8b96ad} b{color:#f85149;font-size:17px}</style></head><body>
+<div class="c"><b>链接已失效</b><div style="margin-top:8px">请回到「任务中心」重新点分类，<br>用最新一条图文消息里的子任务</div></div>
+</body></html>"""
+
+
+def _find_cat_of(task_key: str):
+    """返回该任务所属分类的 (icon+label, task_tuple)，找不到返回 (None, None)。"""
+    for c in TASK_CATALOG:
+        for t in c['tasks']:
+            if t[0] == task_key:
+                return '%s %s' % (c['icon'], c['label']), t
+    return None, None
+
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
 
 
@@ -3364,14 +3570,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.8', 'readonly': False,
+                'version': 'v2.9.10', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
                             'trigger-organize', 'wecom-test', 'wecom-menu',
                             # v2.9.8 任务中心（白名单见 ETKN_TASK_WHITELIST）
-                            'run-task'],
+                            # v2.9.10 分类目录 + 子任务确认页（/run-task/<key>）
+                            'run-task', 'task-catalog', 'run-task-page'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -3443,6 +3650,24 @@ class Handler(BaseHTTPRequestHandler):
                                                'etkn_net': _etkn_net_env(),
                                                'etkn_deps': _etkn_deps_public()},
                                               ensure_ascii=False).encode())
+        if p == '/api/task-catalog':        # v2.9.10：面板「任务中心」与企微菜单同源
+            return self._send(200, json.dumps(
+                {'categories': [{'key': c['key'], 'label': c['label'], 'icon': c['icon'],
+                                 'tasks': [{'key': t[0], 'title': t[1], 'desc': t[2]}
+                                           for t in c['tasks']]} for c in TASK_CATALOG]},
+                ensure_ascii=False).encode())
+        m = re.match(r'^/run-task/([a-z0-9][a-z0-9\-]*)$', p)
+        if m:                               # v2.9.10：企微图文消息里点子任务的确认页
+            tkey = m.group(1)
+            tok_q = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                     .get('token') or [''])[0]
+            if not (tok_q and tok_q == _run_token['val']):
+                return self._send(403, _RUN_PAGE_BAD.encode(), 'text/html; charset=utf-8')
+            cat, t = _find_cat_of(tkey)
+            if not t:
+                return self._send(404, _RUN_PAGE_BAD.encode(), 'text/html; charset=utf-8')
+            return self._send(200, _RUN_PAGE.format(
+                title=t[1], desc=t[2], cat=cat).encode(), 'text/html; charset=utf-8')
         return self._send(404, '{"error":"not found"}'.encode())
 
     def _body(self):
@@ -3657,6 +3882,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(s if s > 0 else 502, json.dumps(
                 {'ok': s in (200, 201, 202), 'etkn_status': s, 'etkn_body': b2},
                 ensure_ascii=False).encode())
+        m = re.match(r'^/run-task/([a-z0-9][a-z0-9\-]*)$', p)
+        if m:                                 # v2.9.10 任务中心：确认页点「确认执行」
+            tkey = m.group(1)
+            b = self._body()
+            if str(b.get('token') or '') != _run_token['val']:
+                return self._send(403, json.dumps(
+                    {'ok': False, 'error': '令牌无效，请回任务中心重新点分类'},
+                    ensure_ascii=False).encode())
+            ok, msg, s, b2 = etkn_run_task(tkey)
+            if ok and tkey == 'organize-p115':      # 与面板/菜单一致：整理任务挂空转监视
+                try:
+                    _watch_shell_run(int(b2['workflow_run_id']), 'panel')
+                except Exception:
+                    pass
+            return self._send(200 if ok else (s if s > 0 else 502), json.dumps(
+                {'ok': ok, 'msg': msg, 'task': tkey, 'etkn_status': s, 'etkn_body': b2},
+                ensure_ascii=False).encode())
         m = re.match(r'^/api/retry/(\d+)$', p)
         if m:
             wid = m.group(1)
@@ -3806,7 +4048,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.8，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.10，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
