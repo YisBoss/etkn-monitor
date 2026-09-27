@@ -223,9 +223,10 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
     <div class="duo">
     <div class="card"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
     <div class="card"><div class="k">手动操作</div>
-      <div class="ops"><span class="opsl" id="opsLast1"></span><span class="opsr"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov1" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
+      <div class="ops"><span class="opsl" id="opsLast1"></span><span class="opsr"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
     </div>
     </div>
+    <div class="card w" id="taskCenter1"></div>
     <div class="card w"><div class="k">测速结果</div><div id="kSp" style="margin-top:6px"></div></div>
   </div>
 </div>
@@ -236,8 +237,9 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
     <div class="card w"><div class="k">手动操作</div>
-      <div class="ops"><span class="opsl" id="opsLast2"></span><span class="opsr"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnCov2" onclick="mOpen('生成媒体库封面','按封面生成配置批量更新媒体库封面（全库批量）。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('generate-virtual-library-covers',['btnCov1','btnCov2'],'提交中…','生成媒体库封面'))">生成媒体库封面</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
+      <div class="ops"><span class="opsl" id="opsLast2"></span><span class="opsr"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
     </div>
+    <div class="card w" id="taskCenter2"></div>
     <div class="card w"><div class="k">测速结果</div><div id="kSp2" style="margin-top:6px"></div></div>
       <div class="card w"><div class="k">今日失败/部分失败任务</div>
       <div class="twrap flist"><table id="tFail"><thead><tr><th>#</th><th>类型</th><th>标题</th><th class="num">异常媒体</th><th class="num">时间</th><th class="num">操作</th></tr></thead><tbody></tbody></table></div>
@@ -276,11 +278,10 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
         <div class="setrow"><label>接收人<span class="why">@all 或 userid，多个用 | 分隔</span></label><input type="text" id="cfgWxUser" placeholder="@all" style="max-width:230px"></div>
         <div class="setrow"><label>回调 Token<span class="why">企微后台「接收消息服务器配置」里的 Token；留空=不修改</span></label><input type="text" id="cfgWxToken" placeholder="留空=不修改" style="max-width:360px"></div>
         <div class="setrow"><label>EncodingAESKey<span class="why">43 位；留空=不修改</span></label><input type="password" id="cfgWxAes" placeholder="留空=不修改" style="max-width:360px"></div>
-        <div class="setrow"><label>面板公网地址<span class="why">菜单「看面板」用；改完保存会<b>自动重下发菜单</b></span></label><input type="text" id="cfgWxPanel" placeholder="https://monitor.example.com" style="max-width:320px" oninput="wxSyncCb()"></div>
         <div class="setrow"><label>API 代理<span class="why">对齐「企业可信IP」；空=直连。NAS 出网 IP 会漂，固定走代理更稳</span></label><input type="text" id="cfgWxProxy" placeholder="http://203.0.113.1:7897" style="max-width:320px"></div>
-        <div class="setrow"><label>回调 URL<span class="why">填到企微后台「接收消息服务器配置」的 URL</span></label><div class="setbox"><input type="text" id="cfgWxCb" readonly style="max-width:430px"><button class="act" onclick="wxCopyCb()">复制</button></div></div>
+        <div class="setrow"><label>回调 URL<span class="why">填到企微后台「接收消息服务器配置」的 URL（按你当前访问面板的地址生成）</span></label><div class="setbox"><input type="text" id="cfgWxCb" readonly style="max-width:430px"><button class="act" onclick="wxCopyCb()">复制</button></div></div>
         <div class="setrow"><label>菜单 / 自检<span class="why">菜单为覆盖式下发；自检只走企微、不发飞书</span></label><div class="setbox"><button class="act" id="btnWxMenu" onclick="wxMenu()">下发自定义菜单</button><button class="act" id="btnWxTest" onclick="wxTest()">测试企业微信</button><span class="sub" id="wxLast">—</span></div></div>
-        <div class="setrow"><label>菜单下发结果<span class="why">改面板地址会自动重下发，这里看结果</span></label><span class="sub" id="wxMenuLast">—</span></div>
+        <div class="setrow"><label>菜单下发结果<span class="why">最近一次下发的时间与结果</span></label><span class="sub" id="wxMenuLast">—</span></div>
         <div class="setrow"><label>微信 App 收不到？<span class="why">企微「微信插件」5 条前提</span></label><div class="sub" style="flex:1;line-height:1.7;font-size:12px">
           企微 App 收到、微信 App 收不到 → 属<b>微信插件配置</b>问题（非本程序问题），逐条核对：<br>
           ① 微信里先<b>关注「微信插件」</b>（企微后台 → 微信插件 → 生成二维码，微信扫码关注）；<br>
@@ -534,10 +535,36 @@ const taskBusy = {};
 function opsStamp(name,ok=true){
   const t=new Date().toTimeString().slice(0,5);
   const txt=`${ok?'✅':'❌'} ${name} · ${t}`;
-  ['opsLast1','opsLast2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=txt;});
+  ['opsLast1','opsLast2','opsLastT1','opsLastT2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=txt;});
   try{localStorage.setItem('em_ops_last',txt);}catch(e){}
 }
 try{const _ol=localStorage.getItem('em_ops_last');if(_ol){['opsLast1','opsLast2'].forEach(id=>{const el=document.getElementById(id);if(el)el.textContent=_ol;});}}catch(e){}
+/* v2.9.8 任务中心：ETKN 原生任务一键触发（与企微菜单「任务中心」同源）。
+   两个页面各渲染一份，按钮 id 带页号避免重复。 */
+const TASK_CENTER=[
+  {key:'generate-virtual-library-covers', name:'生成媒体库封面', desc:'按封面生成配置批量更新媒体库封面（全库批量）。'},
+  {key:'refresh-virtual-libraries',       name:'刷新媒体库',     desc:'刷新全部虚拟媒体库（榜单/合集内容）。'},
+  {key:'fill-video-screenshots',          name:'补齐视频截图',   desc:'为缺截图的媒体补齐视频截图。'},
+  {key:'refresh-tmdb-ratings',            name:'刷新 TMDb 评分', desc:'重新拉取 TMDb 评分并写回媒体信息。'},
+  {key:'refresh-watchlist',               name:'刷新智能追剧',   desc:'刷新智能追剧订阅。'},
+  {key:'cleanup-p115-temp-directory',     name:'清理播放临时目录', desc:'清理主号和小号池 3 小时前的 115 临时视频。'},
+];
+function renderTaskCenter(){
+  [1,2].forEach(n=>{
+    const host=document.getElementById('taskCenter'+n); if(!host)return;
+    host.innerHTML='<div class="k">任务中心（ETKN 原生任务）</div><div class="ops">'+
+      '<span class="opsl" id="opsLastT'+n+'"></span><span class="opsr">'+
+      TASK_CENTER.map((t,i)=>'<button class="act" id="btnTC'+n+'_'+i+'" data-tc="'+t.key+'">'+t.name+'</button>').join('')+
+      '</span></div>';
+    host.querySelectorAll('button[data-tc]').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        const t=TASK_CENTER.find(x=>x.key===btn.dataset.tc); if(!t)return;
+        mOpen(t.name, t.desc+'<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',
+              ()=>runTask(t.key,[btn.id],'提交中…',t.name));
+      });
+    });
+  });
+}
 async function runTask(key, btnIds, busyText, resetText){
   if(taskBusy[key]) return; taskBusy[key]=true;
   btnIds.forEach(id=>{const b=document.getElementById(id);if(b){b.disabled=true;b.textContent=busyText;}});
@@ -549,7 +576,7 @@ async function runTask(key, btnIds, busyText, resetText){
       opsStamp(resetText);
       setTimeout(refresh,1500);
     }else{
-      const msg=(b.etkn_body&&(b.etkn_body.detail||b.etkn_body.error))||JSON.stringify(b.etkn_body||b);
+      const msg=(b.msg)||(b.error)||(b.etkn_body&&(b.etkn_body.detail||b.etkn_body.error))||JSON.stringify(b.etkn_body||b);
       toast('ETKN 返回（状态 '+b.etkn_status+'）：'+String(msg).slice(0,120),'bad');
     }
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
@@ -694,7 +721,6 @@ async function cfgLoad(){
     document.getElementById('cfgWxCorp').value=d.wecom_corpid||'';
     document.getElementById('cfgWxAgent').value=d.wecom_agentid||'';
     document.getElementById('cfgWxUser').value=d.wecom_touser||'@all';
-    document.getElementById('cfgWxPanel').value=d.wecom_panel_url||'';
     document.getElementById('cfgWxProxy').value=d.wecom_api_proxy||'';
     document.getElementById('cfgWxSecret').value='';
     document.getElementById('cfgWxSecret').placeholder=d.wecom_secret_set?'已保存（留空=不修改）':'留空=不修改';
@@ -759,7 +785,6 @@ async function cfgSave(){
         wecom_corpid:document.getElementById('cfgWxCorp').value.trim(),
         wecom_agentid:document.getElementById('cfgWxAgent').value.trim(),
         wecom_touser:document.getElementById('cfgWxUser').value.trim()||'@all',
-        wecom_panel_url:document.getElementById('cfgWxPanel').value.trim(),
         wecom_api_proxy:document.getElementById('cfgWxProxy').value.trim(),
         wecom_secret:document.getElementById('cfgWxSecret').value||undefined,
         wecom_token:document.getElementById('cfgWxToken').value||undefined,
@@ -777,10 +802,10 @@ async function cfgSave(){
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
   b.disabled=false;b.textContent='保存设置';
 }
-/* v2.9.5 企业微信：回调 URL 预览/复制 + 菜单下发 + 通道自检 */
+/* v2.9.5 企业微信：回调 URL 预览/复制 + 菜单下发 + 通道自检
+   v2.9.8：「面板公网地址」设置已移除（菜单不再需要它），回调 URL 直接按当前访问地址生成。 */
 function wxCbUrl(){
-  const base=(document.getElementById('cfgWxPanel').value.trim()||location.origin).replace(/\/+$/,'');
-  return base+'/wecom/callback';
+  return location.origin.replace(/\/+$/,'')+'/wecom/callback';
 }
 function wxSyncCb(){document.getElementById('cfgWxCb').value=wxCbUrl();}
 function wxCopyCb(){
@@ -1018,6 +1043,7 @@ async function pollLoop(){try{await refresh();}catch(e){}scheduleNext();}
 /* v2.9.2.11：首屏「测速结果」卡原本永远空白——cfgLoadSpeed() 只在进「任务统计」页
    或手动测速后才被调用，page1 的 kSp 一直没人填。这里补一次首屏加载。 */
 cfgLoadSpeed();
+renderTaskCenter();          // v2.9.8：任务中心按钮（两个页面各渲染一份）
 // 后台节流对策：回到前台立即刷新一次
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
 </script>
