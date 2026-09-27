@@ -261,9 +261,10 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
     <div class="card w">
       <div id="cfgForm">
         <div class="setgroup" data-g="1">【推送】<span class="tgl">收起 ▲</span></div>
+        <div class="setrow"><label>推送总开关<span class="why">关闭则全部静默（飞书 + 企微一起停）</span></label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
+        <div class="setrow"><label>飞书通知渠道<span class="why">独立开关；与企微各自独立，任一通道送达即算成功</span></label><label class="switch"><input type="checkbox" id="cfgFeishuEn"><span class="slider"></span></label></div>
         <div class="setrow"><label>飞书 Webhook 地址<span class="why">机器人 Incoming 地址</span></label></div>
         <div class="setrow"><input type="text" id="cfgUrl" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…"></div>
-        <div class="setrow"><label>推送总开关<span class="why">关闭则全部静默</span></label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
         <div class="setrow"><label>卡片按钮（链接≤6 个）<span class="why">「整理下一批」固定带令牌不在此配</span></label>
           <div style="flex:1"><div id="clList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button></div></div></div>
@@ -275,10 +276,20 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
         <div class="setrow"><label>接收人<span class="why">@all 或 userid，多个用 | 分隔</span></label><input type="text" id="cfgWxUser" placeholder="@all" style="max-width:230px"></div>
         <div class="setrow"><label>回调 Token<span class="why">企微后台「接收消息服务器配置」里的 Token；留空=不修改</span></label><input type="text" id="cfgWxToken" placeholder="留空=不修改" style="max-width:360px"></div>
         <div class="setrow"><label>EncodingAESKey<span class="why">43 位；留空=不修改</span></label><input type="password" id="cfgWxAes" placeholder="留空=不修改" style="max-width:360px"></div>
-        <div class="setrow"><label>面板公网地址<span class="why">菜单「打开面板」用</span></label><input type="text" id="cfgWxPanel" placeholder="https://monitor.example.com" style="max-width:320px" oninput="wxSyncCb()"></div>
+        <div class="setrow"><label>面板公网地址<span class="why">菜单「看面板」用；改完保存会<b>自动重下发菜单</b></span></label><input type="text" id="cfgWxPanel" placeholder="https://monitor.example.com" style="max-width:320px" oninput="wxSyncCb()"></div>
         <div class="setrow"><label>API 代理<span class="why">对齐「企业可信IP」；空=直连。NAS 出网 IP 会漂，固定走代理更稳</span></label><input type="text" id="cfgWxProxy" placeholder="http://203.0.113.1:7897" style="max-width:320px"></div>
         <div class="setrow"><label>回调 URL<span class="why">填到企微后台「接收消息服务器配置」的 URL</span></label><div class="setbox"><input type="text" id="cfgWxCb" readonly style="max-width:430px"><button class="act" onclick="wxCopyCb()">复制</button></div></div>
         <div class="setrow"><label>菜单 / 自检<span class="why">菜单为覆盖式下发；自检只走企微、不发飞书</span></label><div class="setbox"><button class="act" id="btnWxMenu" onclick="wxMenu()">下发自定义菜单</button><button class="act" id="btnWxTest" onclick="wxTest()">测试企业微信</button><span class="sub" id="wxLast">—</span></div></div>
+        <div class="setrow"><label>菜单下发结果<span class="why">改面板地址会自动重下发，这里看结果</span></label><span class="sub" id="wxMenuLast">—</span></div>
+        <div class="setrow"><label>微信 App 收不到？<span class="why">企微「微信插件」5 条前提</span></label><div class="sub" style="flex:1;line-height:1.7;font-size:12px">
+          企微 App 收到、微信 App 收不到 → 属<b>微信插件配置</b>问题（非本程序问题），逐条核对：<br>
+          ① 微信里先<b>关注「微信插件」</b>（企微后台 → 微信插件 → 生成二维码，微信扫码关注）；<br>
+          ② 微信插件 → 右上角 → 设置 → <b>开启「接收企业消息」</b>；<br>
+          ③ 企微管理后台 → 微信插件 → <b>不要勾选</b>「成员使用微信插件时需要使用企业微信客户端」；<br>
+          ④ 企微手机端 → 左上角「≡」→ 设置 → 消息通知 → <b>不要勾选</b>「仅在企业微信中接收消息」；<br>
+          ⑤ 应用不能被停用。<br>
+          ⚠️ 另：若管理端给应用设了「在微工作台中始终进入主页」，微信端<b>只能收文本且限 20 字节</b>，markdown 等会被转成文本并提示去企微查看 —— 这条是企微官方限制，本程序无法绕过。
+        </div></div>
         <div class="setgroup" data-g="2">【告警】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>TMDB HTTP 500 检测<span class="why">频率+异常才推送</span></label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
         <div class="setrow"><label>队列积压告警<span class="why">任一类型排队 ≥ N 推送</span></label><div class="setbox"><input type="number" id="cfgTbl" min="1"><span class="sub">条</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
@@ -643,6 +654,7 @@ async function cfgLoad(){
     document.getElementById('cfgUrl').value=d.webhook_url||'';
     document.getElementById('cfgUrl').placeholder=d.webhook_masked||'https://open.feishu.cn/open-apis/bot/v2/hook/…';
     document.getElementById('cfgPush').checked=!!d.push_enabled;
+    document.getElementById('cfgFeishuEn').checked=(d.feishu_enabled!==false);   // v2.9.7 飞书独立开关
     document.getElementById('cfgA500').checked=!!d.alert_500_enabled;
     document.getElementById('cfgASp').checked=!!d.alert_speed_enabled;
     document.getElementById('cfgABl').checked=!!d.alert_backlog_enabled;
@@ -693,7 +705,14 @@ async function cfgLoad(){
     wxSyncCb();
     const _wl=d.wecom_last||{};
     document.getElementById('wxLast').textContent=_wl.ts?(_wl.ts+' '+( _wl.ok?'✅送达':'❌'+(_wl.err||'失败'))):'—';
+    renderMenuLast(d.wecom_menu_last||{});   // v2.9.7 菜单下发结果回显
   }catch(e){toast('读取设置失败：'+String(e).slice(0,60),'bad');}
+}
+function renderMenuLast(m){
+  const el=document.getElementById('wxMenuLast');if(!el)return;
+  if(!m||!m.ts){el.textContent='—';el.style.color='var(--dim)';return;}
+  el.textContent=m.ts+(m.ok?' ✅ ':' ❌ ')+(m.msg||'');
+  el.style.color=m.ok?'var(--ok)':'var(--bad)';
 }
 async function cfgSave(){
   const b=document.getElementById('btnCfgSave');b.disabled=true;b.textContent='保存中…';
@@ -702,6 +721,7 @@ async function cfgSave(){
       body:JSON.stringify({
         webhook_url:document.getElementById('cfgUrl').value.trim(),
         push_enabled:document.getElementById('cfgPush').checked,
+        feishu_enabled:document.getElementById('cfgFeishuEn').checked,
         alert_500_enabled:document.getElementById('cfgA500').checked,
         alert_speed_enabled:document.getElementById('cfgASp').checked,
         alert_backlog_enabled:document.getElementById('cfgABl').checked,
@@ -749,7 +769,10 @@ async function cfgSave(){
       document.getElementById('cfgWxSecret').value='';document.getElementById('cfgWxSecret').placeholder=d.wecom_secret_set?'已保存（留空=不修改）':'留空=不修改';
       document.getElementById('cfgWxToken').value='';document.getElementById('cfgWxToken').placeholder=d.wecom_token_set?'已保存（留空=不修改）':'留空=不修改';
       document.getElementById('cfgWxAes').value='';document.getElementById('cfgWxAes').placeholder=d.wecom_aeskey_set?'已保存（留空=不修改）':'留空=不修改';
-      wxSyncCb();toast('设置已保存（重启后仍生效）','ok');}
+      wxSyncCb();
+      renderMenuLast(d.wecom_menu_last||{});
+      if(d.menu_msg)toast(d.menu_msg,d.menu_msg.indexOf('失败')>=0?'bad':'ok');
+      else toast('设置已保存（重启后仍生效）','ok');}
     else toast('保存失败：'+String(d.error||JSON.stringify(d)).slice(0,100),'bad');
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
   b.disabled=false;b.textContent='保存设置';
@@ -773,6 +796,7 @@ async function wxMenu(){
   const b=document.getElementById('btnWxMenu');b.disabled=true;b.textContent='下发中…';
   try{
     const d=await (await fetch('/api/wecom-menu',{method:'POST'})).json();
+    renderMenuLast(d.menu_last||{});
     toast(d.ok?'菜单已下发（企微端重新进入应用生效）':'下发失败：'+d.msg, d.ok?'ok':'bad');
   }catch(e){toast('请求失败：'+String(e).slice(0,60),'bad');}
   b.disabled=false;b.textContent='下发自定义菜单';
@@ -878,11 +902,13 @@ function renderNotify(nt){
   el.textContent='📣 '+notifyText(nt);
   el.style.color=!nt.enabled?'var(--dim)':((nt.feishu||nt.wecom)?'var(--ok)':'var(--bad)');
   const L=['推送总开关：'+(nt.enabled?'开':'关'),
-           '飞书 webhook：'+(nt.feishu?'已配置':'未配置'),
+           '飞书：'+(nt.feishu?'可用':(nt.feishu_on===false?'开关已关':(nt.feishu_cfg===false?'已开启但未填 Webhook 地址':'未配置'))),
            '企业微信：'+(nt.wecom?'可用':(nt.wecom_on?'已开启但未配齐（缺企业ID/Secret/AgentId）':'未开启'))
                       +(nt.wecom_proxy?'（调用走 API 代理）':'（调用直连）')];
   const last=nt.last||{};
   if(last.ts)L.push('最近一次企微发送：'+last.ts+(last.ok?' 成功':' 失败 · '+(last.err||'')));
+  const ml=nt.menu_last||{};
+  if(ml.ts)L.push('最近一次菜单下发：'+ml.ts+(ml.ok?' 成功':' 失败 · '+(ml.msg||'')));
   el.title=L.join('\n');
 }
 function ntRow(nt){

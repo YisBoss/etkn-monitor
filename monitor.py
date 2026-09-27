@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.6 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.7 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -110,7 +110,8 @@ def _speed_targets() -> list:
 #   SETTINGS_PATH 环境变量 > /app/data/ > /data/ > /tmp/（容器层，restart 后保留）
 SETTINGS_DEFAULTS = {
     'webhook_url': '',            # 飞书自定义机器人 Webhook（零 token，不经过第三方）
-    'push_enabled': False,        # 推送总开关
+    'push_enabled': False,        # 推送总开关（所有通道的总闸）
+    'feishu_enabled': True,       # v2.9.7 飞书通道独立开关（与 wecom_enabled 对称；默认开=行为不变）
     'alert_500_enabled': True,    # TMDB HTTP 500 检测告警
     'alert_speed_enabled': False, # 定时测速异常告警（定时测速默认关闭）
     'alert_backlog_enabled': True,# 队列积压告警
@@ -470,6 +471,14 @@ _WECOM_BASE = 'https://qyapi.weixin.qq.com'
 _wecom_tok = {'v': '', 'exp': 0.0}
 _wecom_lock = threading.Lock()
 _wecom_last = {'ts': '', 'ok': False, 'err': ''}   # 最近一次发送结果（设置页回显）
+_wecom_menu_last = {'ts': '', 'ok': False, 'msg': ''}   # v2.9.7 最近一次菜单下发结果
+
+
+def _menu_record(ok, msg):
+    """记录菜单下发结果并原样返回，供设置页回显「菜单到底更新没」。"""
+    _wecom_menu_last.update({'ts': _now().isoformat(timespec='seconds'),
+                             'ok': bool(ok), 'msg': (msg or '')[:200]})
+    return ok, msg
 
 
 def _wecom_cfg() -> dict:
@@ -490,15 +499,19 @@ def _notify_state() -> dict:
     （这个函数挂在 /api/status 上，每 2 秒就会被调一次）。
     """
     c = _wecom_cfg()
-    fx = bool((SETTINGS.get('webhook_url') or '').strip())
+    fx_cfg = bool((SETTINGS.get('webhook_url') or '').strip())
+    fx_on = bool(SETTINGS.get('feishu_enabled', True))   # v2.9.7 飞书独立开关
     wc_on = bool(SETTINGS.get('wecom_enabled'))
     wc_cfg = bool(c['corpid'] and c['secret'] and c['agentid'])
     return {'enabled': bool(SETTINGS.get('push_enabled')),
-            'feishu': fx,
+            'feishu_on': fx_on,
+            'feishu_cfg': fx_cfg,
+            'feishu': fx_on and fx_cfg,         # 真正能送达飞书
             'wecom_on': wc_on,
             'wecom_cfg': wc_cfg,
             'wecom': wc_on and wc_cfg,          # 真正能送达企微
             'wecom_proxy': bool(c['proxy']),
+            'menu_last': dict(_wecom_menu_last),
             'last': dict(_wecom_last)}
 
 
@@ -538,18 +551,48 @@ def wecom_token(force: bool = False):
         return _wecom_tok['v'], ''
 
 
-def wecom_push(text: str, title: str = '', touser: str = ''):
-    """企业微信应用消息（markdown）。返回 (ok, err)。"""
+_WECOM_MD_MAX = 2048     # 企微 markdown content 字节上限（官方：最长不超过 2048 字节，UTF-8）
+
+
+def _wecom_md_trim(s: str, limit: int = _WECOM_MD_MAX) -> str:
+    """按【字节】裁剪 markdown——企微按字节计数，中文一个字 3 字节；
+    且不能把多字节字符截成半个（decode ignore 兜底）。"""
+    b = s.encode('utf-8')
+    if len(b) <= limit:
+        return s
+    return b[:limit].decode('utf-8', 'ignore')
+
+
+def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = None):
+    """企业微信应用消息（markdown）。返回 (ok, err)。
+
+    v2.9.7 三处对齐飞书：
+      ① 正文底部 markdown 链接行（buttons → `[文字](url)`，对齐飞书卡片的链接行）；
+      ② 末尾追加「推送时间 YYYY-MM-DD HH:MM:SS」灰色小字（`<font color="comment">`，
+         对齐飞书卡片的 note 时间戳）；
+      ③ 按【字节】裁到 2048（旧版按字符 `[:4000]`——中文 3 字节，实际会超限被企微截断，
+         且时间戳会被截没）。裁剪时先给时间戳留位置，保证页脚永远在。
+    """
     c = _wecom_cfg()
     if not c['agentid']:
         return False, '未配置 AgentId'
     tok, err = wecom_token()
     if not tok:
         return False, err
-    content = ('**%s**\n%s' % (title, text)) if title else text
+    body = ('**%s**\n%s' % (title, text)) if title else text
+    if buttons:
+        link_line = ' · '.join(
+            '[%s](%s)' % (b.get('text', '打开'), b['url'])
+            for b in buttons if b.get('url'))
+        if link_line:
+            body = '%s\n\n%s' % (body, link_line)
+    ts_line = ('<font color="comment">推送时间 %s</font>'
+               % _now().strftime('%Y-%m-%d %H:%M:%S'))
+    room = _WECOM_MD_MAX - len(ts_line.encode('utf-8')) - 2   # 2 = 分隔的两个换行
+    content = '%s\n\n%s' % (_wecom_md_trim(body, room), ts_line)
     payload = {'touser': touser or c['touser'], 'msgtype': 'markdown',
                'agentid': int(c['agentid']) if c['agentid'].isdigit() else c['agentid'],
-               'markdown': {'content': content[:4000]}, 'safe': 0}
+               'markdown': {'content': content}, 'safe': 0}
 
     def _once(t):
         try:
@@ -571,18 +614,24 @@ def wecom_push(text: str, title: str = '', touser: str = ''):
 
 
 def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'blue'):
-    """v2.9.5 双通道分发：飞书 webhook + 企业微信应用消息（各自按开关）。
+    """v2.9.5 双通道分发：飞书 webhook + 企业微信应用消息（各自按独立开关）。
     返回 (ok, err)——任一条送达即 ok；两条都失败时 err 里带上两边原因。
-    说明：push_enabled 是总开关（各告警线程的闸），wecom_enabled 只是企微这一路的开关；
-    因此「不用飞书、只用企微」时把 webhook_url 留空 + push_enabled 打开即可。"""
-    if buttons:
-        f_ok, f_err = feishu_push(text, buttons=buttons, title=title, tcolor=tcolor)
-    else:
-        f_ok, f_err = feishu_push(text)
-    res = [('飞书', f_ok, f_err)]
+
+    v2.9.7：飞书补上独立开关 feishu_enabled（与 wecom_enabled 对称，默认开=行为不变）。
+    开关层级：push_enabled 是总闸（各告警线程的闸），feishu_enabled / wecom_enabled
+    是两条通道各自的开关，互不影响。"""
+    res = []
+    if SETTINGS.get('feishu_enabled', True):
+        if buttons:
+            f_ok, f_err = feishu_push(text, buttons=buttons, title=title, tcolor=tcolor)
+        else:
+            f_ok, f_err = feishu_push(text)
+        res.append(('飞书', f_ok, f_err))
     if SETTINGS.get('wecom_enabled'):
-        w_ok, w_err = wecom_push(text, title=title)
+        w_ok, w_err = wecom_push(text, title=title, buttons=buttons)
         res.append(('企微', w_ok, w_err))
+    if not res:
+        return False, '飞书与企微通道都已关闭'
     ok = any(r[1] for r in res)
     errs = ' / '.join('%s:%s' % (n, e) for n, o, e in res if not o and e)
     return ok, errs
@@ -625,28 +674,31 @@ def _wecom_menu_check(menu):
 
 
 def wecom_menu_apply():
-    """把 _WECOM_MENU 推到企微（自定义菜单 create 是覆盖式）。返回 (ok, msg)。"""
+    """把 _WECOM_MENU 推到企微（自定义菜单 create 是覆盖式）。返回 (ok, msg)。
+
+    v2.9.7：结果记进 _wecom_menu_last，设置页可回显「菜单最后一次下发成功没、
+    用的是哪个面板地址」——否则改了面板地址没重下发，菜单会一直指旧地址。"""
     c = _wecom_cfg()
     if not c['agentid']:
-        return False, '未配置 AgentId'
+        return _menu_record(False, '未配置 AgentId')
     if not c['panel']:
-        return False, '未配置「面板公网地址」（菜单第一项要用）'
+        return _menu_record(False, '未配置「面板公网地址」（菜单第一项要用）')
     tok, err = wecom_token()
     if not tok:
-        return False, err
+        return _menu_record(False, err)
     menu = json.loads(json.dumps(_WECOM_MENU))
     menu['button'][0]['url'] = c['panel'] + '/'
     _e = _wecom_menu_check(menu)
     if _e:
-        return False, _e
+        return _menu_record(False, _e)
     try:
         d = _wecom_http('%s/cgi-bin/menu/create?access_token=%s&agentid=%s'
                         % (_WECOM_BASE, tok, c['agentid']), menu)
     except Exception as e:
-        return False, '菜单请求失败：%s' % str(e)[:100]
+        return _menu_record(False, '菜单请求失败：%s' % str(e)[:100])
     if d.get('errcode') == 0:
-        return True, '菜单已下发（企微端需重新进入应用生效）'
-    return False, '%s %s' % (d.get('errcode'), d.get('errmsg'))
+        return _menu_record(True, '菜单已下发 → %s/（企微端需重新进入应用生效）' % c['panel'])
+    return _menu_record(False, '%s %s' % (d.get('errcode'), d.get('errmsg')))
 
 
 # ---------- 回调消息处理 ----------
@@ -3251,7 +3303,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.6', 'readonly': False,
+                'version': 'v2.9.7', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -3337,7 +3389,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _do_settings_get(self):
+    def _do_settings_get(self, extra=None):
         d = dict(SETTINGS)
         if d.get('webhook_url'):        # 脱敏展示：协议+域名+尾部4位
             m = re.match(r'^(https?://[^/]+/)(.*)$', d['webhook_url'])
@@ -3353,8 +3405,11 @@ class Handler(BaseHTTPRequestHandler):
             d[_k + '_set'] = bool(d.get(_k))
             d.pop(_k, None)
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
+        d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
         d['settings_path'] = SETTINGS_PATH
+        if extra:
+            d.update(extra)
         return self._send(200, json.dumps(d, ensure_ascii=False).encode())
 
     def _do_settings_post(self):
@@ -3363,7 +3418,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, '{"error":"bad body"}'.encode())
         if 'webhook_url' in b and isinstance(b['webhook_url'], str):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
-        for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
+        for k in ('push_enabled', 'feishu_enabled', 'alert_500_enabled', 'alert_speed_enabled',
+                  'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
                   'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
                   'wecom_enabled'):
@@ -3421,6 +3477,7 @@ class Handler(BaseHTTPRequestHandler):
         # v2.9.5 企业微信：非密字段直写；三件套「空值或掩码 = 保留原值」
         # （否则「不动表单直接保存」会把已存好的 Secret/Token/AESKey 覆盖成掩码串）
         _w_before = (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret'))
+        _panel_before = (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')
         for _k in ('wecom_corpid', 'wecom_agentid', 'wecom_touser', 'wecom_api_proxy'):
             if _k in b and isinstance(b[_k], str):
                 SETTINGS[_k] = b[_k].strip()
@@ -3439,7 +3496,19 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._send(500, json.dumps({'error': f'保存失败：{e}'[:120]},
                                               ensure_ascii=False).encode())
-        return self._do_settings_get()
+        # v2.9.7：企微菜单是「下发即固化」的，改了面板地址不重下发，菜单会一直指旧地址
+        # （用户 09-27 踩到：设置里改成新域名，菜单里还是旧的）。这里检测到变化就自动重下发。
+        _extra = None
+        _panel_now = (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')
+        if _panel_now != _panel_before:
+            if not _panel_now:
+                _extra = {'menu_msg': '面板公网地址已清空，未重下发菜单（菜单第一项需要它）'}
+            elif not SETTINGS.get('wecom_enabled'):
+                _extra = {'menu_msg': '面板公网地址已改，但企微通道未开启，未重下发菜单'}
+            else:
+                _mok, _mmsg = wecom_menu_apply()
+                _extra = {'menu_msg': ('菜单已自动重下发：' if _mok else '菜单重下发失败：') + _mmsg}
+        return self._do_settings_get(_extra)
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
@@ -3463,7 +3532,8 @@ class Handler(BaseHTTPRequestHandler):
                                               ensure_ascii=False).encode())
         if p == '/api/wecom-menu':        # v2.9.5：一键下发/覆盖自定义菜单
             ok, msg = wecom_menu_apply()
-            return self._send(200, json.dumps({'ok': ok, 'msg': msg},
+            return self._send(200, json.dumps({'ok': ok, 'msg': msg,
+                                               'menu_last': dict(_wecom_menu_last)},
                                               ensure_ascii=False).encode())
         if p == '/api/wecom-test':        # v2.9.5：只测企微这一路（不惊动飞书）
             c = _wecom_cfg()
@@ -3676,7 +3746,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.6，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.7，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
