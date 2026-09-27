@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.12 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.13 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -553,9 +553,8 @@ def wecom_token(force: bool = False):
 
 # 企微应用消息的字节上限（官方口径，UTF-8，一个汉字 3 字节）：
 _WECOM_TEXT_MAX = 2048       # text.content
-_WECOM_TC_TITLE_MAX = 128    # textcard.title
-_WECOM_TC_DESC_MAX = 512     # textcard.description
-_WECOM_TC_BTNTXT = '打开面板'  # textcard.btntxt，官方限 4 个汉字
+_WECOM_TC_TITLE_MAX = 128    # news 每条 article.title
+_WECOM_TC_DESC_MAX = 512     # news 第一条 article.description（微信端只有第一条带描述）
 
 
 def _wecom_trim(s: str, limit: int) -> str:
@@ -598,19 +597,22 @@ def _wecom_drop_dup_head(body: str, title: str) -> str:
 def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = None):
     """企业微信应用消息。返回 (ok, err)。
 
-    v2.9.9 换 msgtype（重要）：v2.9.7 起这里发的是 markdown——在**企业微信 App**
-    显示正常，但在**微信 App（微信插件）**一律只显示一行
-    「暂不支持此消息类型，请在企业微信中查看」。2026-09-27 三组对照实验（同一接收人，
-    只改 msgtype）结论：
-        markdown  → 微信端「暂不支持」   （企业微信端正常）
-        text      → 两端都正常显示
-        textcard  → 两端都正常显示（卡片形态：标题 + 描述 + 可点 URL）
-    所以这里不再发 markdown：
-      · 有标题 + 有可点 URL + 描述塞得进 512 字节 → textcard（卡片观感，最接近飞书卡片）；
-      · 否则 → text（2048 字节，按字节裁；链接行与「推送时间」页脚永远保留）。
+    msgtype 选型（都是 2026-09-27 在真机上对照实验定的）：
 
-    链接行由 buttons 生成（卡片按钮 → 文本链接行），页脚追加推送时间——
-    这两点沿用 v2.9.7 对齐飞书的做法。
+    | msgtype | 企业微信 App | 微信 App（微信插件） |
+    |---|---|---|
+    | `markdown` | 正常 | ❌「暂不支持此消息类型」 |
+    | `text` | 正常 | 正常，但**不渲染 markdown**（`**粗体**`/`[名字](url)` 原样露出） |
+    | `textcard` | 正常 | 正常（标题 + 描述 + 一个可点 URL） |
+    | `news` | 正常 | 正常（第一条=标题+描述，之后每条=一行**可点名字**） |
+
+    所以：
+      ① **有标题或有链接，且正文放得进 512 字节 → `news`**：第一条放标题+正文+推送时间，
+         每个链接各占一条「可点名字」。微信端**只渲染每条的 title**（第一条额外带 description），
+         所以链接必须单独成条——这也是微信端唯一能做到「卡片外观 + 多个可点名字」的形态，
+         观感与企业微信端一致。
+      ② 其余（正文超 512 字节 / 既无标题又无链接）→ `text` 兜底：2048 字节按字节裁，
+         链接行与「推送时间」页脚永远保留。
     """
     c = _wecom_cfg()
     if not c['agentid']:
@@ -625,7 +627,6 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
     title = _wecom_plain(title)
     text = _wecom_plain(text)
     btns = [b for b in (buttons or []) if b.get('url')]
-    url = btns[0]['url'] if btns else ''
     # 链接行用纯文本（企微两端都不渲染 markdown，写 [文字](url) 会原样露出来）
     link_line = ' · '.join('%s %s' % (b.get('text', '打开'), b['url']) for b in btns)
 
@@ -640,22 +641,21 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
     # v2.9.11 只判了 'ETKN 告警'，漏掉「✅ ETKN 整理任务已清空…」这种（实际踩到过）。
     body = _wecom_drop_dup_head(text, title)
 
-    # ---- 方案一：textcard（描述 512 字节内）----
-    desc = '%s\n%s' % (body, ts) if not link_line else '%s\n%s\n%s' % (body, link_line, ts)
-    if title and url and len(desc.encode('utf-8')) <= _WECOM_TC_DESC_MAX:
-        payload = {'touser': touser, 'msgtype': 'textcard', 'agentid': aid,
-                   'textcard': {'title': _wecom_trim(title, _WECOM_TC_TITLE_MAX),
-                                'description': desc, 'url': url,
-                                'btntxt': _WECOM_TC_BTNTXT}, 'safe': 0}
-    else:
-        # ---- 方案二：text（2048 字节；先给页脚留位再裁正文）----
-        # v2.9.11 起这里也用去重后的 body（原来用 text，导致标题与正文首行重复）
-        plain = ('%s\n%s' % (title, body)) if title else text
-        if link_line:
-            plain = '%s\n\n%s' % (plain, link_line)
-        room = _WECOM_TEXT_MAX - len(ts.encode('utf-8')) - 2   # 2 = 分隔的两个换行
-        payload = {'touser': touser, 'msgtype': 'text', 'agentid': aid,
-                   'text': {'content': '%s\n\n%s' % (_wecom_trim(plain, room), ts)}, 'safe': 0}
+    # ---- ① news：卡片 + 可点名字（链接各占一条）----
+    desc = ('%s\n%s' % (body, ts)) if body else ts
+    if (title or btns) and len(desc.encode('utf-8')) <= _WECOM_TC_DESC_MAX:
+        arts = [{'title': _wecom_trim(title, _WECOM_TC_TITLE_MAX) or 'ETKN 监控',
+                 'description': desc, 'url': _panel_base()}]
+        arts += [{'title': b.get('text', '打开')[:40], 'url': b['url']} for b in btns[:7]]
+        return wecom_push_news(arts, touser=touser)
+
+    # ---- ② text 兜底（2048 字节；先给页脚留位再裁正文）----
+    plain = ('%s\n%s' % (title, body)) if title else text
+    if link_line:
+        plain = '%s\n\n%s' % (plain, link_line)
+    room = _WECOM_TEXT_MAX - len(ts.encode('utf-8')) - 2   # 2 = 分隔的两个换行
+    payload = {'touser': touser, 'msgtype': 'text', 'agentid': aid,
+               'text': {'content': '%s\n\n%s' % (_wecom_trim(plain, room), ts)}, 'safe': 0}
 
     def _once(t):
         try:
@@ -3586,7 +3586,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.12', 'readonly': False,
+                'version': 'v2.9.13', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -3834,7 +3834,8 @@ class Handler(BaseHTTPRequestHandler):
                                              ['本条由设置页「测试企业微信」触发',
                                               '收到说明 gettoken + message/send 全通'],
                                              icon='ℹ️'),
-                                 title='ℹ️ 企业微信通道自检')
+                                 title='ℹ️ 企业微信通道自检',
+                                 buttons=_card_buttons())
             return self._send(200, json.dumps({'ok': ok, 'token': True, 'agentid': c['agentid'],
                                                'touser': c['touser'], 'err': err,
                                                'last': dict(_wecom_last)},
@@ -4064,7 +4065,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.12，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.13，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
