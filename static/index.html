@@ -343,9 +343,12 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
             <div><label>SSH 密码</label><input type="password" id="cfgRtrPass" placeholder="留空=不修改"></div>
           </div></div>
         <div class="setrow"><label>hosts 自动更新<span class="why">漂移时改行+重启 dnsmasq</span></label><label class="switch"><input type="checkbox" id="cfgHosts"><span class="slider"></span></label></div>
-        <div class="stickybar"><button class="act lnk" onclick="tglAll(true)">全部展开</button><button class="act lnk" onclick="tglAll(false)">全部收起</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button></div>
-        <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
       </div>
+      <!-- v2.9.17：这排按钮和下面那行说明**必须在 #cfgForm 之外**——
+           抽屉是按「setgroup 之后的兄弟节点」收起的，留在里面就会被算进【hosts】分组，
+           一收起【hosts】连「保存设置」都看不见了（用户报的）。 -->
+      <div class="stickybar"><button class="act lnk" onclick="tglAll(true)">全部展开</button><button class="act lnk" onclick="tglAll(false)">全部收起</button><button class="act" id="btnCfgTest" onclick="cfgTestPush()">发送测试推送</button><button class="act" id="btnCfgSave" onclick="cfgSave()">保存设置</button></div>
+      <div class="sub" style="margin-top:8px">设置保存到本地配置文件，重启容器后保留生效；所有告警仅异常时推送，正常完全静默；共享中心因已知证书问题不参与自动告警（手动测速保留）。</div>
     </div>
   </div>
 </div>
