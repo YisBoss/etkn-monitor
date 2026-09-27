@@ -21,6 +21,7 @@ v2.3.1 说明（滞后修复）：
 v2.1/v2.2/v2.3 功能（重试收敛/手动整理/异常明细/手动操作卡/主题）不变。
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ import secrets
 import shlex
 import socket
 import ssl
+import struct
 import subprocess
 import threading
 import time
@@ -152,6 +154,16 @@ SETTINGS_DEFAULTS = {
     'auto_restart_enabled': False, # 自动重启开关（默认关）
     # ---- v2.7 卡片按钮可配置（六）：[{'text','url'}]，空/非法剔除，≤6 个 ----
     'card_links': CARD_LINKS_DEFAULT,
+    # ---- v2.9.5 企业微信自建应用（通知渠道 + 回调 + 自定义菜单） ----
+    'wecom_enabled': False,        # 企微渠道总开关（与飞书 webhook 各自独立，可同时开）
+    'wecom_corpid': '',            # 企业ID（ww 开头）
+    'wecom_agentid': '',           # 应用 AgentId
+    'wecom_secret': '',            # 应用 Secret（不回传前端；留空=不修改）
+    'wecom_token': '',             # 回调 Token（不回传前端；留空=不修改）
+    'wecom_aeskey': '',            # 回调 EncodingAESKey（不回传前端；留空=不修改）
+    'wecom_touser': '@all',        # 默认接收人（@all，或 userid 多个用 | 分隔）
+    'wecom_api_proxy': '',         # 调企微 API 走的 HTTP 代理（对齐「企业可信IP」用，空=直连）
+    'wecom_panel_url': '',         # 面板公网地址（菜单「打开面板」用，如 https://etknjk.relay.example.com:666）
 }
 
 
@@ -302,15 +314,438 @@ def _alert_push(kind: str, kind_line: str, detail_lines: list, buttons: list = N
                 tcolor: str = 'yellow'):
     """v2.6 卡片化告警推送：文本口径不变，加标题/按钮。
     v2.8.7：标题图标随卡片颜色走——绿=✅成功通知、黄=⚠️告警、蓝=ℹ️信息；
-    文本首行同步（推送史/纯文本通道口径一致）。失败/限流仍黄三角，成功才绿对勾。"""
+    文本首行同步（推送史/纯文本通道口径一致）。失败/限流仍黄三角，成功才绿对勾。
+    v2.9.5：新增企业微信通道——wecom_enabled 打开时同时推一条应用消息。
+    两通道互相独立：任一条送达即算成功，两边都挂才记失败（错误里带企微原因）。"""
     icon = {'green': '✅', 'blue': 'ℹ️'}.get(tcolor, '⚠️')
     text = _alert_text(kind_line, detail_lines, icon=icon)
-    if buttons:
-        ok, err = feishu_push(text, buttons=buttons, title=f'{icon} ' + kind_line, tcolor=tcolor)
-    else:
-        ok, err = feishu_push(text)
+    ok, err = push_both(text, buttons=buttons, title=f'{icon} ' + kind_line, tcolor=tcolor)
     record_push(kind, text, ok, err)
     return ok, err
+
+
+# ============ v2.9.5 企业微信自建应用（应用消息 / 回调验签解密 / 自定义菜单） ============
+# 为什么自带 AES：镜像是 python:3.12-alpine，没有 cryptography / pycryptodome，
+# 而企微回调的 echostr 校验与消息解密必须用 AES-256-CBC。这里内嵌一份纯 Python 实现，
+# 保持本仓库「单文件、零第三方依赖」的风格（已用 FIPS-197 C.3 与 NIST SP800-38A
+# CBC-AES256 官方向量自检通过），不引入镜像构建依赖。
+
+_AES_SBOX = bytes.fromhex(
+    '637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0'
+    'b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b275'
+    '09832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cf'
+    'd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2'
+    'cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdb'
+    'e0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08'
+    'ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9e'
+    'e1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16')
+_AES_ISBOX = [0] * 256
+for _i, _v in enumerate(_AES_SBOX):
+    _AES_ISBOX[_v] = _i
+_AES_RCON = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36, 0x6C, 0xD8, 0xAB, 0x4D)
+
+
+def _aes_mul(a, b):
+    r = 0
+    while b:
+        if b & 1:
+            r ^= a
+        a = (a << 1) ^ 0x1B if a & 0x80 else (a << 1)
+        a &= 0xFF
+        b >>= 1
+    return r
+
+
+def _aes_expand(key: bytes):
+    """AES-256 密钥扩展（Nk=8, Nr=14），返回 15 个轮密钥。"""
+    nk, nr, w = 8, 14, [list(key[i * 4:i * 4 + 4]) for i in range(8)]
+    for i in range(nk, 4 * (nr + 1)):
+        t = list(w[i - 1])
+        if i % nk == 0:
+            t = [(_AES_SBOX[x] if j else (_AES_SBOX[t[1]] ^ _AES_RCON[i // nk - 1]))
+                 for j, x in enumerate(t[1:] + t[:1])]
+        elif i % nk == 4:
+            t = [_AES_SBOX[x] for x in t]
+        w.append([w[i - nk][j] ^ t[j] for j in range(4)])
+    return [bytes(b for word in w[4 * r:4 * r + 4] for b in word) for r in range(nr + 1)]
+
+
+def _aes_shift(s, inv=False):
+    out = list(s)
+    for r in range(1, 4):
+        row = [s[r + 4 * c] for c in range(4)]
+        row = (row[-r:] + row[:-r]) if inv else (row[r:] + row[:r])
+        for c in range(4):
+            out[r + 4 * c] = row[c]
+    return out
+
+
+def _aes_mix(s, inv=False):
+    m = (((14, 11, 13, 9), (9, 14, 11, 13), (13, 9, 14, 11), (11, 13, 9, 14)) if inv
+         else ((2, 3, 1, 1), (1, 2, 3, 1), (1, 1, 2, 3), (3, 1, 1, 2)))
+    out = [0] * 16
+    for c in range(4):
+        col = [s[r + 4 * c] for r in range(4)]
+        for r in range(4):
+            out[r + 4 * c] = (_aes_mul(col[0], m[r][0]) ^ _aes_mul(col[1], m[r][1]) ^
+                              _aes_mul(col[2], m[r][2]) ^ _aes_mul(col[3], m[r][3]))
+    return out
+
+
+def _aes_block(block, rks, enc):
+    box, n = (_AES_SBOX, 14) if enc else (_AES_ISBOX, 14)
+    s = [block[i] ^ rks[0][i] for i in range(16)] if enc else [block[i] ^ rks[14][i] for i in range(16)]
+    rng = range(1, 14) if enc else range(13, 0, -1)
+    for r in rng:
+        if enc:
+            s = [x ^ y for x, y in zip(_aes_mix(_aes_shift([box[v] for v in s])), rks[r])]
+        else:
+            s = _aes_shift([box[v] for v in s], inv=True)
+            s = [x ^ y for x, y in zip(s, rks[r])]
+            s = _aes_mix(s, inv=True)
+    if enc:
+        s = [x ^ y for x, y in zip(_aes_shift([box[v] for v in s]), rks[n])]
+    else:
+        s = _aes_shift([box[v] for v in s], inv=True)
+        s = [x ^ y for x, y in zip(s, rks[0])]
+    return bytes(s)
+
+
+def _aes_cbc(key: bytes, iv: bytes, data: bytes, enc: bool):
+    rks, out, prev = _aes_expand(key), bytearray(), iv
+    for i in range(0, len(data), 16):
+        blk = data[i:i + 16]
+        if enc:
+            prev = _aes_block(bytes(a ^ b for a, b in zip(blk, prev)), rks, True)
+            out += prev
+        else:
+            out += bytes(a ^ b for a, b in zip(_aes_block(blk, rks, False), prev))
+            prev = blk
+    return bytes(out)
+
+
+# ---------- 企微回调加解密（对标官方 WXBizMsgCrypt） ----------
+def _wecom_pkcs7(data: bytes, bs: int = 32):
+    if not data:
+        return data
+    pad = data[-1]
+    return data[:-pad] if 1 <= pad <= bs and len(data) > pad else data
+
+
+def _wecom_aeskey(k: str) -> bytes:
+    return base64.b64decode((k or '').strip() + '=')
+
+
+def wecom_signature(token: str, timestamp, nonce, encrypt: str) -> str:
+    return hashlib.sha1(''.join(sorted([token, str(timestamp), str(nonce), encrypt]))
+                        .encode('utf-8')).hexdigest()
+
+
+def wecom_decrypt(aeskey: str, encrypt_b64: str, receiveid: str = '') -> str:
+    key = _wecom_aeskey(aeskey)
+    if len(key) != 32:
+        raise ValueError('EncodingAESKey 长度不对（应为 43 字符）')
+    plain = _wecom_pkcs7(_aes_cbc(key, key[:16], base64.b64decode(encrypt_b64), False))
+    if len(plain) < 20:
+        raise ValueError('解密结果过短')
+    n = struct.unpack('>I', plain[16:20])[0]
+    msg, rid = plain[20:20 + n], plain[20 + n:]
+    if receiveid and rid.decode('utf-8', 'replace') != receiveid:
+        raise ValueError('receiveid 不匹配（AESKey 或 企业ID 填错）')
+    return msg.decode('utf-8')
+
+
+def wecom_encrypt(aeskey: str, text: str, receiveid: str = '') -> str:
+    key = _wecom_aeskey(aeskey)
+    body = (os.urandom(16) + struct.pack('>I', len(text.encode('utf-8')))
+            + text.encode('utf-8') + receiveid.encode('utf-8'))
+    n = 32 - (len(body) % 32)
+    body += bytes([n]) * n
+    return base64.b64encode(_aes_cbc(key, key[:16], body, True)).decode()
+
+
+# ---------- 企微 API 客户端 ----------
+_WECOM_BASE = 'https://qyapi.weixin.qq.com'
+_wecom_tok = {'v': '', 'exp': 0.0}
+_wecom_lock = threading.Lock()
+_wecom_last = {'ts': '', 'ok': False, 'err': ''}   # 最近一次发送结果（设置页回显）
+
+
+def _wecom_cfg() -> dict:
+    return {'corpid': (SETTINGS.get('wecom_corpid') or '').strip(),
+            'agentid': str(SETTINGS.get('wecom_agentid') or '').strip(),
+            'secret': (SETTINGS.get('wecom_secret') or '').strip(),
+            'token': (SETTINGS.get('wecom_token') or '').strip(),
+            'aeskey': (SETTINGS.get('wecom_aeskey') or '').strip(),
+            'touser': (SETTINGS.get('wecom_touser') or '').strip() or '@all',
+            'proxy': (SETTINGS.get('wecom_api_proxy') or '').strip(),
+            'panel': (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')}
+
+
+def _wecom_http(url: str, payload=None, timeout: int = 15):
+    """企微 API 请求。wecom_api_proxy 非空时走 HTTP 代理——
+    用途：把调用来源 IP 固定成「企业可信IP」里登记的那个（NAS 直连出网 IP 会漂）。"""
+    px = (SETTINGS.get('wecom_api_proxy') or '').strip()
+    op = (urllib.request.build_opener(urllib.request.ProxyHandler({'http': px, 'https': px}))
+          if px else urllib.request.build_opener())
+    if payload is None:
+        req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+    else:
+        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+                                     headers={'Content-Type': 'application/json'}, method='POST')
+    with op.open(req, timeout=timeout) as r:
+        return json.loads(r.read().decode('utf-8', 'replace') or '{}')
+
+
+def wecom_token(force: bool = False):
+    """access_token 缓存（企微 7200s 有效，提前 300s 刷新）。返回 (token, err)。"""
+    c = _wecom_cfg()
+    if not (c['corpid'] and c['secret']):
+        return '', '未配置 企业ID / Secret'
+    now = time.time()
+    with _wecom_lock:
+        if not force and _wecom_tok['v'] and now < _wecom_tok['exp']:
+            return _wecom_tok['v'], ''
+        try:
+            d = _wecom_http('%s/cgi-bin/gettoken?%s' % (_WECOM_BASE, urllib.parse.urlencode(
+                {'corpid': c['corpid'], 'corpsecret': c['secret']})))
+        except Exception as e:
+            return '', 'gettoken 请求失败：%s' % str(e)[:100]
+        if d.get('errcode') != 0 or not d.get('access_token'):
+            return '', 'gettoken 失败：%s %s' % (d.get('errcode'), d.get('errmsg'))
+        _wecom_tok['v'] = d['access_token']
+        _wecom_tok['exp'] = now + max(60, int(d.get('expires_in') or 7200) - 300)
+        return _wecom_tok['v'], ''
+
+
+def wecom_push(text: str, title: str = '', touser: str = ''):
+    """企业微信应用消息（markdown）。返回 (ok, err)。"""
+    c = _wecom_cfg()
+    if not c['agentid']:
+        return False, '未配置 AgentId'
+    tok, err = wecom_token()
+    if not tok:
+        return False, err
+    content = ('**%s**\n%s' % (title, text)) if title else text
+    payload = {'touser': touser or c['touser'], 'msgtype': 'markdown',
+               'agentid': int(c['agentid']) if c['agentid'].isdigit() else c['agentid'],
+               'markdown': {'content': content[:4000]}, 'safe': 0}
+
+    def _once(t):
+        try:
+            return _wecom_http('%s/cgi-bin/message/send?access_token=%s' % (_WECOM_BASE, t), payload)
+        except Exception as e:
+            return {'errcode': -1, 'errmsg': str(e)[:100]}
+    d = _once(tok)
+    if d.get('errcode') in (40014, 42001, 41001):      # token 失效 → 强刷一次
+        tok, err = wecom_token(force=True)
+        if tok:
+            d = _once(tok)
+    if d.get('errcode') == 0:
+        iu = d.get('invaliduser') or ''
+        ok, e = (True, '') if not iu else (False, '部分接收人无效：%s' % iu)
+    else:
+        ok, e = False, '%s %s' % (d.get('errcode'), d.get('errmsg'))
+    _wecom_last.update({'ts': _now().isoformat(timespec='seconds'), 'ok': ok, 'err': e})
+    return ok, e
+
+
+def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'blue'):
+    """v2.9.5 双通道分发：飞书 webhook + 企业微信应用消息（各自按开关）。
+    返回 (ok, err)——任一条送达即 ok；两条都失败时 err 里带上两边原因。
+    说明：push_enabled 是总开关（各告警线程的闸），wecom_enabled 只是企微这一路的开关；
+    因此「不用飞书、只用企微」时把 webhook_url 留空 + push_enabled 打开即可。"""
+    if buttons:
+        f_ok, f_err = feishu_push(text, buttons=buttons, title=title, tcolor=tcolor)
+    else:
+        f_ok, f_err = feishu_push(text)
+    res = [('飞书', f_ok, f_err)]
+    if SETTINGS.get('wecom_enabled'):
+        w_ok, w_err = wecom_push(text, title=title)
+        res.append(('企微', w_ok, w_err))
+    ok = any(r[1] for r in res)
+    errs = ' / '.join('%s:%s' % (n, e) for n, o, e in res if not o and e)
+    return ok, errs
+
+
+# ---------- 菜单（3 个一级：打开面板 / 查询状态 / 运维操作） ----------
+_WECOM_MENU = {'button': [
+    {'type': 'view', 'name': '📊 打开面板', 'url': ''},
+    {'type': 'click', 'name': '📈 查询状态', 'key': 'STATUS'},
+    {'name': '🔧 运维操作', 'sub_button': [
+        {'type': 'click', 'name': '🔍 检测 TMDB 500', 'key': 'CHECK500'},
+        {'type': 'click', 'name': '⚡ 立即测速', 'key': 'SPEED'},
+        {'type': 'click', 'name': '🌐 重新检测 IP', 'key': 'HOSTS'},
+        {'type': 'click', 'name': '🗂 整理下一批', 'key': 'ORGANIZE'},
+    ]},
+]}
+
+
+def wecom_menu_apply():
+    """把 _WECOM_MENU 推到企微（自定义菜单 create 是覆盖式）。返回 (ok, msg)。"""
+    c = _wecom_cfg()
+    if not c['agentid']:
+        return False, '未配置 AgentId'
+    if not c['panel']:
+        return False, '未配置「面板公网地址」（菜单第一项要用）'
+    tok, err = wecom_token()
+    if not tok:
+        return False, err
+    menu = json.loads(json.dumps(_WECOM_MENU))
+    menu['button'][0]['url'] = c['panel'] + '/'
+    try:
+        d = _wecom_http('%s/cgi-bin/menu/create?access_token=%s&agentid=%s'
+                        % (_WECOM_BASE, tok, c['agentid']), menu)
+    except Exception as e:
+        return False, '菜单请求失败：%s' % str(e)[:100]
+    if d.get('errcode') == 0:
+        return True, '菜单已下发（企微端需重新进入应用生效）'
+    return False, '%s %s' % (d.get('errcode'), d.get('errmsg'))
+
+
+# ---------- 回调消息处理 ----------
+def _xml_field(xml: str, name: str) -> str:
+    m = re.search(r'<%s>\s*(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?\s*</%s>' % (name, name), xml, re.S)
+    return m.group(1).strip() if m else ''
+
+
+def _wecom_status_text() -> str:
+    snap = _state.get('snapshot') or {}
+    fast = _state.get('fast') or {}
+    rec, act, dw = snap.get('records') or {}, fast.get('active') or {}, _dayweek_cache
+    by = act.get('by_kind') or {}
+    _d = dw.get('day') if dw.get('day') is not None else '-'
+    _w = dw.get('week') if dw.get('week') is not None else '-'
+    lines = ['**📈 ETKN 状态** %s' % (_state.get('fast_ts') or snap.get('ts') or '-'),
+             '今日完成 %s 媒体 ｜ 本周完成 %s 媒体' % (_d, _w),
+             '未识别累计 %s ｜ 今日新增 %s' % (rec.get('unrecognized', '-'),
+                                         rec.get('unrecognized_today', '-')),
+             '活跃队列：运行 %s / 排队 %s ｜ 活跃媒体 %s'
+             % (act.get('running', 0), act.get('queued', 0), act.get('media', 0))]
+    for k, v in list(by.items())[:6]:
+        lines.append('· %s 运行%s/排队%s' % (k, v.get('running', 0), v.get('queued', 0)))
+    if dw.get('week') is None:
+        lines.append('（今日/本周统计重建中）')
+    return '\n'.join(lines)
+
+
+_WECOM_HELP = ('**🤖 ETKN 机器人**\n'
+               '直接回复关键词即可：\n'
+               '· `状态` — 今日/本周完成 + 队列\n'
+               '· `菜单` — 显示这条帮助\n'
+               '也可以点应用底部的自定义菜单。')
+
+
+def _wecom_run_action(key: str):
+    """菜单点击/关键词触发的动作，跑在后台线程里，结果用应用消息推回。"""
+    try:
+        if key == 'STATUS':
+            wecom_push(_wecom_status_text())
+        elif key == 'CHECK500':
+            wecom_push('已触发 TMDB 500 检测，结果见随后的告警（无异常则静默）。')
+            check_500()
+        elif key == 'SPEED':
+            wecom_push('已触发链路测速，稍后推送结果…')
+            res = run_speed_round(alert=False) or []
+            if not res:
+                wecom_push('测速未产生结果（可能未配置测速目标）。')
+            else:
+                rows = ['**⚡ 测速结果**']
+                for r in res[:12]:
+                    rows.append('· %s %s%s' % (r.get('host', '-'),
+                                               r.get('ms', '-'),
+                                               ' ms' if r.get('ms') is not None else
+                                               ' ' + str(r.get('error') or '失败')))
+                wecom_push('\n'.join(rows))
+        elif key == 'HOSTS':
+            if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
+                wecom_push('未启用 hosts 监控或未配置域名，已跳过。')
+            else:
+                wecom_push('已触发 hosts 重新检测…')
+                out = _hosts_recheck() or []
+                rows = ['**🌐 hosts 检测结果**']
+                for r in out[:12]:
+                    rows.append('· %s → %s%s' % (r.get('domain', '-'), r.get('ip', '-'),
+                                                 '（已改写）' if r.get('changed') else ''))
+                wecom_push('\n'.join(rows))
+        elif key == 'ORGANIZE':
+            fast = _state.get('fast') or {}
+            by = ((fast.get('active') or {}).get('by_kind') or {})
+            busy = any((by.get(k) or {}).get('running', 0) or (by.get(k) or {}).get('queued', 0)
+                       for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
+            if busy:
+                wecom_push('整理队列非空，未触发。')
+                return
+            s, b = api_post('/api/task-center/tasks/organize-p115/runs',
+                            {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
+                                            'module_key': 'p115_organize',
+                                            'handoff_mode': 'independent'}})
+            if s in (200, 201, 202) and isinstance(b, dict) and b.get('workflow_run_id'):
+                try:
+                    _watch_shell_run(int(b['workflow_run_id']), 'wecom')
+                except Exception:
+                    pass
+                wecom_push('✅ 已触发整理下一批（run %s）。' % b['workflow_run_id'])
+            else:
+                wecom_push('⚠️ 触发整理失败：ETKN 返回 %s %s' % (s, str(b)[:120]))
+        else:
+            wecom_push('未知操作：%s' % key)
+    except Exception as e:
+        try:
+            wecom_push('⚠️ 操作 %s 执行异常：%s' % (key, str(e)[:120]))
+        except Exception:
+            pass
+
+
+def _wecom_handle_msg(xml: str):
+    """收到用户消息/菜单事件后（后台线程）：一律用应用消息主动回复，回调本身返空。"""
+    mtype = _xml_field(xml, 'MsgType')
+    user = _xml_field(xml, 'FromUserName')
+    if mtype == 'event':
+        ev, key = _xml_field(xml, 'Event'), _xml_field(xml, 'EventKey')
+        if ev == 'click':
+            threading.Thread(target=_wecom_run_action, args=(key,), daemon=True).start()
+        elif ev in ('subscribe', 'enter_agent'):
+            wecom_push(_WECOM_HELP, touser=user)
+        return
+    if mtype == 'text':
+        txt = _xml_field(xml, 'Content')
+        if txt in ('状态', 'status', 'STATUS'):
+            wecom_push(_wecom_status_text(), touser=user)
+        else:
+            wecom_push(_WECOM_HELP, touser=user)
+        return
+
+
+def _wecom_callback_verify(query: dict):
+    """GET 回调 URL 校验：验签 → 解密 echostr → 返回明文。返回 (code, body, ctype)。"""
+    g = lambda k: (query.get(k) or [''])[0]
+    c = _wecom_cfg()
+    if not (c['token'] and c['aeskey']):
+        return 500, '未配置回调 Token / EncodingAESKey', 'text/plain; charset=utf-8'
+    if wecom_signature(c['token'], g('timestamp'), g('nonce'), g('echostr')) != g('msg_signature'):
+        return 401, '签名校验失败', 'text/plain; charset=utf-8'
+    try:
+        return 200, wecom_decrypt(c['aeskey'], g('echostr'), c['corpid']), 'text/plain; charset=utf-8'
+    except Exception as e:
+        return 400, '解密失败：%s' % str(e)[:120], 'text/plain; charset=utf-8'
+
+
+def _wecom_callback_msg(raw: str, query: dict):
+    """POST 回调：验签 → 解密 → 后台处理。返回 (code, body)。"""
+    g = lambda k: (query.get(k) or [''])[0]
+    c = _wecom_cfg()
+    enc = _xml_field(raw, 'Encrypt')
+    if not (c['token'] and c['aeskey'] and enc):
+        return 200, b''
+    if wecom_signature(c['token'], g('timestamp'), g('nonce'), enc) != g('msg_signature'):
+        return 401, b''
+    try:
+        xml = wecom_decrypt(c['aeskey'], enc, c['corpid'])
+    except Exception:
+        return 200, b''
+    threading.Thread(target=_wecom_handle_msg, args=(xml,), daemon=True).start()
+    return 200, b''
 
 
 # ================= v2.8 CD2 WebDAV 客户端（喂料通道） =================
@@ -1491,8 +1926,8 @@ def check_organize_running(now=None):
                 btns = _card_buttons(tok)
                 lines.append('（30 分钟内有效，点击「整理下一批」确认后触发）')
             text = '\n'.join(lines)
-            ok, err = feishu_push(text, buttons=btns,
-                                  title='✅ 整理任务已清空', tcolor='green')
+            ok, err = push_both(text, buttons=btns,
+                                title='✅ 整理任务已清空', tcolor='green')
             record_push('clear', text, ok, err)
             _organize_state['last_clear_at'] = now
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
@@ -2735,7 +3170,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        p = urllib.parse.urlparse(self.path).path
+        u = urllib.parse.urlparse(self.path)
+        p = u.path
+        if p == '/wecom/callback':        # v2.9.5 企微回调 URL 校验（GET 回明文 echostr）
+            code, body, ctype = _wecom_callback_verify(urllib.parse.parse_qs(u.query))
+            return self._send(code, body.encode('utf-8'), ctype)
         if p in ('/', '/index.html'):
             try:
                 with open(os.path.join(STATIC, 'index.html'), 'rb') as f:
@@ -2764,11 +3203,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.4.1', 'readonly': False,
+                'version': 'v2.9.5', 'readonly': False,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
-                            'trigger-organize'],
+                            'trigger-organize', 'wecom-test', 'wecom-menu'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -2859,6 +3298,13 @@ class Handler(BaseHTTPRequestHandler):
         d.pop('cd2_pass', None)         # v2.8：CD2 密码永不回传前端（留空=不修改）
         d['router_pass_set'] = bool(d.get('router_pass'))  # v2.8.10：掩码态回传
         d.pop('router_pass', None)      # v2.8.10：路由器 SSH 密码同样不回传
+        # v2.9.5 企微三件套（Secret / 回调 Token / EncodingAESKey）永不回传前端，
+        # 只回「是否已配置」布尔位；前端对应输入框留空 = 不修改（照抄 cd2_pass 模式）。
+        for _k in ('wecom_secret', 'wecom_token', 'wecom_aeskey'):
+            d[_k + '_set'] = bool(d.get(_k))
+            d.pop(_k, None)
+        d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
+        d['wecom_callback_path'] = '/wecom/callback'
         d['settings_path'] = SETTINGS_PATH
         return self._send(200, json.dumps(d, ensure_ascii=False).encode())
 
@@ -2870,7 +3316,8 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
         for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-                  'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled'):
+                  'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
+                  'wecom_enabled'):
             if k in b:
                 SETTINGS[k] = bool(b[k])
         for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
@@ -2922,6 +3369,22 @@ class Handler(BaseHTTPRequestHandler):
             SETTINGS['router_user'] = b['router_user'].strip()
         if 'router_pass' in b and isinstance(b['router_pass'], str):
             SETTINGS['router_pass'] = b['router_pass']   # 空串=清空；掩码回传不外泄
+        # v2.9.5 企业微信：非密字段直写；三件套「空值或掩码 = 保留原值」
+        # （否则「不动表单直接保存」会把已存好的 Secret/Token/AESKey 覆盖成掩码串）
+        _w_before = (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret'))
+        for _k in ('wecom_corpid', 'wecom_agentid', 'wecom_touser', 'wecom_api_proxy'):
+            if _k in b and isinstance(b[_k], str):
+                SETTINGS[_k] = b[_k].strip()
+        if 'wecom_panel_url' in b and isinstance(b['wecom_panel_url'], str):
+            _u = b['wecom_panel_url'].strip().rstrip('/')
+            if not _u or _u.startswith(('http://', 'https://')):
+                SETTINGS['wecom_panel_url'] = _u
+        for _k in ('wecom_secret', 'wecom_token', 'wecom_aeskey'):
+            _v = b.get(_k)
+            if isinstance(_v, str) and _v.strip() and '***' not in _v:
+                SETTINGS[_k] = _v.strip()
+        if (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret')) != _w_before:
+            _wecom_tok['v'] = ''        # 换了企业/应用 → 缓存的 access_token 立即作废
         try:
             settings_save()
         except Exception as e:
@@ -2930,17 +3393,43 @@ class Handler(BaseHTTPRequestHandler):
         return self._do_settings_get()
 
     def do_POST(self):
-        p = urllib.parse.urlparse(self.path).path
+        u = urllib.parse.urlparse(self.path)
+        p = u.path
+        if p == '/wecom/callback':        # v2.9.5 企微回调（用户消息 / 菜单点击事件）
+            _n = int(self.headers.get('Content-Length') or 0)
+            _raw = self.rfile.read(_n).decode('utf-8', 'replace') if _n else ''
+            code, body = _wecom_callback_msg(_raw, urllib.parse.parse_qs(u.query))
+            return self._send(code, body)
         if p == '/api/settings':
             return self._do_settings_post()
         if p == '/api/test-push':
-            text = _alert_text('测试推送', ['设置页手动触发 · 验证 Webhook 链路',
-                                    '收到本条说明 etkn-monitor → 飞书 推送链路可达',
-                                    'v2.6：本条为交互卡片，按钮可在飞书内置浏览器打开'])
-            ok, err = feishu_push(text, buttons=_card_buttons(),
-                                  title='✅ 测试推送', tcolor='blue')
+            text = _alert_text('测试推送', ['设置页手动触发 · 验证推送链路',
+                                    '飞书：收到本条说明 Webhook 可达',
+                                    '企微：收到本条说明应用消息可达',
+                                    'v2.6：飞书侧为交互卡片，按钮可在内置浏览器打开'])
+            ok, err = push_both(text, buttons=_card_buttons(),
+                                title='✅ 测试推送', tcolor='blue')
             record_push('test', text, ok, err)
             return self._send(200, json.dumps({'ok': ok, 'err': err},
+                                              ensure_ascii=False).encode())
+        if p == '/api/wecom-menu':        # v2.9.5：一键下发/覆盖自定义菜单
+            ok, msg = wecom_menu_apply()
+            return self._send(200, json.dumps({'ok': ok, 'msg': msg},
+                                              ensure_ascii=False).encode())
+        if p == '/api/wecom-test':        # v2.9.5：只测企微这一路（不惊动飞书）
+            c = _wecom_cfg()
+            tok, terr = wecom_token()
+            if not tok:
+                return self._send(200, json.dumps({'ok': False, 'token': False, 'err': terr},
+                                                  ensure_ascii=False).encode())
+            ok, err = wecom_push(_alert_text('企微通道自检',
+                                             ['本条由设置页「测试企业微信」触发',
+                                              '收到说明 gettoken + message/send 全通'],
+                                             icon='ℹ️'),
+                                 title='ℹ️ 企业微信通道自检')
+            return self._send(200, json.dumps({'ok': ok, 'token': True, 'agentid': c['agentid'],
+                                               'touser': c['touser'], 'err': err,
+                                               'last': dict(_wecom_last)},
                                               ensure_ascii=False).encode())
         if p == '/api/hosts-check':
             # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
@@ -3138,7 +3627,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.4.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.5，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
