@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.13 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.14 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -553,8 +553,9 @@ def wecom_token(force: bool = False):
 
 # 企微应用消息的字节上限（官方口径，UTF-8，一个汉字 3 字节）：
 _WECOM_TEXT_MAX = 2048       # text.content
-_WECOM_TC_TITLE_MAX = 128    # news 每条 article.title
-_WECOM_TC_DESC_MAX = 512     # news 第一条 article.description（微信端只有第一条带描述）
+_WECOM_TC_TITLE_MAX = 128    # textcard.title
+_WECOM_TC_DESC_MAX = 512     # textcard.description
+_WECOM_TC_BTNTXT = '打开面板'  # textcard.btntxt，官方限 4 个汉字
 
 
 def _wecom_trim(s: str, limit: int) -> str:
@@ -597,22 +598,25 @@ def _wecom_drop_dup_head(body: str, title: str) -> str:
 def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = None):
     """企业微信应用消息。返回 (ok, err)。
 
-    msgtype 选型（都是 2026-09-27 在真机上对照实验定的）：
+    msgtype 选型（2026-09-27 真机对照实验定的）：
 
     | msgtype | 企业微信 App | 微信 App（微信插件） |
     |---|---|---|
     | `markdown` | 正常 | ❌「暂不支持此消息类型」 |
     | `text` | 正常 | 正常，但**不渲染 markdown**（`**粗体**`/`[名字](url)` 原样露出） |
-    | `textcard` | 正常 | 正常（标题 + 描述 + 一个可点 URL） |
-    | `news` | 正常 | 正常（第一条=标题+描述，之后每条=一行**可点名字**） |
+    | `textcard` | 正常（标题 + 描述 + 一个可点 URL） | 正常（同上） |
+    | `news` | 正常（标题 + 描述 + 一行行可点名字） | ⚠️ **公众号图文版式**：大图占位 + 标题横幅，**description 不显示** |
 
-    所以：
-      ① **有标题或有链接，且正文放得进 512 字节 → `news`**：第一条放标题+正文+推送时间，
-         每个链接各占一条「可点名字」。微信端**只渲染每条的 title**（第一条额外带 description），
-         所以链接必须单独成条——这也是微信端唯一能做到「卡片外观 + 多个可点名字」的形态，
-         观感与企业微信端一致。
-      ② 其余（正文超 512 字节 / 既无标题又无链接）→ `text` 兜底：2048 字节按字节裁，
-         链接行与「推送时间」页脚永远保留。
+    🔴 v2.9.13 踩过的坑（**别再来一遍**）：把告警改成 `news` 之后，`news` 在**部分客户端**
+    会被渲染成「公众号图文」——顶上一个大图占位（没配 `picurl` 就是空白块）、标题压在灰底横幅上、
+    **正文 description 整段不显示**。告警的关键信息（入库数/耗时/队列）就这样丢了。
+
+    所以 v2.9.14 定版：
+      ① **告警 → `textcard`**：标题 + 完整正文 + **一个**可点 URL（默认面板；若这条告警带
+         「整理下一批」令牌，URL 直接指向确认页，按钮文案改「确认整理」）——正文两端都能读全。
+      ② 正文超 512 字节 → `text` 兜底：2048 字节按字节裁，链接行与「推送时间」页脚永远保留。
+      ③ **`news` 只给「任务中心」那种「每行自解释」的列表用**（见 wecom_push_news）——
+         那里每行就是一个任务名，不需要正文，图文版式反而合适。
     """
     c = _wecom_cfg()
     if not c['agentid']:
@@ -641,23 +645,27 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
     # v2.9.11 只判了 'ETKN 告警'，漏掉「✅ ETKN 整理任务已清空…」这种（实际踩到过）。
     body = _wecom_drop_dup_head(text, title)
 
-    # ---- ① news：卡片 + 可点名字（链接各占一条）----
+    # ---- ① textcard：标题 + 完整正文 + 一个可点 URL ----
+    # v2.9.14：从 news 改回 textcard。news 在部分客户端走「公众号图文」版式，正文整段丢失。
+    # 这条告警若带「整理下一批」令牌，就把卡片 URL 直接指向确认页（一次点击即到操作页）。
+    act = next((b for b in btns if b.get('text') == '整理下一批'), None)
+    url = (act or {}).get('url') or _panel_base()
+    btntxt = '确认整理' if act else _WECOM_TC_BTNTXT
     desc = ('%s\n%s' % (body, ts)) if body else ts
-    if (title or btns) and len(desc.encode('utf-8')) <= _WECOM_TC_DESC_MAX:
-        arts = [{'title': _wecom_trim(title, _WECOM_TC_TITLE_MAX) or 'ETKN 监控',
-                 'description': desc, 'url': _panel_base()}]
-        arts += [{'title': b.get('text', '打开')[:40], 'url': b['url']} for b in btns[:7]]
-        return wecom_push_news(arts, touser=touser)
-
-    # ---- ② text 兜底（2048 字节；正文先裁，链接行与页脚必须活下来）----
-    # v2.9.13 修：旧写法把「正文 + 链接行」当一整块裁，正文一长链接行就被截没了——
-    # 而链接恰恰是这条消息唯一能操作的东西。现在先算尾巴占多少字节，再从正文里扣。
-    plain = ('%s\n%s' % (title, body)) if title else text
-    tail = ('\n\n%s' % link_line) if link_line else ''
-    tail += '\n\n%s' % ts
-    room = max(0, _WECOM_TEXT_MAX - len(tail.encode('utf-8')))
-    payload = {'touser': touser, 'msgtype': 'text', 'agentid': aid,
-               'text': {'content': _wecom_trim(plain, room) + tail}, 'safe': 0}
+    if title and len(desc.encode('utf-8')) <= _WECOM_TC_DESC_MAX:
+        payload = {'touser': touser, 'msgtype': 'textcard', 'agentid': aid,
+                   'textcard': {'title': _wecom_trim(title, _WECOM_TC_TITLE_MAX),
+                                'description': desc, 'url': url, 'btntxt': btntxt}, 'safe': 0}
+    else:
+        # ---- ② text 兜底（2048 字节；正文先裁，链接行与页脚必须活下来）----
+        # v2.9.13 修：旧写法把「正文 + 链接行」当一整块裁，正文一长链接行就被截没了——
+        # 而链接恰恰是这条消息唯一能操作的东西。现在先算尾巴占多少字节，再从正文里扣。
+        plain = ('%s\n%s' % (title, body)) if title else text
+        tail = ('\n\n%s' % link_line) if link_line else ''
+        tail += '\n\n%s' % ts
+        room = max(0, _WECOM_TEXT_MAX - len(tail.encode('utf-8')))
+        payload = {'touser': touser, 'msgtype': 'text', 'agentid': aid,
+                   'text': {'content': _wecom_trim(plain, room) + tail}, 'safe': 0}
 
     def _once(t):
         try:
@@ -682,12 +690,14 @@ def wecom_push_news(articles: list, touser: str = ''):
     """图文消息（news）——v2.9.10 新增，用于「任务中心」点分类展开子任务。
 
     为什么用 news：只有它能让**每条子任务各带一个可点 URL**（text/textcard 都只有一个
-    URL，template_card 微信端收不到）。2026-09-27 实测：news 在微信 App 与企微 App
-    都能正常渲染。
-    ⚠️ 两个实测到的限制：
+    URL，template_card 微信端收不到）。
+
+    🔴 v2.9.13/14 实测的两个限制（**只适合「每行自解释」的列表，不要拿它发告警**）：
       · articles 最多 8 篇（企微官方），调用方自己保证；
-      · **微信端只渲染每篇的 title**（第一篇额外显示 description），所以 title 必须
-        能独立看懂，不能把关键信息只放在 description 里。
+      · **部分客户端把 news 渲染成「公众号图文」**：第一条变成大图占位（没配 picurl 就是
+        空白块）+ 标题压在灰底横幅上，**description 完全不显示**，其余各条只显示 title。
+        所以每条 title 必须自包含，绝不能把关键信息只放 description——
+        也正因如此，告警改回了 textcard（见 wecom_push）。
     """
     c = _wecom_cfg()
     if not c['agentid']:
@@ -3588,7 +3598,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.13', 'readonly': False,
+                'version': 'v2.9.14', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4067,7 +4077,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.13，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.14，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
