@@ -268,6 +268,17 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
           <div style="flex:1"><div id="clList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button></div></div></div>
         <div class="setrow"><label>外网面板地址<span class="why">空=内网 192.168.1.22:8620</span></label><input type="text" id="cfgTrgBase" placeholder="https://etknjk.example.com" style="max-width:260px"></div>
+        <div class="setgroup" data-g="6">【企业微信】<span class="tgl">收起 ▲</span></div>
+        <div class="setrow"><label>企业微信通知渠道<span class="why">自建应用；与飞书可同时开，任一通道送达即算成功</span></label><label class="switch"><input type="checkbox" id="cfgWxEn"><span class="slider"></span></label></div>
+        <div class="setrow"><label>企业ID / AgentId<span class="why">企业ID 形如 ww…；AgentId 是数字</span></label><div class="setbox"><input type="text" id="cfgWxCorp" placeholder="ww…" style="max-width:230px"><input type="text" id="cfgWxAgent" placeholder="1000011" style="max-width:130px"></div></div>
+        <div class="setrow"><label>应用 Secret<span class="why">只存本机，不回传前端；留空=不修改</span></label><input type="password" id="cfgWxSecret" placeholder="留空=不修改" style="max-width:360px"></div>
+        <div class="setrow"><label>接收人<span class="why">@all 或 userid，多个用 | 分隔</span></label><input type="text" id="cfgWxUser" placeholder="@all" style="max-width:230px"></div>
+        <div class="setrow"><label>回调 Token<span class="why">企微后台「接收消息服务器配置」里的 Token；留空=不修改</span></label><input type="text" id="cfgWxToken" placeholder="留空=不修改" style="max-width:360px"></div>
+        <div class="setrow"><label>EncodingAESKey<span class="why">43 位；留空=不修改</span></label><input type="password" id="cfgWxAes" placeholder="留空=不修改" style="max-width:360px"></div>
+        <div class="setrow"><label>面板公网地址<span class="why">菜单「打开面板」用</span></label><input type="text" id="cfgWxPanel" placeholder="https://etknjk.relay.example.com:666" style="max-width:320px" oninput="wxSyncCb()"></div>
+        <div class="setrow"><label>API 代理<span class="why">对齐「企业可信IP」；空=直连。NAS 出网 IP 会漂，固定走代理更稳</span></label><input type="text" id="cfgWxProxy" placeholder="http://203.0.113.1:7897" style="max-width:320px"></div>
+        <div class="setrow"><label>回调 URL<span class="why">填到企微后台「接收消息服务器配置」的 URL</span></label><div class="setbox"><input type="text" id="cfgWxCb" readonly style="max-width:430px"><button class="act" onclick="wxCopyCb()">复制</button></div></div>
+        <div class="setrow"><label>菜单 / 自检<span class="why">菜单为覆盖式下发；自检只走企微、不发飞书</span></label><div class="setbox"><button class="act" id="btnWxMenu" onclick="wxMenu()">下发自定义菜单</button><button class="act" id="btnWxTest" onclick="wxTest()">测试企业微信</button><span class="sub" id="wxLast">—</span></div></div>
         <div class="setgroup" data-g="2">【告警】<span class="tgl">收起 ▲</span></div>
         <div class="setrow"><label>TMDB HTTP 500 检测<span class="why">频率+异常才推送</span></label><div class="setbox"><select id="cfgI500"><option value="5">每 5 分钟</option><option value="10">每 10 分钟</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option></select><label class="switch"><input type="checkbox" id="cfgA500"><span class="slider"></span></label><button class="act" id="btnCfg500" onclick="cfgCheck500()">立即检测 500</button></div></div>
         <div class="setrow"><label>队列积压告警<span class="why">任一类型排队 ≥ N 推送</span></label><div class="setbox"><input type="number" id="cfgTbl" min="1"><span class="sub">条</span><label class="switch"><input type="checkbox" id="cfgABl"><span class="slider"></span></label></div></div>
@@ -666,6 +677,22 @@ async function cfgLoad(){
     document.getElementById('cfgRtrPass').placeholder=d.router_pass_set?'已保存（留空=不修改）':'留空=不修改';
     document.getElementById('cfgHosts').checked=!!d.hosts_enabled;
     document.getElementById('cfgAutoRst').checked=!!d.auto_restart_enabled;
+    /* v2.9.5 企业微信 */
+    document.getElementById('cfgWxEn').checked=!!d.wecom_enabled;
+    document.getElementById('cfgWxCorp').value=d.wecom_corpid||'';
+    document.getElementById('cfgWxAgent').value=d.wecom_agentid||'';
+    document.getElementById('cfgWxUser').value=d.wecom_touser||'@all';
+    document.getElementById('cfgWxPanel').value=d.wecom_panel_url||'';
+    document.getElementById('cfgWxProxy').value=d.wecom_api_proxy||'';
+    document.getElementById('cfgWxSecret').value='';
+    document.getElementById('cfgWxSecret').placeholder=d.wecom_secret_set?'已保存（留空=不修改）':'留空=不修改';
+    document.getElementById('cfgWxToken').value='';
+    document.getElementById('cfgWxToken').placeholder=d.wecom_token_set?'已保存（留空=不修改）':'留空=不修改';
+    document.getElementById('cfgWxAes').value='';
+    document.getElementById('cfgWxAes').placeholder=d.wecom_aeskey_set?'已保存（留空=不修改）':'留空=不修改';
+    wxSyncCb();
+    const _wl=d.wecom_last||{};
+    document.getElementById('wxLast').textContent=_wl.ts?(_wl.ts+' '+( _wl.ok?'✅送达':'❌'+(_wl.err||'失败'))):'—';
   }catch(e){toast('读取设置失败：'+String(e).slice(0,60),'bad');}
 }
 async function cfgSave(){
@@ -707,12 +734,57 @@ async function cfgSave(){
         router_user:document.getElementById('cfgRtrUser').value.trim(),
         router_pass:document.getElementById('cfgRtrPass').value||undefined,
         hosts_enabled:document.getElementById('cfgHosts').checked,
-        auto_restart_enabled:document.getElementById('cfgAutoRst').checked})});
+        auto_restart_enabled:document.getElementById('cfgAutoRst').checked,
+        wecom_enabled:document.getElementById('cfgWxEn').checked,
+        wecom_corpid:document.getElementById('cfgWxCorp').value.trim(),
+        wecom_agentid:document.getElementById('cfgWxAgent').value.trim(),
+        wecom_touser:document.getElementById('cfgWxUser').value.trim()||'@all',
+        wecom_panel_url:document.getElementById('cfgWxPanel').value.trim(),
+        wecom_api_proxy:document.getElementById('cfgWxProxy').value.trim(),
+        wecom_secret:document.getElementById('cfgWxSecret').value||undefined,
+        wecom_token:document.getElementById('cfgWxToken').value||undefined,
+        wecom_aeskey:document.getElementById('cfgWxAes').value||undefined})});
     const d=await r.json();
-    if(r.ok){document.getElementById('cfgUrl').value=d.webhook_url||'';document.getElementById('cfgUrl').placeholder=d.webhook_masked||'…';toast('设置已保存（重启后仍生效）','ok');}
+    if(r.ok){document.getElementById('cfgUrl').value=d.webhook_url||'';document.getElementById('cfgUrl').placeholder=d.webhook_masked||'…';
+      document.getElementById('cfgWxSecret').value='';document.getElementById('cfgWxSecret').placeholder=d.wecom_secret_set?'已保存（留空=不修改）':'留空=不修改';
+      document.getElementById('cfgWxToken').value='';document.getElementById('cfgWxToken').placeholder=d.wecom_token_set?'已保存（留空=不修改）':'留空=不修改';
+      document.getElementById('cfgWxAes').value='';document.getElementById('cfgWxAes').placeholder=d.wecom_aeskey_set?'已保存（留空=不修改）':'留空=不修改';
+      wxSyncCb();toast('设置已保存（重启后仍生效）','ok');}
     else toast('保存失败：'+String(d.error||JSON.stringify(d)).slice(0,100),'bad');
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
   b.disabled=false;b.textContent='保存设置';
+}
+/* v2.9.5 企业微信：回调 URL 预览/复制 + 菜单下发 + 通道自检 */
+function wxCbUrl(){
+  const base=(document.getElementById('cfgWxPanel').value.trim()||location.origin).replace(/\/+$/,'');
+  return base+'/wecom/callback';
+}
+function wxSyncCb(){document.getElementById('cfgWxCb').value=wxCbUrl();}
+function wxCopyCb(){
+  const el=document.getElementById('cfgWxCb');
+  el.removeAttribute('readonly');el.select();
+  let ok=false;
+  try{ok=document.execCommand('copy');}catch(e){}
+  el.setAttribute('readonly','readonly');
+  if(navigator.clipboard&&!ok){navigator.clipboard.writeText(el.value).then(()=>toast('回调 URL 已复制','ok')).catch(()=>toast('请手动复制','bad'));return;}
+  toast(ok?'回调 URL 已复制':'请手动复制','ok');
+}
+async function wxMenu(){
+  const b=document.getElementById('btnWxMenu');b.disabled=true;b.textContent='下发中…';
+  try{
+    const d=await (await fetch('/api/wecom-menu',{method:'POST'})).json();
+    toast(d.ok?'菜单已下发（企微端重新进入应用生效）':'下发失败：'+d.msg, d.ok?'ok':'bad');
+  }catch(e){toast('请求失败：'+String(e).slice(0,60),'bad');}
+  b.disabled=false;b.textContent='下发自定义菜单';
+}
+async function wxTest(){
+  const b=document.getElementById('btnWxTest');b.disabled=true;b.textContent='测试中…';
+  try{
+    const d=await (await fetch('/api/wecom-test',{method:'POST'})).json();
+    if(d.ok)toast('企微测试消息已发出（gettoken 正常）','ok');
+    else toast('失败：'+String(d.err||JSON.stringify(d)).slice(0,110),'bad');
+  }catch(e){toast('请求失败：'+String(e).slice(0,60),'bad');}
+  b.disabled=false;b.textContent='测试企业微信';
 }
 async function cfgTestPush(){
   const b=document.getElementById('btnCfgTest');b.disabled=true;b.textContent='发送中…';
