@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.11 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.12 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -586,6 +586,15 @@ def _wecom_plain(s: str) -> str:
     return s
 
 
+def _wecom_drop_dup_head(body: str, title: str) -> str:
+    """标题已经单独显示了，正文首行若又是同一件事，去掉它（见 wecom_push 里的说明）。"""
+    if not title or '\n' not in body:
+        return body
+    first, rest = body.split('\n', 1)
+    key = re.sub(r'^[^\w]+', '', title).strip()      # 去掉标题开头的 emoji/符号
+    return rest if ('ETKN' in first or (key and key in first)) else body
+
+
 def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = None):
     """企业微信应用消息。返回 (ok, err)。
 
@@ -620,10 +629,16 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
     # 链接行用纯文本（企微两端都不渲染 markdown，写 [文字](url) 会原样露出来）
     link_line = ' · '.join('%s %s' % (b.get('text', '打开'), b['url']) for b in btns)
 
-    # ---- 正文（去掉与卡片标题重复的首行：「⚠️ ETKN 告警 · X」里 X 就是标题）----
-    body = text
-    if title and 'ETKN 告警' in body.split('\n', 1)[0]:
-        body = body.split('\n', 1)[1] if '\n' in body else ''
+    # ---- 正文：去掉与标题重复的首行 ----
+    # 传了 title 的调用点，正文首行都是一句「标题的另一种写法」：
+    #   _alert_push   title「⚠️ 500 检测」      首行「⚠️ ETKN 告警 · 500 检测」
+    #   整理清空       title「✅ 整理任务已清空」  首行「✅ ETKN 整理任务已清空，可以整理下一批」
+    #   测试推送       title「✅ 测试推送」      首行「⚠️ ETKN 告警 · 测试推送」
+    #   企微自检       title「ℹ️ 企业微信通道自检」首行「ℹ️ ETKN 告警 · 企微通道自检」
+    # 注意图标不一定一致（测试推送就是 ✅ 标题配 ⚠️ 正文），所以判定用「含 ETKN」或
+    # 「含标题去掉开头符号后的文字」，两条命中任一即认为是重复首行。
+    # v2.9.11 只判了 'ETKN 告警'，漏掉「✅ ETKN 整理任务已清空…」这种（实际踩到过）。
+    body = _wecom_drop_dup_head(text, title)
 
     # ---- 方案一：textcard（描述 512 字节内）----
     desc = '%s\n%s' % (body, ts) if not link_line else '%s\n%s\n%s' % (body, link_line, ts)
@@ -634,9 +649,7 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
                                 'btntxt': _WECOM_TC_BTNTXT}, 'safe': 0}
     else:
         # ---- 方案二：text（2048 字节；先给页脚留位再裁正文）----
-        # v2.9.11 修：这里原来用 text 而不是去重后的 body，导致 text 分支标题与正文首行
-        # 重复（实际踩到：「测试企业微信」的自检消息显示成
-        # 「ℹ️ 企业微信通道自检 / ℹ️ ETKN 告警 · 企微通道自检 / …」）。
+        # v2.9.11 起这里也用去重后的 body（原来用 text，导致标题与正文首行重复）
         plain = ('%s\n%s' % (title, body)) if title else text
         if link_line:
             plain = '%s\n\n%s' % (plain, link_line)
@@ -3573,7 +3586,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.11', 'readonly': False,
+                'version': 'v2.9.12', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4051,7 +4064,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.11，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.12，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
