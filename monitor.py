@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.7 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.8 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -165,7 +165,8 @@ SETTINGS_DEFAULTS = {
     'wecom_aeskey': '',            # 回调 EncodingAESKey（不回传前端；留空=不修改）
     'wecom_touser': '@all',        # 默认接收人（@all，或 userid 多个用 | 分隔）
     'wecom_api_proxy': '',         # 调企微 API 走的 HTTP 代理（对齐「企业可信IP」用，空=直连）
-    'wecom_panel_url': '',         # 面板公网地址（菜单「打开面板」用，如 https://monitor.example.com）
+    # v2.9.8：原 wecom_panel_url（菜单「看面板」用）已移除——菜单不再有 view 项，
+    #         回调 URL 由前端按当前访问地址生成，无需再配一个面板公网地址。
 }
 
 
@@ -488,8 +489,7 @@ def _wecom_cfg() -> dict:
             'token': (SETTINGS.get('wecom_token') or '').strip(),
             'aeskey': (SETTINGS.get('wecom_aeskey') or '').strip(),
             'touser': (SETTINGS.get('wecom_touser') or '').strip() or '@all',
-            'proxy': (SETTINGS.get('wecom_api_proxy') or '').strip(),
-            'panel': (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')}
+            'proxy': (SETTINGS.get('wecom_api_proxy') or '').strip()}
 
 
 def _notify_state() -> dict:
@@ -637,18 +637,27 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
     return ok, errs
 
 
-# ---------- 菜单（3 个一级：看面板 / 查状态 / 运维操作） ----------
+# ---------- 菜单（3 个一级：查状态 / 运维操作 / 任务中心） ----------
 # ⚠️ 企微限制：一级/二级菜单 name 均**不超过 16 个字节**（UTF-8；一个汉字 3 字节、
 # 一个 emoji 4 字节）——注意是字节不是字符，超了直接 40058 拒收。
 # 下面每个名字都按 ≤16 字节设计，改名字前先 `len(name.encode('utf-8'))` 数一遍。
+# v2.9.8：去掉原第一项「📊看面板」（view）——它和告警消息底部的 markdown 链接重复，
+#         且为它维护「面板公网地址」设置不值当；腾出的位置给「任务中心」。
 _WECOM_MENU = {'button': [
-    {'type': 'view', 'name': '📊看面板', 'url': ''},            # 13B
     {'type': 'click', 'name': '📈查状态', 'key': 'STATUS'},      # 13B
     {'name': '🔧运维操作', 'sub_button': [                       # 16B
         {'type': 'click', 'name': '🔍检测500', 'key': 'CHECK500'},   # 13B
         {'type': 'click', 'name': '⚡立即测速', 'key': 'SPEED'},      # 15B
         {'type': 'click', 'name': '🌐重检IP', 'key': 'HOSTS'},       # 12B
         {'type': 'click', 'name': '📁整理一批', 'key': 'ORGANIZE'},  # 16B
+        {'type': 'click', 'name': '🧹清理临时', 'key': 'CLEAN_TMP'}, # 16B
+    ]},
+    {'name': '📚任务中心', 'sub_button': [                       # 16B
+        {'type': 'click', 'name': '🎬生成封面', 'key': 'GEN_COVERS'},      # 16B
+        {'type': 'click', 'name': '🔄刷新媒体', 'key': 'REFRESH_LIB'},     # 16B
+        {'type': 'click', 'name': '📷补齐截图', 'key': 'FILL_SHOTS'},      # 16B
+        {'type': 'click', 'name': '⭐刷新评分', 'key': 'REFRESH_RATING'},  # 15B
+        {'type': 'click', 'name': '🔁刷新追剧', 'key': 'REFRESH_WATCHLIST'},  # 16B
     ]},
 ]}
 _WECOM_NAME_MAX = 16     # 企微 menu name 字节上限（不是字符数）
@@ -676,18 +685,16 @@ def _wecom_menu_check(menu):
 def wecom_menu_apply():
     """把 _WECOM_MENU 推到企微（自定义菜单 create 是覆盖式）。返回 (ok, msg)。
 
-    v2.9.7：结果记进 _wecom_menu_last，设置页可回显「菜单最后一次下发成功没、
-    用的是哪个面板地址」——否则改了面板地址没重下发，菜单会一直指旧地址。"""
+    v2.9.7：结果记进 _wecom_menu_last，设置页可回显「菜单最后一次下发成功没」。
+    v2.9.8：菜单不再含动态 URL（去掉 view 型「看面板」），下发内容与设置无关，
+            因此也不需要「改设置自动重下发」那套逻辑了。"""
     c = _wecom_cfg()
     if not c['agentid']:
         return _menu_record(False, '未配置 AgentId')
-    if not c['panel']:
-        return _menu_record(False, '未配置「面板公网地址」（菜单第一项要用）')
     tok, err = wecom_token()
     if not tok:
         return _menu_record(False, err)
     menu = json.loads(json.dumps(_WECOM_MENU))
-    menu['button'][0]['url'] = c['panel'] + '/'
     _e = _wecom_menu_check(menu)
     if _e:
         return _menu_record(False, _e)
@@ -697,8 +704,52 @@ def wecom_menu_apply():
     except Exception as e:
         return _menu_record(False, '菜单请求失败：%s' % str(e)[:100])
     if d.get('errcode') == 0:
-        return _menu_record(True, '菜单已下发 → %s/（企微端需重新进入应用生效）' % c['panel'])
+        return _menu_record(True, '菜单已下发（企微端需重新进入应用生效）')
     return _menu_record(False, '%s %s' % (d.get('errcode'), d.get('errmsg')))
+
+
+# ---------- v2.9.8 ETKN 原生任务（面板「任务中心」+ 企微菜单「任务中心」同源） ----------
+# 白名单而非透传：/api/run-task/<key> 会原样转发到 ETKN，
+# 不做白名单等于给面板开了个「任意任务代理」，别人拿到面板地址就能触发删除类任务。
+# 这里只收 toolbox 型、可安全手动触发的维护任务（不含 delete-* / execute-* 等破坏性任务）。
+ETKN_TASK_WHITELIST = {
+    'organize-p115': '手动整理网盘文件',
+    'generate-virtual-library-covers': '生成媒体库封面',
+    'refresh-virtual-libraries': '刷新媒体库',
+    'fill-video-screenshots': '补齐视频截图',
+    'refresh-tmdb-ratings': '刷新 TMDb 评分',
+    'refresh-watchlist': '刷新智能追剧',
+    'cleanup-p115-temp-directory': '清理播放临时目录',
+}
+# 企微菜单 click key → ETKN task_key（与上面白名单同源，改一处即可）
+_WECOM_TASK_KEYS = {
+    'GEN_COVERS': 'generate-virtual-library-covers',
+    'REFRESH_LIB': 'refresh-virtual-libraries',
+    'FILL_SHOTS': 'fill-video-screenshots',
+    'REFRESH_RATING': 'refresh-tmdb-ratings',
+    'REFRESH_WATCHLIST': 'refresh-watchlist',
+    'CLEAN_TMP': 'cleanup-p115-temp-directory',
+}
+
+
+def etkn_run_task(task_key: str):
+    """触发 ETKN 原生任务（toolbox 型，走服务端默认参数）。返回 (ok, msg, status, body)。
+
+    v2.9.8 实测契约（NAS 上真跑过）：
+      POST /api/task-center/tasks/<key>/runs  body {"parameters":{}}
+        → 202 {"workflow_run_id": 53861, "created": true}
+      无效 key → 404 {"detail":"任务不存在"}
+    """
+    if task_key not in ETKN_TASK_WHITELIST:
+        return False, '不在允许的任务白名单内：%s' % task_key, 404, {}
+    s, b = api_post('/api/task-center/tasks/%s/runs' % task_key, {'parameters': {}})
+    rid = b.get('workflow_run_id') if isinstance(b, dict) else None
+    if s in (200, 201, 202) and rid:
+        return True, '已触发（run %s）' % rid, s, b
+    det = ''
+    if isinstance(b, dict):
+        det = str(b.get('detail') or b.get('error') or '')[:120]
+    return False, 'ETKN 返回 %s %s' % (s, det), s, b
 
 
 # ---------- 回调消息处理 ----------
@@ -786,6 +837,16 @@ def _wecom_run_action(key: str):
                 wecom_push('✅ 已触发整理下一批（run %s）。' % b['workflow_run_id'])
             else:
                 wecom_push('⚠️ 触发整理失败：ETKN 返回 %s %s' % (s, str(b)[:120]))
+        elif key in _WECOM_TASK_KEYS:
+            # v2.9.8 任务中心：触发 ETKN 原生任务，结果用应用消息回执
+            tkey = _WECOM_TASK_KEYS[key]
+            name = ETKN_TASK_WHITELIST.get(tkey, tkey)
+            ok, msg, _s, _b = etkn_run_task(tkey)
+            if ok:
+                wecom_push('✅ 已触发「%s」\n%s\n结果会在任务结束后按现有告警规则推送。'
+                           % (name, msg))
+            else:
+                wecom_push('⚠️ 触发「%s」失败：%s' % (name, msg))
         else:
             wecom_push('未知操作：%s' % key)
     except Exception as e:
@@ -3303,12 +3364,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.7', 'readonly': False,
+                'version': 'v2.9.8', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',
-                            'trigger-organize', 'wecom-test', 'wecom-menu'],
+                            'trigger-organize', 'wecom-test', 'wecom-menu',
+                            # v2.9.8 任务中心（白名单见 ETKN_TASK_WHITELIST）
+                            'run-task'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -3404,6 +3467,7 @@ class Handler(BaseHTTPRequestHandler):
         for _k in ('wecom_secret', 'wecom_token', 'wecom_aeskey'):
             d[_k + '_set'] = bool(d.get(_k))
             d.pop(_k, None)
+        d.pop('wecom_panel_url', None)   # v2.9.8：该设置已移除（旧 settings.json 里的残留不回传）
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
@@ -3477,38 +3541,22 @@ class Handler(BaseHTTPRequestHandler):
         # v2.9.5 企业微信：非密字段直写；三件套「空值或掩码 = 保留原值」
         # （否则「不动表单直接保存」会把已存好的 Secret/Token/AESKey 覆盖成掩码串）
         _w_before = (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret'))
-        _panel_before = (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')
         for _k in ('wecom_corpid', 'wecom_agentid', 'wecom_touser', 'wecom_api_proxy'):
             if _k in b and isinstance(b[_k], str):
                 SETTINGS[_k] = b[_k].strip()
-        if 'wecom_panel_url' in b and isinstance(b['wecom_panel_url'], str):
-            _u = b['wecom_panel_url'].strip().rstrip('/')
-            if not _u or _u.startswith(('http://', 'https://')):
-                SETTINGS['wecom_panel_url'] = _u
         for _k in ('wecom_secret', 'wecom_token', 'wecom_aeskey'):
             _v = b.get(_k)
             if isinstance(_v, str) and _v.strip() and '***' not in _v:
                 SETTINGS[_k] = _v.strip()
         if (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret')) != _w_before:
             _wecom_tok['v'] = ''        # 换了企业/应用 → 缓存的 access_token 立即作废
+        SETTINGS.pop('wecom_panel_url', None)   # v2.9.8：设置已移除，顺手清掉旧残留
         try:
             settings_save()
         except Exception as e:
             return self._send(500, json.dumps({'error': f'保存失败：{e}'[:120]},
                                               ensure_ascii=False).encode())
-        # v2.9.7：企微菜单是「下发即固化」的，改了面板地址不重下发，菜单会一直指旧地址
-        # （用户 09-27 踩到：设置里改成新域名，菜单里还是旧的）。这里检测到变化就自动重下发。
-        _extra = None
-        _panel_now = (SETTINGS.get('wecom_panel_url') or '').strip().rstrip('/')
-        if _panel_now != _panel_before:
-            if not _panel_now:
-                _extra = {'menu_msg': '面板公网地址已清空，未重下发菜单（菜单第一项需要它）'}
-            elif not SETTINGS.get('wecom_enabled'):
-                _extra = {'menu_msg': '面板公网地址已改，但企微通道未开启，未重下发菜单'}
-            else:
-                _mok, _mmsg = wecom_menu_apply()
-                _extra = {'menu_msg': ('菜单已自动重下发：' if _mok else '菜单重下发失败：') + _mmsg}
-        return self._do_settings_get(_extra)
+        return self._do_settings_get()
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
@@ -3627,13 +3675,25 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             return self._send(s if s > 0 else 502, json.dumps(
                 {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
-        if p == '/api/run-task/generate-virtual-library-covers':
-            # 原样转发 ETKN 原生「生成媒体库封面」运行接口（Pro 任务；本机 is_pro=true 已验证；
-            # 无历史运行，用最小载荷走服务端面板默认值）
-            s, b = api_post('/api/task-center/tasks/generate-virtual-library-covers/runs',
-                            {'parameters': {}})
-            return self._send(s if s > 0 else 502, json.dumps(
-                {'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
+        # v2.9.8 通用任务触发：/api/run-task/<task_key>（白名单内，见 ETKN_TASK_WHITELIST）。
+        # 取代原先「一个任务一个 if」的写法；organize-p115 保留上面那条（它要带专属参数 +
+        # 空转监视），其余任务走服务端默认参数。
+        m = re.match(r'^/api/run-task/([a-z0-9][a-z0-9\-]*)$', p)
+        if m:
+            tkey = m.group(1)
+            if tkey == 'organize-p115':
+                pass          # 已在上面的专属分支处理（不会走到这里）
+            elif tkey not in ETKN_TASK_WHITELIST:
+                return self._send(404, json.dumps(
+                    {'ok': False, 'error': '任务不在白名单内：%s' % tkey,
+                     'allowed': sorted(ETKN_TASK_WHITELIST.keys())},
+                    ensure_ascii=False).encode())
+            else:
+                ok, msg, s, b = etkn_run_task(tkey)
+                return self._send(s if s > 0 else 502, json.dumps(
+                    {'ok': ok, 'msg': msg, 'task': tkey,
+                     'task_title': ETKN_TASK_WHITELIST.get(tkey, ''),
+                     'etkn_status': s, 'etkn_body': b}, ensure_ascii=False).encode())
         if p == '/api/purge-register-queued':
             # 清空共享登记积压：只取消 status=queued 的共享登记运行（绝不碰 running）。
             # 「共享登记」=display_title 前缀（其 workflow_type 是 manual_task，与追剧刷新同型），
@@ -3746,7 +3806,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.7，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.8，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
