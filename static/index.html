@@ -19,6 +19,7 @@ body{background:var(--bg);color:var(--tx);font:15px/1.5 -apple-system,"PingFang 
 /* ---- 页头：桌面一行两端对齐；手机两行（标题+版本 / 状态行） ---- */
 .hdr{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
 .hdr h1{font-size:18px;margin:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.hdrbtns{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .updated{color:var(--sub);font-size:12px;display:flex;align-items:center;gap:6px;white-space:nowrap}
 @media (max-width:480px){
   .hdr{flex-direction:column;align-items:flex-start;gap:6px}
@@ -206,7 +207,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
 </style>
 </head>
 <body>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.9.2</span></h1><span class="tag" id="notifyTag" title="告警通知渠道" style="color:var(--dim)">📣 —</span><span class="updated" id="updated">连接中…</span><span style="display:flex;gap:8px"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v2.9.2</span></h1><span class="updated" id="updated">连接中…</span><span class="hdrbtns"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button><span class="tag" id="notifyTag" title="告警通知渠道" style="color:var(--dim)">📣 —</span></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs compact">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
