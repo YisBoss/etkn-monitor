@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.18 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.19 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -1574,6 +1574,11 @@ def _feed_loop() -> None:
                        for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
             if busy > 0:
                 continue                       # 整理任务没清空，等清空事件或下轮兜底
+            # v2.9.19：批次尾声竞态抑制——整理批次还没判清空（active=True）时不抢先喂料，
+            # 等清空卡推出后的事件驱动喂料（9/28 实证：兜底 16:55:50 与清空事件 16:56:10
+            # 双跑两轮各 8 夹，用户同时收到两张喂料完成卡）。停摆场景无批次进行中，不受影响。
+            if _organize_state.get('batch', {}).get('active'):
+                continue
             if time.time() - _feed_state['last_run'] < 90:
                 continue                       # 距上次喂料不足 90s（多半刚被事件驱动喂过），
                                                # 不抢——避开「喂料→延迟触发整理」之间的空窗
@@ -3744,7 +3749,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.18', 'readonly': False,
+                'version': 'v2.9.19', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4202,7 +4207,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.18，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.19，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
