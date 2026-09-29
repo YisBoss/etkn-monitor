@@ -343,6 +343,18 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
             <div><label>SSH 密码</label><input type="password" id="cfgRtrPass" placeholder="留空=不修改"></div>
           </div></div>
         <div class="setrow"><label>hosts 自动更新<span class="why">漂移时改行+重启 dnsmasq</span></label><label class="switch"><input type="checkbox" id="cfgHosts"><span class="slider"></span></label></div>
+        <div class="setgroup" data-g="7" onclick="tglGroup(this)">【中转池】<span class="tgl">▶</span></div>
+        <div class="setrow"><label>中转池自检<span class="why">可选功能，默认关。开启后企微菜单「🔄解限流」可用，也可直接回复关键词「解限流」</span></label><label class="switch"><input type="checkbox" id="cfgRelay"><span class="slider"></span></label></div>
+        <div class="setrow"><label>中转池地址<span class="why">管理接口根地址</span></label><input type="text" id="cfgRelayUrl" placeholder="http://&lt;主机&gt;:8045" style="max-width:320px"></div>
+        <div class="setrow"><label>管理员密码<span class="why">读账号 / 清限流记录用；只存本机，不回传前端；留空=不修改</span></label><input type="password" id="cfgRelayPass" placeholder="留空=不修改" style="max-width:320px"></div>
+        <div class="setrow"><label>/v1 调用密钥<span class="why">探针要真打一发请求，走 /v1 的 key（与管理员密码是两套，实测不通用）；留空=不修改</span></label><input type="password" id="cfgRelayKey" placeholder="留空=不修改" style="max-width:320px"></div>
+        <div class="setrow"><label>探针模型<span class="why">留空=只报池状态、不发探针</span></label><input type="text" id="cfgRelayModel" placeholder="例 gemini-3.7-flash-high" style="max-width:260px"></div>
+        <div class="setrow"><label>清锁配额门槛<span class="why">5 小时配额低于它视为真实耗尽，不自动清锁</span></label><div class="setbox"><input type="number" id="cfgRelayMinQ" min="0" max="100" style="max-width:90px"><span class="sub">%</span></div></div>
+        <div class="setrow"><label>立即自检<span class="why">查池状态；疑似「假死」时自动清锁并复测</span></label><div class="setbox"><button class="act" id="btnRelayCheck" onclick="relayCheck()">自检 / 解限流</button><span class="sub" id="relayOut" style="max-width:420px">—</span></div></div>
+        <div class="setrow"><div class="sub" style="flex:1;line-height:1.7;font-size:12px">
+          <b>「假死」是什么：</b>中转池的限流记录不会自己过期 —— 账号配额明明还是满的，网关却一直回「全部限流」、还报要等几小时；清掉限流记录即可立刻恢复。<br>
+          本程序<b>只在配额桶仍高于门槛时</b>才清锁，真实额度耗尽不会误清。企微菜单「🔄解限流」与这里的按钮是同一套实现。
+        </div></div>
       </div>
       <!-- v2.9.17：这排按钮和下面那行说明**必须在 #cfgForm 之外**——
            抽屉是按「setgroup 之后的兄弟节点」收起的，留在里面就会被算进【hosts】分组，
@@ -757,6 +769,15 @@ async function cfgLoad(){
     document.getElementById('cfgRtrPass').placeholder=d.router_pass_set?'已保存（留空=不修改）':'留空=不修改';
     document.getElementById('cfgHosts').checked=!!d.hosts_enabled;
     document.getElementById('cfgAutoRst').checked=!!d.auto_restart_enabled;
+    /* v2.9.20 中转池 */
+    document.getElementById('cfgRelay').checked=!!d.relay_enabled;
+    document.getElementById('cfgRelayUrl').value=d.relay_base_url||'';
+    document.getElementById('cfgRelayModel').value=d.relay_model||'';
+    document.getElementById('cfgRelayMinQ').value=d.relay_min_quota??50;
+    document.getElementById('cfgRelayPass').value='';
+    document.getElementById('cfgRelayPass').placeholder=d.relay_admin_pass_set?'已保存（留空=不修改）':'留空=不修改';
+    document.getElementById('cfgRelayKey').value='';
+    document.getElementById('cfgRelayKey').placeholder=d.relay_api_key_set?'已保存（留空=不修改）':'留空=不修改';
     /* v2.9.5 企业微信 */
     document.getElementById('cfgWxEn').checked=!!d.wecom_enabled;
     document.getElementById('cfgWxCorp').value=d.wecom_corpid||'';
@@ -822,6 +843,12 @@ async function cfgSave(){
         router_pass:document.getElementById('cfgRtrPass').value||undefined,
         hosts_enabled:document.getElementById('cfgHosts').checked,
         auto_restart_enabled:document.getElementById('cfgAutoRst').checked,
+        relay_enabled:document.getElementById('cfgRelay').checked,
+        relay_base_url:document.getElementById('cfgRelayUrl').value.trim(),
+        relay_model:document.getElementById('cfgRelayModel').value.trim(),
+        relay_min_quota:+document.getElementById('cfgRelayMinQ').value||0,
+        relay_admin_pass:document.getElementById('cfgRelayPass').value||undefined,
+        relay_api_key:document.getElementById('cfgRelayKey').value||undefined,
         wecom_enabled:document.getElementById('cfgWxEn').checked,
         wecom_corpid:document.getElementById('cfgWxCorp').value.trim(),
         wecom_agentid:document.getElementById('cfgWxAgent').value.trim(),
@@ -842,6 +869,20 @@ async function cfgSave(){
     else toast('保存失败：'+String(d.error||JSON.stringify(d)).slice(0,100),'bad');
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
   b.disabled=false;b.textContent='保存设置';
+}
+/* v2.9.20 中转池自检：与企微菜单「🔄解限流」共用服务端同一实现（POST /api/relay-check） */
+async function relayCheck(){
+  const b=document.getElementById('btnRelayCheck'),o=document.getElementById('relayOut');
+  b.disabled=true;b.textContent='自检中…';o.textContent='—';
+  try{
+    const r=await fetch('/api/relay-check',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({heal:true})});
+    const d=await r.json();
+    const lines=Array.isArray(d.lines)&&d.lines.length?d.lines:['（无返回）'];
+    o.textContent=lines.join(' ／ ');
+    toast(lines[0],d.ok?'ok':'bad');
+  }catch(e){o.textContent='请求失败：'+String(e).slice(0,60);toast('自检请求失败','bad');}
+  b.disabled=false;b.textContent='自检 / 解限流';
 }
 /* v2.9.5 企业微信：回调 URL 预览/复制 + 菜单下发 + 通道自检
    v2.9.8：「面板公网地址」设置已移除（菜单不再需要它），回调 URL 直接按当前访问地址生成。 */

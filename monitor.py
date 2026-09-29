@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.19 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.20 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -167,6 +167,13 @@ SETTINGS_DEFAULTS = {
     'wecom_api_proxy': '',         # 调企微 API 走的 HTTP 代理（对齐「企业可信IP」用，空=直连）
     # v2.9.8：原 wecom_panel_url（菜单「看面板」用）已移除——菜单不再有 view 项，
     #         回调 URL 由前端按当前访问地址生成，无需再配一个面板公网地址。
+    # ---- v2.9.20 外部中转池自检/解限流（可选功能；默认关，开源仓库不含任何私有地址与凭据）----
+    'relay_enabled': False,        # 中转池自检开关（默认关；关掉时菜单点了只提示去设置页填）
+    'relay_base_url': '',          # 中转池地址，例 http://<主机>:8045（部署者自填）
+    'relay_admin_pass': '',        # 中转池管理员密码（管 /api/*；只存本机，不回传前端）
+    'relay_api_key': '',           # 中转池 /v1 调用密钥（探针用；与管理员密码是两套，实测不通用）
+    'relay_model': '',             # 探针模型（留空=跳过探针，只报池状态）
+    'relay_min_quota': 50,         # 配额门槛（%）：5 小时配额低于它视为真实耗尽，不自动清锁
 }
 
 
@@ -210,11 +217,13 @@ def settings_load():
         pass
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
               'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-              'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled'):
+              'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
+              'relay_enabled'):          # v2.9.20
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
               'backlog_threshold', 'speed_threshold_ms',
-              'stall_threshold_min', 'stall_repeat_min', 'feed_batch_limit'):
+              'stall_threshold_min', 'stall_repeat_min', 'feed_batch_limit',
+              'relay_min_quota'):        # v2.9.20
         try:
             v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
             if v >= 0:
@@ -777,6 +786,183 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
 #      链接是动态的，所以菜单不再固定 → 改设置后要重下发（见 _wecom_menu_sig）。
 #   ② 一级「🔧运维操作」重做：只留「面板上真有的动作」+ 一个合并的体检，按常用度排。
 #      原「🔍检测500」「🌐重检IP」两个各占一格、都只推一条报告，合并成「🩺一键体检」一条出全结论。
+# ========== v2.9.20 外部中转池（可选）：池状态查询 + 假死自愈 ==========
+# 背景（2026-09-29 实测定性）：某类中转池的「限流记录」不会自己过期 —— 账号 5 小时配额桶
+# 明明还是满的（remaining_fraction=1.0），网关却持续返回 503 all_accounts_limited、还报要等
+# 两小时。清掉限流记录后立刻恢复 200（日志原文 Optimistic reset: Cleared all 5 rate limit record(s)）。
+# 本功能把「查状态 → 清锁 → 复测」做成企微菜单一键动作，并且**只在配额健康时才清锁**，
+# 避免把真实额度耗尽也一起"解"掉、白挨上游 429。
+# ⚠️ 开源口径：地址 / 管理员密码 / 调用密钥 / 模型 全部走设置项，代码里不留任何私有地址与凭据；
+#    默认关，未配置时菜单点了只提示去设置页。
+def _relay_cfg() -> dict:
+    base = (SETTINGS.get('relay_base_url') or '').strip().rstrip('/')
+    if base and not (base.startswith('http://') or base.startswith('https://')):
+        base = 'http://' + base
+    return {'base': base,
+            'admin': SETTINGS.get('relay_admin_pass') or '',
+            'key': SETTINGS.get('relay_api_key') or '',
+            'model': (SETTINGS.get('relay_model') or '').strip()}
+
+
+def relay_min_frac() -> float:
+    """配额门槛（比例）。低于它视为真实耗尽，不自动清锁。"""
+    try:
+        v = float(SETTINGS.get('relay_min_quota'))
+    except (TypeError, ValueError):
+        v = 50.0            # 注意别写 `or 50`：门槛 0 是合法值（=永远清锁），会被 or 吃掉
+    return max(0.0, min(100.0, v)) / 100.0
+
+
+def relay_enabled() -> bool:
+    c = _relay_cfg()
+    return bool(SETTINGS.get('relay_enabled') and c['base'] and c['admin'])
+
+
+def _relay_http(path: str, method: str = 'GET', token: str = '', timeout: int = 30):
+    """调中转池管理接口。返回 (status, body)；status=0 表示连不上。"""
+    c = _relay_cfg()
+    req = urllib.request.Request(
+        c['base'] + path, method=method,
+        data=(b'' if method in ('POST', 'DELETE') else None),
+        headers={'Authorization': 'Bearer ' + (token or c['admin'])})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode('utf-8', 'replace')
+            try:
+                return r.status, json.loads(raw)
+            except Exception:
+                return r.status, raw
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode('utf-8', 'replace')
+        try:
+            return e.code, json.loads(raw)
+        except Exception:
+            return e.code, raw
+    except Exception as e:
+        return 0, str(e)[:120]
+
+
+def _relay_pool() -> dict:
+    """池状态：账号总数 / 可用数 / 被标记的账号 / 5 小时配额桶最低剩余比例。"""
+    out = {'total': 0, 'active': None, 'marked': [], 'min_5h': None, 'err': ''}
+    s, b = _relay_http('/api/proxy/status')
+    if s == 200 and isinstance(b, dict):
+        out['active'] = b.get('active_accounts')
+    s, b = _relay_http('/api/accounts')
+    if s != 200 or not isinstance(b, dict):
+        out['err'] = '读账号列表失败（HTTP %s）' % s
+        return out
+    accs = b.get('accounts') or []
+    out['total'] = len(accs)
+    for a in accs:
+        q = a.get('quota') or {}
+        marks = []
+        if q.get('is_forbidden'):
+            marks.append('被拒')
+        if a.get('validation_blocked'):
+            marks.append('待验证')
+        if a.get('proxy_disabled'):
+            marks.append('已禁用')
+        if marks:
+            out['marked'].append('%s（%s）' % (a.get('email') or '?', '/'.join(marks)))
+        aid = a.get('id')
+        if not aid:
+            continue
+        s2, q2 = _relay_http('/api/accounts/%s/quota' % aid)
+        if s2 != 200 or not isinstance(q2, dict):
+            continue
+        for g in (q2.get('quota_groups') or []):
+            for bk in (g.get('buckets') or []):
+                if bk.get('window') == '5h':
+                    f = bk.get('remaining_fraction')
+                    if isinstance(f, (int, float)):
+                        out['min_5h'] = f if out['min_5h'] is None else min(out['min_5h'], f)
+    return out
+
+
+def _relay_probe(model: str) -> str:
+    """打一发真实请求探针。返回 'OK' / 'LIMITED' / 'HTTP<code>' / 'ERR'。"""
+    c = _relay_cfg()
+    if not c['key']:
+        return 'ERR'
+    body = json.dumps({'model': model, 'max_tokens': 8,
+                       'messages': [{'role': 'user', 'content': 'ping'}]}).encode()
+    req = urllib.request.Request(
+        c['base'] + '/v1/chat/completions', data=body, method='POST',
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c['key']})
+    try:
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return 'OK' if r.status == 200 else 'HTTP%d' % r.status
+    except urllib.error.HTTPError as e:
+        txt = e.read().decode('utf-8', 'replace')
+        if e.status == 503 and 'all_accounts_limited' in txt:
+            return 'LIMITED'
+        return 'HTTP%d' % e.status
+    except Exception:
+        return 'ERR'
+
+
+def relay_report(heal: bool = True) -> list:
+    """中转池自检报告（菜单「🔄解限流」与面板按钮共用）。返回报告行列表。"""
+    lines = ['🔄 中转池自检']
+    if not relay_enabled():
+        return ['⚠️ 中转池自检未启用',
+                '· 到面板「设置 → 中转池」填：启用开关、地址、管理员密码',
+                '· 探针还需要 /v1 调用密钥（与管理员密码是两套，实测不通用）']
+    p = _relay_pool()
+    if p['err']:
+        return ['⚠️ 中转池连不上', '· %s' % p['err'], '· 检查设置页里的地址与管理密码']
+    act = p['active']
+    lines.append('· 账号：%s%s'
+                 % ('%s/%s 可用' % (act, p['total']) if act is not None else '共 %s 个' % p['total'],
+                    '，标记异常 %d 个' % len(p['marked']) if p['marked'] else '，标记全干净'))
+    for m in p['marked'][:3]:
+        lines.append('　　%s' % m)
+    if p['min_5h'] is not None:
+        lines.append('· 5 小时配额：最低 %.0f%%' % (p['min_5h'] * 100))
+    c = _relay_cfg()
+    if not c['model']:
+        lines.append('· 探针：未配置模型，已跳过（只报池状态）')
+        return lines
+    if not c['key']:
+        lines.append('· 探针：未配置 /v1 调用密钥，已跳过')
+        return lines
+    r1 = _relay_probe(c['model'])
+    if r1 == 'OK':
+        lines.append('· 探针 %s：200 ✅ 无需处理' % c['model'])
+        return lines
+    if r1 != 'LIMITED':
+        lines.append('· 探针 %s：%s（非限流类错误，未动限流记录）' % (c['model'], r1))
+        return lines
+    frac = p['min_5h']
+    if frac is None:
+        lines.append('· 探针 %s：报「全部限流」，但读不到配额，未自动清锁' % c['model'])
+        return lines
+    if frac < relay_min_frac():
+        lines.append('· 探针 %s：报「全部限流」，配额仅剩 %.0f%%（低于门槛 %.0f%%）'
+                     % (c['model'], frac * 100, relay_min_frac() * 100))
+        lines.append('　→ 属真实额度耗尽，未清锁，等官方重置')
+        return lines
+    if not heal:
+        lines.append('· 探针 %s：报「全部限流」，但配额还有 %.0f%% → 疑似假死'
+                     % (c['model'], frac * 100))
+        lines.append('　→ 可点「🔄解限流」清锁（本次未执行）')
+        return lines
+    s, b = _relay_http('/api/proxy/rate-limits', method='DELETE')
+    if s not in (200, 204):
+        lines.append('· 清锁失败：HTTP %s %s' % (s, str(b)[:80]))
+        return lines
+    r2 = _relay_probe(c['model'])
+    if r2 == 'OK':
+        lines.append('· 探针 %s：报「全部限流」但配额还有 %.0f%% → 判定假死'
+                     % (c['model'], frac * 100))
+        lines.append('· 已清除限流记录 → 复测 200 ✅ 已恢复')
+    else:
+        lines.append('· 探针 %s：报「全部限流」，已清锁但复测仍 %s' % (c['model'], r2))
+        lines.append('　→ 可能是上游真限流，稍后会自动重试')
+    return lines
+
+
 _WECOM_LINK_MENU_NAME = '🔗快捷入口'      # 4+12 = 16B
 _WECOM_LINK_MENU_MAX = 5                 # 企微二级菜单上限 5（面板卡片链接最多可配 6）
 _WECOM_MENU_TAIL = [
@@ -785,7 +971,9 @@ _WECOM_MENU_TAIL = [
         {'type': 'click', 'name': '⚡立即测速', 'key': 'SPEED'},      # 15B
         {'type': 'click', 'name': '🗂清空登记', 'key': 'PURGE'},      # 16B
         {'type': 'click', 'name': '🩺一键体检', 'key': 'HEALTH'},     # 16B
-        {'type': 'click', 'name': '🧹清理临时', 'key': 'CLEAN_TMP'},  # 16B
+        # v2.9.20：二级上限 5 个已满，用「🔄解限流」替掉「🧹清理临时」
+        #（原项改成文字关键词「清理临时」触发，功能不丢，见 _wecom_handle_msg）。
+        {'type': 'click', 'name': '🔄解限流', 'key': 'RELAY'},        # 13B
     ]},
     {'name': '📚任务中心', 'sub_button': [                       # 16B
         {'type': 'click', 'name': '🎬媒体维护', 'key': 'CAT_MEDIA'},     # 16B
@@ -986,6 +1174,8 @@ _WECOM_HELP = ('🤖 ETKN 机器人\n'
                '直接回复关键词即可：\n'
                '· 状态 — 今日/本周完成 + 队列\n'
                '· 体检 — 一键体检（hosts + 500 + 队列）\n'
+               '· 解限流 — 中转池自检 + 假死自愈（v2.9.20）\n'
+               '· 清理临时 — 清理 115 临时目录（v2.9.20 起改为关键词触发）\n'
                '· 菜单 — 显示这条帮助\n'
                '也可以点应用底部的自定义菜单。')
 
@@ -1023,8 +1213,14 @@ def _wecom_run_action(key: str):
                 out = _hosts_recheck() or []
                 rows = ['🌐 hosts 检测结果']
                 for r in out[:12]:
-                    rows.append('· %s → %s%s' % (r.get('domain', '-'), r.get('ip', '-'),
-                                                 '（已改写）' if r.get('changed') else ''))
+                    # v2.9.20 修：旧代码读 r['ip']（该键不存在，_hosts_recheck 给的是 hosts_ip），
+                    # 所以 IP 永远显示 '-'；且解析失败被当成「没漂移」悄悄放过。
+                    if not (r.get('hosts_ip') or ''):
+                        rows.append('· %s → 解析失败（DNS %s）'
+                                    % (r.get('domain', '-'), r.get('dns_ip') or '空'))
+                    else:
+                        rows.append('· %s → %s%s' % (r.get('domain', '-'), r['hosts_ip'],
+                                                     '（已改写）' if r.get('changed') else ''))
                 wecom_push('\n'.join(rows))
         elif key == 'ORGANIZE':
             fast = _state.get('fast') or {}
@@ -1076,11 +1272,22 @@ def _wecom_run_action(key: str):
                 try:
                     out = _hosts_recheck() or []
                     ch = [r for r in out if r.get('changed')]
-                    lines.append('· hosts：%d 个域名%s'
-                                 % (len(out), ('，已改写 %d 个' % len(ch)) if ch else '，无需改写'))
+                    # v2.9.20 修：解析失败（hosts_ip 为空）以前被并进「无需改写」里蒙混过关，
+                    # 且 IP 读错键恒显示 '-'。现在单列「解析/绑定异常」并计入异常条数。
+                    bad = [r for r in out if not (r.get('hosts_ip') or '')]
+                    tail = ('，已改写 %d 个' % len(ch)) if ch else ''
+                    if bad:
+                        lines.append('· hosts：%d 个域名，%d 个解析/绑定异常%s'
+                                     % (len(out), len(bad), tail))
+                    else:
+                        lines.append('· hosts：%d 个域名%s' % (len(out), tail or '，无需改写'))
                     for r in out[:3]:
-                        lines.append('　　%s → %s%s' % (r.get('domain', '-'), r.get('ip', '-'),
-                                                      '（已改写）' if r.get('changed') else ''))
+                        if not (r.get('hosts_ip') or ''):
+                            lines.append('　　%s → 解析失败（DNS %s）'
+                                         % (r.get('domain', '-'), r.get('dns_ip') or '空'))
+                        else:
+                            lines.append('　　%s → %s%s' % (r.get('domain', '-'), r['hosts_ip'],
+                                                          '（已改写）' if r.get('changed') else ''))
                 except Exception as e:
                     lines.append('· hosts：检测失败（%s）' % str(e)[:60])
             else:
@@ -1108,8 +1315,15 @@ def _wecom_run_action(key: str):
             except Exception:
                 pass
             wecom_push('\n'.join(lines))
+        elif key == 'RELAY':
+            # v2.9.20：中转池自检 + 假死自愈（配额健康却报限流时自动清锁并复测）
+            if not relay_enabled():
+                wecom_push('⚠️ 中转池自检未启用\n到面板「设置 → 中转池」填：启用开关、地址、管理员密码。')
+                return
+            wecom_push('已触发中转池自检，稍后推送结果…')
+            wecom_push('\n'.join(relay_report(heal=True)))
         elif key in _WECOM_ACTION_TASKS:
-            # 「运维操作」里直连的任务（目前只有 🧹清理临时），点了直接触发
+            # 「运维操作」里直连的任务（🧹清理临时已改为文字关键词触发），点了直接触发
             tkey = _WECOM_ACTION_TASKS[key]
             name = ETKN_TASK_WHITELIST.get(tkey, tkey)
             ok, msg, _s, _b = etkn_run_task(tkey)
@@ -1144,6 +1358,11 @@ def _wecom_handle_msg(xml: str):
             wecom_push(_wecom_status_text(), touser=user)
         elif txt in ('体检', '一键体检', 'health', 'HEALTH'):
             threading.Thread(target=_wecom_run_action, args=('HEALTH',), daemon=True).start()
+        elif txt in ('解限流', '中转池', '自愈', 'relay'):
+            # v2.9.20：菜单二级满了，解限流进菜单；清理临时改为关键词触发
+            threading.Thread(target=_wecom_run_action, args=('RELAY',), daemon=True).start()
+        elif txt in ('清理临时', '清理 临时', 'clean_tmp'):
+            threading.Thread(target=_wecom_run_action, args=('CLEAN_TMP',), daemon=True).start()
         else:
             wecom_push(_WECOM_HELP, touser=user)
         return
@@ -3749,7 +3968,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.19', 'readonly': False,
+                'version': 'v2.9.20', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -3757,7 +3976,7 @@ class Handler(BaseHTTPRequestHandler):
                             'trigger-organize', 'wecom-test', 'wecom-menu',
                             # v2.9.8 任务中心（白名单见 ETKN_TASK_WHITELIST）
                             # v2.9.10 分类目录 + 子任务确认页（/run-task/<key>）
-                            'run-task', 'task-catalog', 'run-task-page'],
+                            'run-task', 'task-catalog', 'run-task-page', 'relay-check'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -3871,6 +4090,10 @@ class Handler(BaseHTTPRequestHandler):
         for _k in ('wecom_secret', 'wecom_token', 'wecom_aeskey'):
             d[_k + '_set'] = bool(d.get(_k))
             d.pop(_k, None)
+        # v2.9.20 中转池两套凭据（管理员密码 / /v1 调用密钥）同样只回布尔位，留空=不修改
+        for _k in ('relay_admin_pass', 'relay_api_key'):
+            d[_k + '_set'] = bool(d.get(_k))
+            d.pop(_k, None)
         d.pop('wecom_panel_url', None)   # v2.9.8：该设置已移除（旧 settings.json 里的残留不回传）
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
@@ -3955,6 +4178,21 @@ class Handler(BaseHTTPRequestHandler):
         if (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret')) != _w_before:
             _wecom_tok['v'] = ''        # 换了企业/应用 → 缓存的 access_token 立即作废
         SETTINGS.pop('wecom_panel_url', None)   # v2.9.8：设置已移除，顺手清掉旧残留
+        # v2.9.20 中转池（可选）：开关/地址/模型/门槛直写；两套凭据「空或掩码=保留原值」
+        if 'relay_enabled' in b:
+            SETTINGS['relay_enabled'] = bool(b['relay_enabled'])
+        for _k in ('relay_base_url', 'relay_model'):
+            if _k in b and isinstance(b[_k], str):
+                SETTINGS[_k] = b[_k].strip()
+        if 'relay_min_quota' in b:
+            try:
+                SETTINGS['relay_min_quota'] = max(0, min(100, int(b['relay_min_quota'])))
+            except (TypeError, ValueError):
+                pass
+        for _k in ('relay_admin_pass', 'relay_api_key'):
+            _v = b.get(_k)
+            if isinstance(_v, str) and _v.strip() and '***' not in _v:
+                SETTINGS[_k] = _v.strip()
         # v2.9.15：「🔗快捷入口」的 URL 直接来自 card_links，链接变了菜单必须重下发。
         # 旧版（v2.9.8）菜单里没有动态 URL，所以没有这套逻辑；现在按指纹判断，没变就不打扰企微。
         _need_menu = (SETTINGS.get('wecom_enabled')
@@ -4008,6 +4246,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({'ok': ok, 'token': True, 'agentid': c['agentid'],
                                                'touser': c['touser'], 'err': err,
                                                'last': dict(_wecom_last)},
+                                              ensure_ascii=False).encode())
+        if p == '/api/relay-check':       # v2.9.20 中转池自检（面板按钮与企微菜单共用同一实现）
+            body = self._body()
+            heal = not (isinstance(body, dict) and body.get('heal') is False)
+            lines = relay_report(heal=heal)
+            return self._send(200, json.dumps({'ok': not lines[0].startswith('⚠️'),
+                                               'lines': lines},
                                               ensure_ascii=False).encode())
         if p == '/api/hosts-check':
             # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
@@ -4207,7 +4452,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.19，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.20，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
