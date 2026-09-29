@@ -787,7 +787,7 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
 #   ② 一级「🔧运维操作」重做：只留「面板上真有的动作」+ 一个合并的体检，按常用度排。
 #      原「🔍检测500」「🌐重检IP」两个各占一格、都只推一条报告，合并成「🩺一键体检」一条出全结论。
 # ========== v2.9.20 外部中转池（可选）：池状态查询 + 假死自愈 ==========
-# v2.9.21：性能重排 —— 面板走 EdgeOne CDN（etknjk.example.com，**源站 15s 超时**），
+# v2.9.21：性能重排 —— 面板走 EdgeOne CDN（**源站 15s 超时**），
 #  v2.9.20 的自检要 ~20s（串行查 5 个号的配额 16.5s + 探针 3.6s）→ 被掐成 524、空 body，
 #  前端 r.json() 抛裸 SyntaxError。修法：① 配额改从 /api/accounts 的 payload 里白拿
 #  （零额外请求）② 池状态与探针并发 ③ 探针 timeout 90→25 ④ 前端非 JSON 也给人话。
@@ -851,7 +851,7 @@ def _relay_min_quota_par(ids: list):
 
     🔴 v2.9.21：**必须并发**。中转池的 `/api/accounts/<id>/quota` 单次要 ~3.3s（它会去上游刷），
     5 个号串行就是 16.5s —— 加上探针 3.6s 一共 ~20s，而面板走 CDN
-    （`etknjk.example.com` 是 EdgeOne，**源站 15s 超时**）会被掐成 524、前端拿到空 body
+    （面板域名走 EdgeOne，**源站 15s 超时**）会被掐成 524、前端拿到空 body
     报 `SyntaxError: Failed to execute 'json'`。并发后 ~3.5s。
     """
     from concurrent.futures import ThreadPoolExecutor
@@ -956,7 +956,7 @@ def relay_report(heal: bool = True) -> list:
     🔴 v2.9.21 性能重排：池状态 + 配额（最慢的一步，5 个号并发）与探针**同时并发**跑，
     所以总耗时 ≈ max(配额 3.5s, 探针 3.6s) ≈ 3.7s，而不是相加。
     （v2.9.20 是「串行查 5 个号配额 16.5s + 探针 3.6s ≈ 20s」，面板走 CDN
-    —— `etknjk.example.com` 是 EdgeOne、**源站 15s 超时** —— 会被掐成 524、前端拿到空 body。
+    —— 面板域名走 EdgeOne、**源站 15s 超时** —— 会被掐成 524、前端拿到空 body。
     用户 09-29 截图报的 `SyntaxError: Failed to execute 'json'` 就是这个。）
     """
     from concurrent.futures import ThreadPoolExecutor
