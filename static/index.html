@@ -350,7 +350,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
         <div class="setrow"><label>/v1 调用密钥<span class="why">探针要真打一发请求，走 /v1 的 key（与管理员密码是两套，实测不通用）；留空=不修改</span></label><input type="password" id="cfgRelayKey" placeholder="留空=不修改" style="max-width:320px"></div>
         <div class="setrow"><label>探针模型<span class="why">留空=只报池状态、不发探针</span></label><input type="text" id="cfgRelayModel" placeholder="例 gemini-3.7-flash-high" style="max-width:260px"></div>
         <div class="setrow"><label>清锁配额门槛<span class="why">5 小时配额低于它视为真实耗尽，不自动清锁</span></label><div class="setbox"><input type="number" id="cfgRelayMinQ" min="0" max="100" style="max-width:90px"><span class="sub">%</span></div></div>
-        <div class="setrow"><label>立即自检<span class="why">查池状态；疑似「假死」时自动清锁并复测</span></label><div class="setbox"><button class="act" id="btnRelayCheck" onclick="relayCheck()">自检 / 解限流</button><span class="sub" id="relayOut" style="max-width:420px">—</span></div></div>
+        <div class="setrow"><label>立即自检<span class="why">查池状态；疑似「假死」时自动清锁并复测（要真打一发模型请求，约 5~10 秒）</span></label><div class="setbox"><button class="act" id="btnRelayCheck" onclick="relayCheck()">自检 / 解限流</button><span class="sub" id="relayOut" style="max-width:420px">—</span></div></div>
         <div class="setrow"><div class="sub" style="flex:1;line-height:1.7;font-size:12px">
           <b>「假死」是什么：</b>中转池的限流记录不会自己过期 —— 账号配额明明还是满的，网关却一直回「全部限流」、还报要等几小时；清掉限流记录即可立刻恢复。<br>
           本程序<b>只在配额桶仍高于门槛时</b>才清锁，真实额度耗尽不会误清。企微菜单「🔄解限流」与这里的按钮是同一套实现。
@@ -870,19 +870,40 @@ async function cfgSave(){
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
   b.disabled=false;b.textContent='保存设置';
 }
-/* v2.9.20 中转池自检：与企微菜单「🔄解限流」共用服务端同一实现（POST /api/relay-check） */
+/* v2.9.20 中转池自检：与企微菜单「🔄解限流」共用服务端同一实现
+   v2.9.21：① **异步** —— 面板走 CDN（源站 15s 超时），同步等 ~3s 的请求会偶发 524 空 body；
+     所以 POST 只负责开跑，结果靠轮询 GET /api/relay-check 取（服务端把结果缓存住，
+     中途断线再进来也能拿到）。② 不再直接 r.json() —— 非 JSON/空 body 也能给人话，
+     而不是抛裸 SyntaxError（用户 09-29 截图报的就是这个）。③ 显示已等待秒数。 */
 async function relayCheck(){
   const b=document.getElementById('btnRelayCheck'),o=document.getElementById('relayOut');
   b.disabled=true;b.textContent='自检中…';o.textContent='—';
+  const t0=Date.now();
+  const tick=setInterval(()=>{o.textContent='自检中… 已等待 '+Math.round((Date.now()-t0)/1000)+' 秒';},500);
+  const grab=async(url,opt)=>{
+    const r=await fetch(url,opt);const raw=await r.text();let d=null;
+    try{d=JSON.parse(raw);}catch(e){}
+    if(!d||typeof d!=='object'){
+      const brief=(raw||'').replace(/\s+/g,' ').trim().slice(0,120);
+      throw new Error('HTTP '+r.status+(brief?'，返回非 JSON：'+brief
+        :'，返回空 body —— 多半是中间层超时，请再点一次'));
+    }
+    return d;
+  };
   try{
-    const r=await fetch('/api/relay-check',{method:'POST',headers:{'Content-Type':'application/json'},
+    let d=await grab('/api/relay-check',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({heal:true})});
-    const d=await r.json();
+    // 服务端后台跑，最多等 90 秒
+    for(let i=0;i<90&&d.running;i++){
+      await new Promise(s=>setTimeout(s,1000));
+      d=await grab('/api/relay-check');
+    }
+    if(d.running){o.textContent='自检超时：后台仍在跑，稍后重新打开本页可看结果';toast('自检超时','bad');return;}
     const lines=Array.isArray(d.lines)&&d.lines.length?d.lines:['（无返回）'];
     o.textContent=lines.join(' ／ ');
     toast(lines[0],d.ok?'ok':'bad');
-  }catch(e){o.textContent='请求失败：'+String(e).slice(0,60);toast('自检请求失败','bad');}
-  b.disabled=false;b.textContent='自检 / 解限流';
+  }catch(e){o.textContent='自检失败：'+String(e.message||e).slice(0,140);toast('自检失败','bad');}
+  finally{clearInterval(tick);b.disabled=false;b.textContent='自检 / 解限流';}
 }
 /* v2.9.5 企业微信：回调 URL 预览/复制 + 菜单下发 + 通道自检
    v2.9.8：「面板公网地址」设置已移除（菜单不再需要它），回调 URL 直接按当前访问地址生成。 */
