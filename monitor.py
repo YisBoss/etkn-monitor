@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.20 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.21 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -787,6 +787,10 @@ def push_both(text: str, buttons: list = None, title: str = '', tcolor: str = 'b
 #   ② 一级「🔧运维操作」重做：只留「面板上真有的动作」+ 一个合并的体检，按常用度排。
 #      原「🔍检测500」「🌐重检IP」两个各占一格、都只推一条报告，合并成「🩺一键体检」一条出全结论。
 # ========== v2.9.20 外部中转池（可选）：池状态查询 + 假死自愈 ==========
+# v2.9.21：性能重排 —— 面板走 EdgeOne CDN（etknjk.example.com，**源站 15s 超时**），
+#  v2.9.20 的自检要 ~20s（串行查 5 个号的配额 16.5s + 探针 3.6s）→ 被掐成 524、空 body，
+#  前端 r.json() 抛裸 SyntaxError。修法：① 配额改从 /api/accounts 的 payload 里白拿
+#  （零额外请求）② 池状态与探针并发 ③ 探针 timeout 90→25 ④ 前端非 JSON 也给人话。
 # 背景（2026-09-29 实测定性）：某类中转池的「限流记录」不会自己过期 —— 账号 5 小时配额桶
 # 明明还是满的（remaining_fraction=1.0），网关却持续返回 503 all_accounts_limited、还报要等
 # 两小时。清掉限流记录后立刻恢复 200（日志原文 Optimistic reset: Cleared all 5 rate limit record(s)）。
@@ -842,9 +846,49 @@ def _relay_http(path: str, method: str = 'GET', token: str = '', timeout: int = 
         return 0, str(e)[:120]
 
 
-def _relay_pool() -> dict:
-    """池状态：账号总数 / 可用数 / 被标记的账号 / 5 小时配额桶最低剩余比例。"""
-    out = {'total': 0, 'active': None, 'marked': [], 'min_5h': None, 'err': ''}
+def _relay_min_quota_par(ids: list):
+    """并发查各账号的「5 小时配额桶最低剩余比例」，返回最小者（查不到返回 None）。
+
+    🔴 v2.9.21：**必须并发**。中转池的 `/api/accounts/<id>/quota` 单次要 ~3.3s（它会去上游刷），
+    5 个号串行就是 16.5s —— 加上探针 3.6s 一共 ~20s，而面板走 CDN
+    （`etknjk.example.com` 是 EdgeOne，**源站 15s 超时**）会被掐成 524、前端拿到空 body
+    报 `SyntaxError: Failed to execute 'json'`。并发后 ~3.5s。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(aid):
+        s2, q2 = _relay_http('/api/accounts/%s/quota' % aid, timeout=20)
+        if s2 != 200 or not isinstance(q2, dict):
+            return None
+        vals = []
+        for g in (q2.get('quota_groups') or []):
+            for bk in (g.get('buckets') or []):
+                if bk.get('window') == '5h':
+                    f = bk.get('remaining_fraction')
+                    if isinstance(f, (int, float)):
+                        vals.append(f)
+        return min(vals) if vals else None
+
+    mn = None
+    if not ids:
+        return None
+    with ThreadPoolExecutor(max_workers=max(1, min(6, len(ids)))) as ex:
+        for v in ex.map(one, ids):
+            if v is not None:
+                mn = v if mn is None else min(mn, v)
+    return mn
+
+
+def _relay_pool(with_quota: bool = True) -> dict:
+    """池状态：账号总数 / 可用数 / 被标记的账号 / 5 小时配额桶最低剩余比例。
+
+    🔴 v2.9.21：配额**直接从 `/api/accounts` 的 `accounts[].quota.quota_groups[].buckets[]`
+    里读，零额外请求**。原来逐号打 `/api/accounts/<id>/quota`，单次要 ~3.3s
+    （那个端点会去上游刷），5 个号即使并发也要 ~3.6s，串行更是 16.5s。
+    实测两个来源的 `remaining_fraction` 一致（差异只是刷新间隔造成的浮点漂移）。
+    只有整个 payload 都读不到 5h 桶时（AM 改版）才走 `_relay_min_quota_par` 兜底。
+    """
+    out = {'total': 0, 'active': None, 'marked': [], 'min_5h': None, 'err': '', 'ids': []}
     s, b = _relay_http('/api/proxy/status')
     if s == 200 and isinstance(b, dict):
         out['active'] = b.get('active_accounts')
@@ -865,23 +909,27 @@ def _relay_pool() -> dict:
             marks.append('已禁用')
         if marks:
             out['marked'].append('%s（%s）' % (a.get('email') or '?', '/'.join(marks)))
-        aid = a.get('id')
-        if not aid:
-            continue
-        s2, q2 = _relay_http('/api/accounts/%s/quota' % aid)
-        if s2 != 200 or not isinstance(q2, dict):
-            continue
-        for g in (q2.get('quota_groups') or []):
+        for g in (q.get('quota_groups') or []):
             for bk in (g.get('buckets') or []):
                 if bk.get('window') == '5h':
                     f = bk.get('remaining_fraction')
                     if isinstance(f, (int, float)):
                         out['min_5h'] = f if out['min_5h'] is None else min(out['min_5h'], f)
+        aid = a.get('id')
+        if aid:
+            out['ids'].append(aid)
+    if with_quota and out['min_5h'] is None and out['ids']:
+        out['min_5h'] = _relay_min_quota_par(out['ids'])   # 兜底：payload 里没有 5h 桶时
     return out
 
 
 def _relay_probe(model: str) -> str:
-    """打一发真实请求探针。返回 'OK' / 'LIMITED' / 'HTTP<code>' / 'ERR'。"""
+    """打一发真实请求探针。返回 'OK' / 'LIMITED' / 'HTTP<code>' / 'ERR'。
+
+    🔴 v2.9.21：timeout 90 → 25。上游真挂住时，等 90s 毫无意义 ——
+    面板走 CDN 15s 就被掐，企微那侧也要尽早给结论。25s 足够覆盖正常的一次 8-token 探针
+    （实测 ~3.6s）。
+    """
     c = _relay_cfg()
     if not c['key']:
         return 'ERR'
@@ -891,7 +939,7 @@ def _relay_probe(model: str) -> str:
         c['base'] + '/v1/chat/completions', data=body, method='POST',
         headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c['key']})
     try:
-        with urllib.request.urlopen(req, timeout=90) as r:
+        with urllib.request.urlopen(req, timeout=25) as r:
             return 'OK' if r.status == 200 else 'HTTP%d' % r.status
     except urllib.error.HTTPError as e:
         txt = e.read().decode('utf-8', 'replace')
@@ -903,13 +951,28 @@ def _relay_probe(model: str) -> str:
 
 
 def relay_report(heal: bool = True) -> list:
-    """中转池自检报告（菜单「🔄解限流」与面板按钮共用）。返回报告行列表。"""
+    """中转池自检报告（菜单「🔄解限流」与面板按钮共用）。返回报告行列表。
+
+    🔴 v2.9.21 性能重排：池状态 + 配额（最慢的一步，5 个号并发）与探针**同时并发**跑，
+    所以总耗时 ≈ max(配额 3.5s, 探针 3.6s) ≈ 3.7s，而不是相加。
+    （v2.9.20 是「串行查 5 个号配额 16.5s + 探针 3.6s ≈ 20s」，面板走 CDN
+    —— `etknjk.example.com` 是 EdgeOne、**源站 15s 超时** —— 会被掐成 524、前端拿到空 body。
+    用户 09-29 截图报的 `SyntaxError: Failed to execute 'json'` 就是这个。）
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     lines = ['🔄 中转池自检']
     if not relay_enabled():
         return ['⚠️ 中转池自检未启用',
                 '· 到面板「设置 → 中转池」填：启用开关、地址、管理员密码',
                 '· 探针还需要 /v1 调用密钥（与管理员密码是两套，实测不通用）']
-    p = _relay_pool()
+    c = _relay_cfg()
+    can_probe = bool(c['model'] and c['key'])
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_pool = ex.submit(_relay_pool, True)           # 池状态 + 配额（内部 5 个号并发）
+        f_probe = ex.submit(_relay_probe, c['model']) if can_probe else None
+        p = f_pool.result()
+        r1 = f_probe.result() if f_probe else None
     if p['err']:
         return ['⚠️ 中转池连不上', '· %s' % p['err'], '· 检查设置页里的地址与管理密码']
     act = p['active']
@@ -920,14 +983,12 @@ def relay_report(heal: bool = True) -> list:
         lines.append('　　%s' % m)
     if p['min_5h'] is not None:
         lines.append('· 5 小时配额：最低 %.0f%%' % (p['min_5h'] * 100))
-    c = _relay_cfg()
-    if not c['model']:
-        lines.append('· 探针：未配置模型，已跳过（只报池状态）')
+    if not can_probe:
+        if not c['model']:
+            lines.append('· 探针：未配置模型，已跳过（只报池状态）')
+        else:
+            lines.append('· 探针：未配置 /v1 调用密钥，已跳过')
         return lines
-    if not c['key']:
-        lines.append('· 探针：未配置 /v1 调用密钥，已跳过')
-        return lines
-    r1 = _relay_probe(c['model'])
     if r1 == 'OK':
         lines.append('· 探针 %s：200 ✅ 无需处理' % c['model'])
         return lines
@@ -961,6 +1022,50 @@ def relay_report(heal: bool = True) -> list:
         lines.append('· 探针 %s：报「全部限流」，已清锁但复测仍 %s' % (c['model'], r2))
         lines.append('　→ 可能是上游真限流，稍后会自动重试')
     return lines
+
+
+# ---- v2.9.21 异步自检任务：面板走 CDN（源站 15s 超时），同步等一个 ~3s 的请求会偶发 524 ----
+# 源站实测稳定 2.5~3.2s，但经隧道/CDN 后抖动可达 13.6s。所以 POST 只负责「开跑」并立刻返回，
+# 结果由前端轮询 GET 取。企微菜单那条路径不走 CDN，仍直接调 relay_report() 同步出结果。
+_relay_job = {'running': False, 'lines': None, 'ok': None, 'ts': 0.0, 'started': 0.0}
+_relay_job_lock = threading.Lock()
+
+
+def relay_job_start(heal: bool = True) -> bool:
+    """开一个后台自检任务。已有任务在跑就返回 False（去重，避免连点打爆上游）。"""
+    with _relay_job_lock:
+        if _relay_job['running']:
+            return False
+        _relay_job['running'] = True
+        _relay_job['lines'] = None
+        _relay_job['ok'] = None
+        _relay_job['started'] = time.time()
+
+    def work():
+        lines = None
+        try:
+            lines = relay_report(heal=heal)
+        except Exception as e:                      # noqa: BLE001 —— 后台线程必须兜住
+            lines = ['⚠️ 自检异常', '· %s' % str(e)[:160]]
+        with _relay_job_lock:
+            _relay_job['lines'] = lines
+            _relay_job['ok'] = not lines[0].startswith('⚠️')
+            _relay_job['running'] = False
+            _relay_job['ts'] = time.time()
+
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def relay_job_state() -> dict:
+    """当前自检任务状态（前端轮询用）。"""
+    with _relay_job_lock:
+        d = {'running': _relay_job['running'], 'ok': _relay_job['ok'],
+             'lines': _relay_job['lines']}
+        if _relay_job['started']:
+            d['elapsed'] = round((time.time() - _relay_job['started']) if _relay_job['running']
+                                 else (_relay_job['ts'] - _relay_job['started']), 1)
+        return d
 
 
 _WECOM_LINK_MENU_NAME = '🔗快捷入口'      # 4+12 = 16B
@@ -3968,7 +4073,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.20', 'readonly': False,
+                'version': 'v2.9.21', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4066,6 +4171,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, _RUN_PAGE_BAD.encode(), 'text/html; charset=utf-8')
             return self._send(200, _RUN_PAGE.format(
                 title=t[1], desc=t[2], cat=cat).encode(), 'text/html; charset=utf-8')
+        if p == '/api/relay-check':       # v2.9.21 异步自检：GET 取结果（前端轮询）
+            return self._send(200, json.dumps(relay_job_state(), ensure_ascii=False).encode())
         return self._send(404, '{"error":"not found"}'.encode())
 
     def _body(self):
@@ -4247,13 +4354,15 @@ class Handler(BaseHTTPRequestHandler):
                                                'touser': c['touser'], 'err': err,
                                                'last': dict(_wecom_last)},
                                               ensure_ascii=False).encode())
-        if p == '/api/relay-check':       # v2.9.20 中转池自检（面板按钮与企微菜单共用同一实现）
+        if p == '/api/relay-check':       # v2.9.21 中转池自检：**只负责开跑，立刻返回**
+            # 面板走 EdgeOne CDN（源站 15s 超时），同步等一个 ~3s 的请求会偶发 524
+            # （源站实测稳定 2.5~3.2s，但经隧道抖动可达 13.6s）。结果由前端轮询 GET 取。
             body = self._body()
             heal = not (isinstance(body, dict) and body.get('heal') is False)
-            lines = relay_report(heal=heal)
-            return self._send(200, json.dumps({'ok': not lines[0].startswith('⚠️'),
-                                               'lines': lines},
-                                              ensure_ascii=False).encode())
+            started = relay_job_start(heal=heal)
+            d = relay_job_state()
+            d['started'] = started        # False = 已有任务在跑（连点去重）
+            return self._send(200, json.dumps(d, ensure_ascii=False).encode())
         if p == '/api/hosts-check':
             # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
             if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
@@ -4452,7 +4561,7 @@ def main():
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.20，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.21，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
