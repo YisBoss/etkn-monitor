@@ -238,7 +238,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
     <div class="duo">
     <div class="card"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
     <div class="card"><div class="k">手动操作</div>
-      <div class="ops"><span class="opsl" id="opsLast1"></span><span class="opsr"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
+      <div class="ops"><span class="opsl" id="opsLast1"></span><span class="opsr"><button class="act" id="btnOrg1" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp1" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge1" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="patchCheck()">补丁自检</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
     </div>
     </div>
     <div class="card w"><div class="k">测速结果</div><div id="kSp" style="margin-top:6px"></div></div>
@@ -252,7 +252,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
       <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
     </div>
     <div class="card w"><div class="k">手动操作</div>
-      <div class="ops"><span class="opsl" id="opsLast2"></span><span class="opsr"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
+      <div class="ops"><span class="opsl" id="opsLast2"></span><span class="opsr"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="patchCheck()">补丁自检</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
     </div>
     <div class="card w"><div class="k">测速结果</div><div id="kSp2" style="margin-top:6px"></div></div>
     <div class="card w" id="taskCenter2"></div>
@@ -561,6 +561,41 @@ async function purgeRegister(){
       }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
       purgeBusy = false;
     });
+}
+
+/* v2.9.22 ETKN bind-mount 补丁自检（更新镜像后必查）。
+   面板走 EdgeOne CDN（源站 15s 超时），所以自检是异步任务：POST 只负责开跑，
+   这里再轮询 GET 取结果。检查项见宿主脚本 scripts/etkn-patch-check.sh。 */
+let patchBusy = false;
+async function patchCheck(){
+  if(patchBusy) return;
+  patchBusy = true;
+  try{
+    await fetch('/api/patch-check',{method:'POST'});
+    let d = {}, tries = 0;
+    do{
+      await new Promise(s=>setTimeout(s, 1500));
+      const r = await fetch('/api/patch-check');
+      d = await r.json();
+      tries++;
+    } while(d.running && tries < 40);
+    const res = d.result;
+    if(!res){
+      toast('补丁自检失败：'+String(d.err||'无结果').slice(0,100),'bad');
+      opsStamp('补丁自检', false);
+    }else{
+      const checks = res.checks || [];
+      const bad = checks.filter(c=>!c.ok);
+      const html = '<div style="font-size:13px;line-height:1.7">'
+        + '<div style="margin-bottom:8px;color:var(--sub)">镜像 '+esc(String(res.image_id||'').slice(0,19))+'</div>'
+        + checks.map(c=>`<div>${c.ok?'✅':'❌'} <b>${esc(c.key)}</b><br><span style="color:var(--sub)">${esc(c.detail)}</span></div>`).join('')
+        + '</div>';
+      mOpen('ETKN 补丁自检', html);
+      if(bad.length){ toast(`补丁自检有问题：${bad.length} 项`,'warn'); opsStamp('补丁自检', false); }
+      else { toast('补丁自检通过：全部正常','ok'); opsStamp('补丁自检', true); }
+    }
+  }catch(e){ toast('补丁自检请求失败：'+String(e).slice(0,80),'bad'); opsStamp('补丁自检', false); }
+  patchBusy = false;
 }
 const taskBusy = {};
 /* v2.9.0：手动操作卡左侧——最近一次操作结果+时间（本地会话记忆） */

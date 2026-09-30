@@ -3403,6 +3403,144 @@ def _host_ssh(cmd: str, timeout: int = 20):
         return False, ''
 
 
+# ---------- v2.9.22 ETKN bind-mount 补丁自检 ----------
+# 背景：ETKN 本体是 vendor 镜像 hbq0405/etkn:latest，飞牛上没有源码工程，我们改代码的
+# 唯一路子是往 docker-compose.yml 里追加 bind-mount 覆盖 vendor 模块。于是每次更新镜像
+# 都可能踩两个坑：
+#   ① compose 被重写 → mount 行丢了 → 补丁静默失效（fulfilled 退回 ~22s，功能不坏但变慢）
+#   ② 镜像里上游改了同一个文件 → 我们的是「整文件副本」补丁 → 会把新版盖回去，上游修复丢失
+# 检查逻辑放在**宿主脚本**里（monitor 容器内没有 docker CLI，也没挂 docker.sock）：
+#   /vol1/1000/docker/etkn-monitor/scripts/etkn-patch-check.sh
+# 脚本输出 JSON、退出码 0=正常 / 1=有问题。本模块只负责调用 + 推送。
+# ⚠️ 面板走 EdgeOne CDN（源站 15s 超时）→ 自检必须异步，绝不能在请求线程里等 SSH。
+_PATCH_SCRIPT = str(os.environ.get('PATCH_CHECK_SCRIPT') or '').strip()
+_PATCH_INTERVAL = int(os.environ.get('PATCH_CHECK_INTERVAL', '21600'))   # 默认 6 小时
+_patch_job = {'running': False, 'result': None, 'err': '', 'ts': 0.0,
+              'started': 0.0, 'alerted': ''}
+_patch_job_lock = threading.Lock()
+
+
+def _patch_check_run(timeout: int = 120):
+    """跑一次宿主上的补丁自检脚本。返回 (ok, dict|None, err)。"""
+    if not _PATCH_SCRIPT:
+        return False, None, '未配置 PATCH_CHECK_SCRIPT（见 .env.example）'
+    pw = _host_password()
+    if not pw:
+        return False, None, '宿主凭据不可读（缺 SUDO_PASSWORD）'
+    cmd = ("sshpass -p %s ssh -p %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+           "-o ConnectTimeout=8 -o LogLevel=ERROR %s@%s "
+           "\"echo %s | sudo -S -p '' sh %s --json 2>/dev/null\"") % (
+        shlex.quote(pw), shlex.quote(os.environ.get('SSH_PORT', '22')),
+        shlex.quote(os.environ.get('SSH_USER', 'root')),
+        shlex.quote(os.environ.get('SSH_HOST', '')),
+        shlex.quote(pw), shlex.quote(_PATCH_SCRIPT))
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, None, str(e)[:120]
+    out = (r.stdout or '').strip()
+    for ln in reversed(out.splitlines()):
+        ln = ln.strip()
+        if ln.startswith('{'):
+            try:
+                return True, json.loads(ln), ''
+            except Exception as e:
+                return False, None, '解析自检输出失败：%s' % str(e)[:80]
+    return False, None, ((out or r.stderr or '').strip().replace('\n', ' ')[:120] or '自检无输出')
+
+
+def _patch_failed_keys(res) -> str:
+    """失败项 key 排序拼接——告警去重用（失败集合不变就不重复推）。"""
+    return '|'.join(sorted(str(c.get('key')) for c in (res or {}).get('checks') or []
+                           if not c.get('ok')))
+
+
+def _patch_alert_lines(res) -> list:
+    """把自检结果里失败的项抽成告警正文行。"""
+    lines = ['镜像 %s' % (str((res or {}).get('image_id') or '未知')[:19])]
+    for c in (res or {}).get('checks') or []:
+        if not c.get('ok'):
+            lines.append('· ' + str(c.get('detail') or c.get('key') or ''))
+    if len(lines) == 1:
+        lines.append('· 自检未通过但未给出明细')
+    return lines
+
+
+def _patch_do(push: str = 'none') -> dict:
+    """跑一次自检并更新状态。push='dedup' 失败集合变化才推；'always' 每次都推。"""
+    ok, res, err = _patch_check_run()
+    if not ok or res is None:
+        with _patch_job_lock:
+            _patch_job['running'] = False
+            _patch_job['ts'] = time.time()
+            _patch_job['err'] = err or '自检失败'
+            return {'ok': False, 'err': _patch_job['err']}
+    res['ts'] = _now().isoformat(timespec='seconds')
+    key = _patch_failed_keys(res)
+    with _patch_job_lock:
+        _patch_job['running'] = False
+        _patch_job['ts'] = time.time()
+        _patch_job['result'] = res
+        _patch_job['err'] = ''
+        changed = (key != _patch_job['alerted'])
+        _patch_job['alerted'] = '' if res.get('ok') else key
+    if push != 'none' and (push == 'always' or changed) and SETTINGS.get('push_enabled'):
+        if res.get('ok'):
+            _alert_push('patch', 'ETKN 补丁自检通过',
+                        ['compose mount 行 / 补丁 md5 / 容器内生效 / 上游一致性 全部正常'],
+                        tcolor='green')
+        else:
+            _alert_push('patch', 'ETKN 补丁自检未通过（更新镜像后必查）',
+                        _patch_alert_lines(res), tcolor='yellow')
+    return res
+
+
+def _patch_job_start(push: str = 'none') -> bool:
+    """开一个后台自检任务。已有任务在跑就返回 False（去重，避免连点）。"""
+    with _patch_job_lock:
+        if _patch_job['running']:
+            return False
+        _patch_job['running'] = True
+        _patch_job['started'] = time.time()
+
+    def work():
+        try:
+            _patch_do(push)
+        except Exception as e:                  # noqa: BLE001 —— 后台线程必须兜住
+            with _patch_job_lock:
+                _patch_job['running'] = False
+                _patch_job['ts'] = time.time()
+                _patch_job['err'] = '%s: %s' % (type(e).__name__, str(e)[:120])
+
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def _patch_job_state() -> dict:
+    """当前自检状态（前端轮询用；纯内存读取，不触发 SSH）。"""
+    with _patch_job_lock:
+        d = {'running': _patch_job['running'], 'ok': None, 'err': _patch_job['err'],
+             'result': _patch_job['result'], 'ts': _patch_job['ts']}
+        if isinstance(_patch_job['result'], dict):
+            d['ok'] = bool(_patch_job['result'].get('ok'))
+        if _patch_job['started']:
+            d['elapsed'] = round((time.time() - _patch_job['started']) if _patch_job['running']
+                                 else max(0.0, _patch_job['ts'] - _patch_job['started']), 1)
+        return d
+
+
+def _patch_loop() -> None:
+    """每 _PATCH_INTERVAL 跑一次自检（失败集合变化才推送）。"""
+    time.sleep(300)                          # 启动 5 分钟后再跑，别和首轮采集抢
+    while True:
+        try:
+            _patch_job_start('dedup')
+        except Exception as e:
+            print('%s [patch] 自检线程异常：%s %s'
+                  % (_now().strftime('%H:%M:%S'), type(e).__name__, e), flush=True)
+        time.sleep(_PATCH_INTERVAL)
+
+
 def _noproxy_hit(host: str, patterns) -> bool:
     """host 是否命中 ETKN 的 no_proxy（精确 / 后缀 / *.后缀）。"""
     h = (host or '').lower().rstrip('.')
@@ -4073,7 +4211,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.21', 'readonly': False,
+                'version': 'v2.9.22', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4081,7 +4219,9 @@ class Handler(BaseHTTPRequestHandler):
                             'trigger-organize', 'wecom-test', 'wecom-menu',
                             # v2.9.8 任务中心（白名单见 ETKN_TASK_WHITELIST）
                             # v2.9.10 分类目录 + 子任务确认页（/run-task/<key>）
-                            'run-task', 'task-catalog', 'run-task-page', 'relay-check'],
+                            'run-task', 'task-catalog', 'run-task-page', 'relay-check',
+                            # v2.9.22 补丁自检
+                            'patch-check'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -4113,6 +4253,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._do_settings_get()
         if p == '/api/push-history':
             return self._send(200, json.dumps({'items': list(_push_hist)},
+                                              ensure_ascii=False).encode())
+        if p == '/api/patch-check':
+            # v2.9.22 ETKN bind-mount 补丁自检：GET 只读内存状态（异步任务见 _patch_loop）
+            return self._send(200, json.dumps(_patch_job_state(),
                                               ensure_ascii=False).encode())
         if p == '/api/hosts-status':
             # v2.8.19：只读回显当前绑定（grep 路由器 hosts，不解析不改）——GET 版；
@@ -4363,6 +4507,12 @@ class Handler(BaseHTTPRequestHandler):
             d = relay_job_state()
             d['started'] = started        # False = 已有任务在跑（连点去重）
             return self._send(200, json.dumps(d, ensure_ascii=False).encode())
+        if p == '/api/patch-check':
+            # v2.9.22 面板按钮：开一个后台自检并推卡片，立刻返回（面板走 CDN，不能同步等 SSH）
+            started = _patch_job_start('always')
+            d = _patch_job_state()
+            d['started'] = started
+            return self._send(200, json.dumps(d, ensure_ascii=False).encode())
         if p == '/api/hosts-check':
             # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
             if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
@@ -4559,9 +4709,10 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
+    threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.21，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.22，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
