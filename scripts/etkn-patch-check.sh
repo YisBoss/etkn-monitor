@@ -7,6 +7,7 @@
 #   ① compose 被重写 → mount 行丢了 → 补丁静默失效（fulfilled 退回 ~22s，功能不坏但变慢）
 #   ② 镜像里上游改了同一个文件 → 我们的补丁是「整文件副本」→ 会把新版盖回去，
 #      上游的修复/新功能静默丢失（这个更危险）
+#      三处补丁（repository / shared_pool / p115）逐个比对，任一跑偏都报 need_rebase=true
 # 本脚本就是把这两件事查出来。
 #
 # 退出码：0 = 全部正常；1 = 有问题（详见输出里的 problems[]）
@@ -19,6 +20,8 @@ PATCH_REPO=${PATCH_REPO:-$ETKN_DIR/repository_patch.py}
 PATCH_POOL=${PATCH_POOL:-$ETKN_DIR/shared_pool_patch.py}
 PATCH_P115=${PATCH_P115:-$ETKN_DIR/p115_patch.py}
 ORIG_REPO=${ORIG_REPO:-$ETKN_DIR/repository.py.orig}
+ORIG_POOL=${ORIG_POOL:-$ETKN_DIR/shared_pool.py.orig}
+ORIG_P115=${ORIG_P115:-$ETKN_DIR/p115.py.orig}
 STATE=${STATE:-$MON_DIR/data/patch-check.state}
 IMAGE=${IMAGE:-hbq0405/etkn:latest}
 CTR=${CTR:-etkn}
@@ -120,44 +123,84 @@ else
 fi
 
 # ---------- ⑥ 上游是否改过同一个文件（需不需要 rebase） ----------
-# docker create + docker cp 有点重，按镜像 ID 缓存：镜像没变就复用上次结论
+# 三处补丁都是「整文件副本」：镜像一更新，只要上游改过同名文件，我们的旧副本
+# 就会把上游的修复/新功能静默盖回去（我们的补丁可能只有十几行，盖掉的却是几百行）。
+# 这里逐个文件比对「镜像内原版」 vs 「我们保存的 .orig 基准」。
+# docker create + docker cp 有点重，按「镜像 ID + 三个基准的 md5」缓存：都没变就复用上次结论
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
 IMG_CREATED="$(docker image inspect "$IMAGE" --format '{{.Created}}' 2>/dev/null)"
-CACHED_ID=""; CACHED_VERDICT=""
+ORIG_KEY="$(md5_of "$ORIG_REPO")/$(md5_of "$ORIG_POOL")/$(md5_of "$ORIG_P115")"
+CACHED_ID=""; CACHED_VERDICT=""; CACHED_DETAIL=""; CACHED_ORIG=""
 if [ -f "$STATE" ]; then
     CACHED_ID="$(sed -n 's/^image_id=//p' "$STATE" | head -1)"
     CACHED_VERDICT="$(sed -n 's/^rebase_verdict=//p' "$STATE" | head -1)"
+    CACHED_DETAIL="$(sed -n 's/^rebase_detail=//p' "$STATE" | head -1)"
+    CACHED_ORIG="$(sed -n 's/^orig_key=//p' "$STATE" | head -1)"
 fi
 
-if [ -n "$IMG_ID" ] && [ "$IMG_ID" = "$CACHED_ID" ] && [ -n "$CACHED_VERDICT" ]; then
+emit_rebase_file() {  # emit_rebase_file <短名> <ok|rebase|unknown>
+    case "$2" in
+        ok)     add "upstream_$1" 0 "镜像内原版 $1.py 与基准一致 → 补丁可直接沿用" ;;
+        rebase) add "upstream_$1" 1 "上游改过 $1.py → 必须把补丁 rebase 到新版，否则上游修复/新功能会被旧副本静默盖掉" ;;
+        *)      add "upstream_$1" 1 "$1.py 状态未知（缺基准文件，或抽不出镜像内文件）" ;;
+    esac
+}
+
+if [ -n "$IMG_ID" ] && [ "$IMG_ID" = "$CACHED_ID" ] && [ -n "$CACHED_VERDICT" ] \
+   && [ -n "$CACHED_ORIG" ] && [ "$CACHED_ORIG" = "$ORIG_KEY" ]; then
     VERDICT="$CACHED_VERDICT"
-    add upstream_rebase_note 0 "镜像未变（${IMG_ID#sha256:} 前 12 位），沿用上次结论"
+    add upstream_rebase_note 0 "镜像与基准均未变（${IMG_ID#sha256:} 前 12 位），沿用上次结论"
+    if [ -n "$CACHED_DETAIL" ]; then
+        for _kv in $(printf '%s' "$CACHED_DETAIL" | tr ',' ' '); do
+            emit_rebase_file "${_kv%%=*}" "${_kv#*=}"
+        done
+    fi
 else
     TMPD="$(mktemp -d 2>/dev/null || echo /tmp/etkn-pc.$$)"
     mkdir -p "$TMPD"
     CNAME="etkn-patchcheck-$$"
     docker create --name "$CNAME" "$IMAGE" >/dev/null 2>&1
-    docker cp "$CNAME:$REPO_IN_CTR" "$TMPD/repo_new.py" >/dev/null 2>&1
+    _detail=""; _any_rebase=0; _any_unknown=0
+    # 每项格式：<基准.orig>|<镜像内路径>|<短名>
+    for _spec in \
+        "$ORIG_REPO|$REPO_IN_CTR|repository" \
+        "$ORIG_POOL|$POOL_IN_CTR|shared_pool" \
+        "$ORIG_P115|$P115_IN_CTR|p115"
+    do
+        _orig="${_spec%%|*}"; _rest="${_spec#*|}"
+        _path="${_rest%%|*}"; _name="${_rest##*|}"
+        _new="$TMPD/${_name}_new.py"
+        docker cp "$CNAME:$_path" "$_new" >/dev/null 2>&1
+        if [ ! -s "$_new" ]; then
+            emit_rebase_file "$_name" unknown
+            _detail="$_detail${_detail:+,}$_name=unknown"; _any_unknown=1
+        elif [ ! -s "$_orig" ]; then
+            emit_rebase_file "$_name" unknown
+            _detail="$_detail${_detail:+,}$_name=unknown"; _any_unknown=1
+        elif cmp -s "$_orig" "$_new"; then
+            emit_rebase_file "$_name" ok
+            _detail="$_detail${_detail:+,}$_name=ok"
+        else
+            _diffn="$(diff "$_orig" "$_new" 2>/dev/null | grep -c '^[<>]')"
+            add "upstream_$_name" 1 "上游改过 $_name.py（与基准 ${_orig##*/} 差异 ${_diffn} 行）→ 必须 rebase，否则上游修复/新功能会被旧副本静默盖掉"
+            _detail="$_detail${_detail:+,}$_name=rebase"; _any_rebase=1
+        fi
+    done
     docker rm -f "$CNAME" >/dev/null 2>&1
-    if [ ! -s "$TMPD/repo_new.py" ]; then
+    if [ "$_any_unknown" = "1" ]; then
         VERDICT="unknown"
-        add upstream_rebase 1 "无法从镜像 $IMAGE 抽出原版 repository.py（docker create/cp 失败）"
-    elif [ ! -s "$ORIG_REPO" ]; then
-        VERDICT="unknown"
-        add upstream_rebase 1 "缺基准文件 $ORIG_REPO，无法判断上游是否改过"
-    elif cmp -s "$ORIG_REPO" "$TMPD/repo_new.py"; then
-        VERDICT="ok"
-        add upstream_rebase 0 "镜像内原版 repository.py 与基准 ${ORIG_REPO##*/} 一致 → 补丁可直接沿用"
-    else
+    elif [ "$_any_rebase" = "1" ]; then
         VERDICT="rebase"
-        _diffn="$(diff "$ORIG_REPO" "$TMPD/repo_new.py" 2>/dev/null | grep -c '^[<>]')"
-        add upstream_rebase 1 "上游改过 repository.py（差异 ${_diffn} 行）→ 必须把补丁 rebase 到新版，否则上游修复会被旧文件盖掉"
+    else
+        VERDICT="ok"
     fi
     rm -rf "$TMPD" 2>/dev/null
     mkdir -p "$(dirname "$STATE")" 2>/dev/null
     {
         printf 'image_id=%s\n' "$IMG_ID"
         printf 'rebase_verdict=%s\n' "$VERDICT"
+        printf 'rebase_detail=%s\n' "$_detail"
+        printf 'orig_key=%s\n' "$ORIG_KEY"
         printf 'checked_at=%s\n' "$(date -Iseconds 2>/dev/null || date)"
     } > "$STATE" 2>/dev/null
 fi
