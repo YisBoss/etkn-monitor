@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.25 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.26 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -2992,8 +2992,9 @@ def _today_done_loop() -> None:
                     _page_max = ''
                     for it in items:
                         fin = it.get('finished_at') or it.get('created_at') or ''
-                        if not _page_max or fin > _page_max:
-                            _page_max = fin
+                        if not it.get('actionable'):
+                            if not _page_max or fin > _page_max:
+                                _page_max = fin
                         if fin < today_prefix:
                             continue
                         fresh.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
@@ -3021,7 +3022,9 @@ def _today_done_loop() -> None:
                     # （第 1 页里就混着 4 天前的条目，见 _dayweek_rebuild 注释），
                     # 用「整页最旧」会在第 1 页就命中 → 整轮只扫 100 条。
                     # 改成「整页最新都早于今日 0 点」才停，才真正收全今日。
-                    if _page_max and _page_max < today_prefix:
+                    if items and _page_max and _page_max < today_prefix:
+                        break
+                    if len(items) < PAGE:
                         break
                 if offset >= 30000:
                     break
@@ -3059,8 +3062,10 @@ def collect_today_done(today_prefix: str):
             _page_max = ''
             for it in items:
                 fin = it.get('finished_at') or it.get('created_at') or ''
-                if not _page_max or fin > _page_max:
-                    _page_max = fin
+                # [v2.9.26] 忽略置顶项(actionable=True)的时间，仅以普通项时间作为停页线
+                if not it.get('actionable'):
+                    if not _page_max or fin > _page_max:
+                        _page_max = fin
                 if fin < today_prefix:
                     continue
                 out.append({'id': it.get('id'), 'status': st, 'kind': kind_of(it),
@@ -3073,7 +3078,9 @@ def collect_today_done(today_prefix: str):
                             'stage': (it.get('failure_stage_title') or '')[:12],
                             'finished_at': fin})
             offset += PAGE
-            if _page_max and _page_max < today_prefix:   # v2.9.2.13：整页最新都早于今日才停
+            if items and _page_max and _page_max < today_prefix:   # v2.9.26：整页普通项最新早于今日即停
+                break
+            if len(items) < PAGE:  # 已经翻到底
                 break
             if offset >= 30000:   # v2.7.1 安全闸：防接口异常时的无限翻页（正常今日远小于此）
                 break
@@ -4223,7 +4230,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.25', 'readonly': False,
+                'version': 'v2.9.26', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4742,7 +4749,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.25，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.26，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
