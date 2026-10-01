@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.24 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.25 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -3414,12 +3414,13 @@ def _host_ssh(cmd: str, timeout: int = 20):
         return False, ''
 
 
-# ---------- v2.9.22 ETKN bind-mount 补丁自检（v2.9.24 起覆盖第三处 p115） ----------
+# ---------- v2.9.22 ETKN bind-mount 补丁自检（v2.9.24 覆盖第三处 p115；v2.9.25 上游 rebase 检查覆盖全部三处） ----------
 # 背景：ETKN 本体是 vendor 镜像 hbq0405/etkn:latest，飞牛上没有源码工程，我们改代码的
 # 唯一路子是往 docker-compose.yml 里追加 bind-mount 覆盖 vendor 模块。于是每次更新镜像
 # 都可能踩两个坑：
 #   ① compose 被重写 → mount 行丢了 → 补丁静默失效（fulfilled 退回 ~22s，功能不坏但变慢）
 #   ② 镜像里上游改了同一个文件 → 我们的是「整文件副本」补丁 → 会把新版盖回去，上游修复丢失
+#      三处补丁（repository / shared_pool / p115）逐个比对，任一跑偏都报 need_rebase=true
 # 检查逻辑放在**宿主脚本**里（monitor 容器内没有 docker CLI，也没挂 docker.sock）：
 #   /vol1/1000/docker/etkn-monitor/scripts/etkn-patch-check.sh
 # 脚本输出 JSON、退出码 0=正常 / 1=有问题。本模块只负责调用 + 推送。
@@ -4222,7 +4223,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.24', 'readonly': False,
+                'version': 'v2.9.25', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4741,7 +4742,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.24，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.25，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
