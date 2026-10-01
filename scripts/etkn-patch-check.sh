@@ -17,6 +17,7 @@ MON_DIR=${MON_DIR:-/vol1/1000/docker/etkn-monitor}
 COMPOSE=${COMPOSE:-$ETKN_DIR/docker-compose.yml}
 PATCH_REPO=${PATCH_REPO:-$ETKN_DIR/repository_patch.py}
 PATCH_POOL=${PATCH_POOL:-$ETKN_DIR/shared_pool_patch.py}
+PATCH_P115=${PATCH_P115:-$ETKN_DIR/p115_patch.py}
 ORIG_REPO=${ORIG_REPO:-$ETKN_DIR/repository.py.orig}
 STATE=${STATE:-$MON_DIR/data/patch-check.state}
 IMAGE=${IMAGE:-hbq0405/etkn:latest}
@@ -24,9 +25,13 @@ CTR=${CTR:-etkn}
 
 # 期望值：repository_patch.py 的 md5（换补丁时必须同步改这里）
 EXPECT_REPO=${EXPECT_REPO:-d08462056b43ef56793490b181286e7a}
+# 期望值：p115_patch.py 的 md5（换补丁时必须同步改这里）
+# 含两项修复：①网络层重试 ②堵住 115 /files 的 offset 回绕死循环
+EXPECT_P115=${EXPECT_P115:-1350f9246e2059dc1fa2a3b9f9be8529}
 
 REPO_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/repository.py
 POOL_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/shared_pool.py
+P115_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/p115.py
 
 MODE=json
 [ "$1" = "--text" ] && MODE=text
@@ -53,14 +58,15 @@ add() {  # add <key> <ok:0|1> <detail>
 # ---------- ① compose 里的 mount 行 ----------
 MOUNT_REPO_LINE="$(grep -c 'repository_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/repository.py' "$COMPOSE" 2>/dev/null)"
 MOUNT_POOL_LINE="$(grep -c 'shared_pool_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/shared_pool.py' "$COMPOSE" 2>/dev/null)"
-if [ "${MOUNT_REPO_LINE:-0}" -ge 1 ] && [ "${MOUNT_POOL_LINE:-0}" -ge 1 ]; then
-    add mount_lines 0 "compose 两行 bind-mount 均在（repository + shared_pool）"
-elif [ "${MOUNT_REPO_LINE:-0}" -ge 1 ]; then
-    add mount_lines 1 "compose 缺少 shared_pool_patch.py 的 mount 行（补丁可能已部分失效）"
-elif [ "${MOUNT_POOL_LINE:-0}" -ge 1 ]; then
-    add mount_lines 1 "compose 缺少 repository_patch.py 的 mount 行 → fulfilled 性能补丁已失效"
+MOUNT_P115_LINE="$(grep -c 'p115_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/p115.py' "$COMPOSE" 2>/dev/null)"
+_miss=""
+[ "${MOUNT_REPO_LINE:-0}" -lt 1 ] && _miss="$_miss repository"
+[ "${MOUNT_POOL_LINE:-0}" -lt 1 ] && _miss="$_miss shared_pool"
+[ "${MOUNT_P115_LINE:-0}" -lt 1 ] && _miss="$_miss p115"
+if [ -z "$_miss" ]; then
+    add mount_lines 0 "compose 三行 bind-mount 均在（repository + shared_pool + p115）"
 else
-    add mount_lines 1 "compose 两行 bind-mount 全部缺失 → compose 可能被重写过，补丁全部失效"
+    add mount_lines 1 "compose 缺少 bind-mount 行：${_miss# } → 对应补丁已失效"
 fi
 
 # ---------- ② 部署目录里的补丁文件本身 ----------
@@ -94,7 +100,26 @@ else
     add shared_pool 1 "容器内 shared_pool.py md5=${GOT_POOL_CTR} ≠ 部署补丁 md5=${GOT_POOL_FILE} → shared_pool 补丁没挂上"
 fi
 
-# ---------- ⑤ 上游是否改过同一个文件（需不需要 rebase） ----------
+# ---------- ⑤ p115 补丁（网络层重试 + 堵 115 /files offset 回绕死循环） ----------
+GOT_P115_FILE="$(md5_of "$PATCH_P115")"
+GOT_P115_CTR="$(docker exec "$CTR" md5sum "$P115_IN_CTR" 2>/dev/null | cut -d' ' -f1)"
+if [ -z "$GOT_P115_FILE" ]; then
+    add p115_patch 1 "p115_patch.py 不存在或不可读：$PATCH_P115"
+elif [ "$GOT_P115_FILE" = "$GOT_P115_CTR" ]; then
+    add p115_patch 0 "容器内 p115.py md5=${GOT_P115_CTR}（== 部署补丁，已生效）"
+else
+    add p115_patch 1 "容器内 p115.py md5=${GOT_P115_CTR} ≠ 部署补丁 md5=${GOT_P115_FILE} → p115 补丁没挂上（115 会再现 offset 回绕死循环）"
+fi
+# 挂上文件还不够：ETKN 是单进程 uvicorn、不热加载，进程没重启就还是旧代码。
+# 这里直接问运行中的进程有没有收敛闸。
+GOT_P115_GUARD="$(docker exec "$CTR" python -c "import etk_vnext.integrations.p115 as m; print(hasattr(m.P115StorageProvider,'_guard_page_offset'))" 2>/dev/null | tr -d '\r\n')"
+if [ "$GOT_P115_GUARD" = "True" ]; then
+    add p115_guard 0 "运行中的 p115 客户端含 _guard_page_offset 收敛闸"
+else
+    add p115_guard 1 "运行中的 p115 客户端没有 _guard_page_offset → 补丁未加载（需 docker restart $CTR），115 offset 回绕会死循环刷接口"
+fi
+
+# ---------- ⑥ 上游是否改过同一个文件（需不需要 rebase） ----------
 # docker create + docker cp 有点重，按镜像 ID 缓存：镜像没变就复用上次结论
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
 IMG_CREATED="$(docker image inspect "$IMAGE" --format '{{.Created}}' 2>/dev/null)"
