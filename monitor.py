@@ -3218,27 +3218,38 @@ def _dayweek_rebuild() -> None:
         if week_ok is None:
             week_ok = _dayweek_cache.get('week')
 
-        # ③异常值：unrec=累计未识别（poll 直读 total 的最近一次缓存）；bad_tasks=今日失败/部分任务数；
-        #    unrec_today=今日新增未识别（后两项日内口径，跨日清零）
-        _cur_unrec = _dayweek_cache.get('unrec') or 0
-        _cur_bad = _dayweek_cache.get('bad_tasks') or 0
-        _cur_urtd = _dayweek_cache.get('unrec_today') or 0
+        # ③异常值：unrec=累计未识别（全局计数器，跨日有效）；bad_tasks=今日失败/部分任务数；
+        #    unrec_today=今日新增未识别（后两项日内口径，跨日清零）。
+        # v2.9.23 跨日守卫（修「今日异常」跨日继承 Bug）：缓存日期非今日时，日内口径
+        # 一律从 0 重计，绝不把昨日 bad_tasks/unrec_today/by_kind_fail 带进新一天。
+        # 旧实现直接读缓存 → 0 点后首轮 rebuild 把昨日值原样写进今日键，随后被下面的
+        # 「防跳水」闸反复固化，面板「今日异常」长期虚高（2026-10-01 实测 1388，真值 ~250）。
+        _cache_is_today = (_dayweek_cache.get('date') == today_d)
+        if not _cache_is_today:   # 0 点翻转：先把缓存里的日内口径清零，杜绝任何后续读取拿到昨日值
+            _dayweek_cache['bad_tasks'] = 0
+            _dayweek_cache['unrec_today'] = 0
+            _dayweek_cache['by_kind_fail'] = {}
+        _cur_unrec = _dayweek_cache.get('unrec') or 0   # 累计口径，跨日保留
+        _cur_bad = (_dayweek_cache.get('bad_tasks') or 0) if _cache_is_today else 0
+        _cur_urtd = (_dayweek_cache.get('unrec_today') or 0) if _cache_is_today else 0
         _new_rec = {'succ': day_ok, 'unrec': _cur_unrec, 'bad_tasks': _cur_bad,
                     'unrec_today': _cur_urtd,
-                    'by_kind_fail': dict(_dayweek_cache.get('by_kind_fail') or {})}
-        # 异常值闸：现值异常跳水（比持久旧值少 50%+）→ 保旧值（etkn 重启窗口不许洗掉异常数）
+                    'by_kind_fail': dict(_dayweek_cache.get('by_kind_fail') or {})
+                                   if _cache_is_today else {}}
+        # 异常值闸：现值异常跳水（比持久旧值少 50%+）→ 保旧值（etkn 重启窗口不许洗掉异常数）。
+        # v2.9.23：仅当缓存属今日时才允许持久键压制——跨日首轮不得用昨日值洗回今日真值。
         _prev_unrec = _prev.get('unrec', 0) if isinstance(_prev, dict) else 0
         _prev_bad = _prev.get('bad_tasks', 0) if isinstance(_prev, dict) else 0
         _prev_urtd = _prev.get('unrec_today', 0) if isinstance(_prev, dict) else 0
         if _prev_unrec > 0 and _cur_unrec < _prev_unrec * 0.5:
             _new_rec['unrec'] = _prev_unrec
-        if _prev_bad > 0 and _cur_bad < _prev_bad * 0.5:
+        if _cache_is_today and _prev_bad > 0 and _cur_bad < _prev_bad * 0.5:
             _new_rec['bad_tasks'] = _prev_bad
-        if _prev_urtd > 0 and _cur_urtd < _prev_urtd * 0.5:
+        if _cache_is_today and _prev_urtd > 0 and _cur_urtd < _prev_urtd * 0.5:
             _new_rec['unrec_today'] = _prev_urtd
-        # 分类失败数兜底——持久旧值各分类取 max（重启窗口不许洗掉）
+        # 分类失败数兜底——持久旧值各分类取 max（重启窗口不许洗掉）；v2.9.23 跨日不继承
         _prev_bkf = _prev.get('by_kind_fail', {}) if isinstance(_prev, dict) else {}
-        if isinstance(_prev_bkf, dict) and _prev_bkf:
+        if _cache_is_today and isinstance(_prev_bkf, dict) and _prev_bkf:
             _cur_bkf = dict(_new_rec.get('by_kind_fail') or {})
             for _k, _v in _prev_bkf.items():
                 if _v > (_cur_bkf.get(_k) or 0):
@@ -4211,7 +4222,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.22', 'readonly': False,
+                'version': 'v2.9.23', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4513,6 +4524,24 @@ class Handler(BaseHTTPRequestHandler):
             d = _patch_job_state()
             d['started'] = started
             return self._send(200, json.dumps(d, ensure_ascii=False).encode())
+        if p == '/api/hermes/switch':
+            b = self._body()
+            mod = str((b or {}).get('model') or '').strip()
+            if not mod:
+                return self._send(400, json.dumps({'ok': False, 'err': 'missing model'}).encode())
+            pw = _host_password()
+            cmd = ("sshpass -p %s ssh -p %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+                   "-o ConnectTimeout=8 -o LogLevel=ERROR %s@%s "
+                   "\"echo %s | sudo -S -p '' python3 -c 'import yaml;p=\\\"/root/.hermes/config.yaml\\\";"
+                   "d=yaml.safe_load(open(p));d[\\\"model\\\"][\\\"default\\\"]=\\\"%s\\\";"
+                   "yaml.dump(d,open(p,\\\"w\\\"),allow_unicode=True,sort_keys=False)' "
+                   "&& nohup sh -c 'echo %s | sudo -S -p \'\' systemctl restart hermes-gateway' >/dev/null 2>&1 &\"") % (
+                shlex.quote(pw), shlex.quote(os.environ.get('SSH_PORT', '22')),
+                shlex.quote(os.environ.get('SSH_USER', 'root')),
+                shlex.quote(os.environ.get('SSH_HOST', '')),
+                shlex.quote(pw), mod, shlex.quote(pw))
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=25)
+            return self._send(200, json.dumps({'ok': r.returncode == 0, 'err': (r.stderr or '').strip()[:120]}).encode())
         if p == '/api/hosts-check':
             # v2.8.19：手动「重新检测 IP」——立即解析+比对+必要时改 hosts+重启 dnsmasq
             if not (SETTINGS.get('hosts_enabled') and _HOSTS_DOMAINS()):
@@ -4712,7 +4741,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.22，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.23，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
