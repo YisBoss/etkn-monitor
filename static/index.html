@@ -233,7 +233,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
   <div class="grid">
     <div class="card"><div class="k">待处理（媒体）</div><div class="v warn" id="cQueued">-<small>媒体</small></div><div class="sub" id="cQueuedSub">- 任务排队/运行</div></div>
     <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div><div class="sub" id="cDoneWk" style="margin-top:2px;color:var(--dim)">本周 -</div></div>
-    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>今日</small></div><div class="sub" id="cBadSub">- 未识别 · - 失败/部分</div><div class="sub" id="cBadAll" style="margin-top:2px;color:var(--dim)">当前未识别 - · 累计新增 -</div></div>
+    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>今日</small></div><div class="sub" id="cBadSub">当前未识别 -，失败/部分任务 - 个</div><div class="sub" id="cBadAll" style="margin-top:2px;color:var(--dim)">累计 -</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div><div class="sub" id="cEtaOrg" style="margin-top:2px">整理类预计 -</div></div>
     <div class="duo">
     <div class="card"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
@@ -1120,8 +1120,8 @@ async function refresh(){
     // v2.8.23 异常卡改版：主数=今日异常（今日新增未识别+失败/部分任务）；拆分副行；累计未识别转次要小字
     const _urToday=rec.unrecognized_today??0, _badT=dn.bad_tasks??(s.failed_today?.length||0);
     document.getElementById('cBad').innerHTML=fmtCard(_urToday+_badT,'今日');
-    document.getElementById('cBadSub').textContent=`未识别 ${_urToday} · 失败/部分任务 ${_badT} 个`;
-    document.getElementById('cBadAll').textContent=`当前未识别 ${rec.unrecognized_live??'-'} · 累计新增 ${rec.unrecognized??'-'}`;
+    document.getElementById('cBadSub').textContent=`当前未识别 ${rec.unrecognized_live??'-'}，失败/部分任务 ${_badT} 个`;
+    document.getElementById('cBadAll').textContent=`累计 ${rec.unrecognized??'-'}`;
     const e=s.eta||{}, eo=e.organize||{};
     document.getElementById('cEta').textContent=e.eta_text||'计算中';
     document.getElementById('cEtaSub').textContent=`速率 ${e.rate||0} 媒体/分 · 剩 ${e.remaining_media||0} 媒体（窗口 ${e.window_min||10} 分）${(e.rate===0&&e.remaining_media>0)?' · 窗口内暂无完成':''}`;
