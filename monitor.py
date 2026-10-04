@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.11.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.12.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -3446,17 +3446,23 @@ def _dayweek_rebuild() -> None:
         # 旧实现直接读缓存 → 0 点后首轮 rebuild 把昨日值原样写进今日键，随后被下面的
         # 「防跳水」闸反复固化，面板「今日异常」长期虚高（2026-10-01 实测 1388，真值 ~250）。
         _cache_is_today = (_dayweek_cache.get('date') == today_d)
-        if not _cache_is_today:   # 0 点翻转：先把缓存里的日内口径清零，杜绝任何后续读取拿到昨日值
-            _dayweek_cache['bad_tasks'] = 0
-            _dayweek_cache['unrec_today'] = 0
-            _dayweek_cache['by_kind_fail'] = {}
+        # v3.12.0 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
+        # 把 daily.json「今日键」的日内口径（unrec_today/bad_tasks/by_kind_fail）写成 0；
+        # 而 poll 回填只改内存缓存、要等下一轮 rebuild 才落盘 → 实测今日 unrec_today 长期落 0
+        # （历史日正常，页面显示的是实时值所以看不出）。改为以「磁盘今日键」为下限，绝不回退。
+        _p_ut  = ((_prev.get('unrec_today', 0) or 0) if isinstance(_prev, dict) else 0)
+        _p_bt  = ((_prev.get('bad_tasks', 0) or 0) if isinstance(_prev, dict) else 0)
+        _p_bkf = dict(_prev.get('by_kind_fail') or {}) if isinstance(_prev, dict) else {}
+        if not _cache_is_today:   # 跨日翻转 / 重启：清缓存里的昨日日内口径，但用今日磁盘值垫底
+            _dayweek_cache['bad_tasks'] = _p_bt
+            _dayweek_cache['unrec_today'] = _p_ut
+            _dayweek_cache['by_kind_fail'] = dict(_p_bkf)
         _cur_unrec = _dayweek_cache.get('unrec') or 0   # 累计口径，跨日保留
-        _cur_bad = (_dayweek_cache.get('bad_tasks') or 0) if _cache_is_today else 0
-        _cur_urtd = (_dayweek_cache.get('unrec_today') or 0) if _cache_is_today else 0
+        _cur_bad = _dayweek_cache.get('bad_tasks') or 0
+        _cur_urtd = _dayweek_cache.get('unrec_today') or 0
         _new_rec = {'succ': day_ok, 'unrec': _cur_unrec, 'bad_tasks': _cur_bad,
                     'unrec_today': _cur_urtd,
-                    'by_kind_fail': dict(_dayweek_cache.get('by_kind_fail') or {})
-                                   if _cache_is_today else {}}
+                    'by_kind_fail': dict(_dayweek_cache.get('by_kind_fail') or {})}
         # 异常值闸：现值异常跳水（比持久旧值少 50%+）→ 保旧值（etkn 重启窗口不许洗掉异常数）。
         # v2.9.23：仅当缓存属今日时才允许持久键压制——跨日首轮不得用昨日值洗回今日真值。
         _prev_unrec = _prev.get('unrec', 0) if isinstance(_prev, dict) else 0
@@ -4443,7 +4449,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v3.11.1', 'readonly': False,
+                'version': 'v3.12.0', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4529,6 +4535,36 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({'items': list(_speed_hist),
                                                'etkn_net': _etkn_net_env(),
                                                'etkn_deps': _etkn_deps_public()},
+                                              ensure_ascii=False).encode())
+        if p == '/api/daily-trend':       # v3.12.0：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
+            try:
+                _n = int(urllib.parse.parse_qs(u.query).get('days', ['14'])[0])
+            except Exception:
+                _n = 14
+            _n = max(3, min(90, _n))
+            _tbl = _dayweek_daily_load()
+            _today = _today_prefix()[:10]
+            # 今日一律以实时快照为准（与首屏「今日完成/异常」严格同源，不受落盘时序影响）
+            _snap = (_state.get('snapshot') or {})
+            _rec = (_snap.get('records') or {})
+            _fut = {}
+            if _rec.get('success') is not None:
+                _fut['succ'] = _rec.get('success')
+            if _rec.get('unrecognized_today') is not None:
+                _fut['unrec_today'] = _rec.get('unrecognized_today')
+            _dbt = (_snap.get('done') or {}).get('bad_tasks')
+            if _dbt is not None:
+                _fut['bad_tasks'] = _dbt
+            _days = []
+            for _d in sorted(_tbl.keys())[-_n:]:
+                _v = _tbl.get(_d) or {}
+                _it = {'date': _d, 'succ': _v.get('succ') or 0,
+                       'unrec_today': _v.get('unrec_today') or 0,
+                       'bad_tasks': _v.get('bad_tasks') or 0}
+                if _d == _today:
+                    _it.update(_fut)
+                _days.append(_it)
+            return self._send(200, json.dumps({'days': _days, 'today': _today},
                                               ensure_ascii=False).encode())
         if p == '/api/task-catalog':        # v2.9.10：面板「任务中心」与企微菜单同源
             return self._send(200, json.dumps(
@@ -4992,7 +5028,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v3.11.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v3.12.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
