@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.0.7 —— 毛玻璃重构（Hermes 2026-10-04）
+   ETKN 监控 · 界面 v3.0.10 —— 毛玻璃重构（Hermes 2026-10-04）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -21,22 +21,22 @@ try{
 
 /* ---------- 设计令牌 · 深色（玻璃）---------- */
 :root{
-  --bg:#0b1019;
-  --aur1:rgba(64,128,255,.98);
-  --aur2:rgba(160,94,255,.88);
-  --aur3:rgba(0,238,208,.72);
-  --glass:rgba(255,255,255,.13);
-  --glass-2:rgba(255,255,255,.088);
+  --bg:#0c1119;
+  --aur1:rgba(64,128,255,.40);
+  --aur2:rgba(160,94,255,.32);
+  --aur3:rgba(0,238,208,.24);
+  --glass:rgba(24,32,45,.94);
+  --glass-2:rgba(28,37,51,.95);
   --glass-line:rgba(255,255,255,.20);
   --glass-line-hi:rgba(255,255,255,.34);
   --glass-hi:rgba(255,255,255,.10);
-  --blur:34px;
+  --blur:20px;
   --card:#151c26;
   --line:rgba(255,255,255,.10);
   --line-hi:rgba(255,255,255,.22);
   --tx:#eaf1fa;
-  --sub:#a3b4c8;
-  --dim:#7d8fa3;
+  --sub:#cfdaea;
+  --dim:#a6b6ca;
   --ok:#34d399;
   --bad:#fb7185;
   --warn:#fbbf24;
@@ -60,11 +60,11 @@ try{
 /* ---------- 设计令牌 · 浅色（磨砂白）---------- */
 html[data-theme="light"]{
   --bg:#e2e9f6;
-  --aur1:rgba(46,110,245,.62);
-  --aur2:rgba(139,72,255,.50);
-  --aur3:rgba(0,175,165,.46);
-  --glass:rgba(255,255,255,.55);
-  --glass-2:rgba(255,255,255,.72);
+  --aur1:rgba(46,110,245,.22);
+  --aur2:rgba(139,72,255,.17);
+  --aur3:rgba(0,175,165,.15);
+  --glass:rgba(255,255,255,.88);
+  --glass-2:rgba(255,255,255,.93);
   --glass-line:rgba(255,255,255,.92);
   --glass-line-hi:rgba(255,255,255,1);
   --glass-hi:rgba(255,255,255,.9);
@@ -72,8 +72,8 @@ html[data-theme="light"]{
   --line:rgba(15,23,35,.13);
   --line-hi:rgba(15,23,35,.26);
   --tx:#0e1724;
-  --sub:#4c5969;
-  --dim:#78859a;
+  --sub:#3e4a5a;
+  --dim:#69768a;
   --ok:#059669;
   --bad:#e11d48;
   --warn:#b45309;
@@ -113,8 +113,8 @@ body{
 @media(min-width:900px){body{padding:18px}}
 /* 漂移光斑层：纯装饰、不吃点击 */
 .aurora{position:fixed;inset:-10vmax;z-index:-2;pointer-events:none;overflow:hidden}
-.aurora i{position:absolute;display:block;border-radius:50%;opacity:1;
-  filter:blur(16px);will-change:transform}
+.aurora i{position:absolute;display:block;border-radius:50%;opacity:.55;
+  filter:blur(42px);will-change:transform}
 .aurora i:nth-child(1){width:46vmax;height:46vmax;left:-4vmax;top:-2vmax;
   background:radial-gradient(circle at 35% 35%,var(--aur1),transparent 50%);
   animation:aur-drift-a 52s ease-in-out infinite}
@@ -134,10 +134,10 @@ body{
 @keyframes aur-drift-c{0%,100%{transform:translate3d(0,0,0) scale(.96)}
   50%{transform:translate3d(4vmax,-6vmax,0) scale(1.08)}}
 /* 细颗粒噪点：平滑渐变被模糊后与未模糊无差别，毛玻璃必须有高频细节才「显形」 */
-.grain{position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.10;
+.grain{position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.035;
   background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/></filter><rect width='160' height='160' filter='url(%23n)'/></svg>");
   background-repeat:repeat;background-size:160px 160px}
-html[data-theme="light"] .grain{opacity:.075}
+html[data-theme="light"] .grain{opacity:.03}
 
 option{background:var(--card);color:var(--tx)}
 
@@ -190,11 +190,8 @@ option{background:var(--card);color:var(--tx)}
   box-shadow:var(--shadow),inset 0 -1px 0 rgba(255,255,255,.05);
   transition:border-color .22s,box-shadow .22s,transform .22s}
 /* 顶部高光：玻璃的「厚度感」 */
-.card::after{content:'';position:absolute;inset:0;border-radius:16px;pointer-events:none;
-  background:
-    linear-gradient(135deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.06) 20%,transparent 44%,transparent 100%),
-    linear-gradient(90deg,transparent 30%,rgba(255,255,255,.30) 50%,transparent 70%) top/100% 1px no-repeat;
-  opacity:1;mix-blend-mode:screen}
+.card::after{content:'';position:absolute;left:0;right:0;top:0;height:1px;border-radius:16px 16px 0 0;
+  pointer-events:none;background:linear-gradient(90deg,transparent,rgba(255,255,255,.28),transparent)}
 .card.w{grid-column:1/-1}
 @media(min-width:900px){.card{padding:15px}}
 @media(min-width:901px){
@@ -212,14 +209,13 @@ option{background:var(--card);color:var(--tx)}
 .m-eta{--m:var(--acc)}
 
 /* ---------- 字级 ---------- */
-.k{color:var(--sub);font-size:12px;font-weight:600;letter-spacing:.02em;display:block}
+.k{color:var(--sub);font-size:12.5px;font-weight:600;letter-spacing:.02em;display:block}
 .v{font-size:28px;font-weight:800;margin:3px 0 2px;line-height:1.12;letter-spacing:-.02em;
   font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .v small{font-size:11.5px;color:var(--sub);font-weight:500;margin-left:5px;font-family:inherit;letter-spacing:0}
 .eta{font-size:24px;font-weight:800;color:var(--acc);margin:3px 0 2px;line-height:1.15;
-  font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  text-shadow:0 0 22px rgba(96,165,250,.35)}
-.sub{font-size:12px;color:var(--sub);line-height:1.5}
+  font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.sub{font-size:12.5px;color:var(--sub);line-height:1.55}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.acc{color:var(--acc)}
 #cEta,#cQueued,#cDone,#cBad{transition:color .3s}
 
@@ -457,10 +453,8 @@ input[type=number]{width:90px}
   box-shadow:0 -12px 30px -22px rgba(0,0,0,.9)}
 @media(min-width:900px){.stickybar{margin:12px -15px -15px;padding:11px 15px}}
 
-html[data-theme="light"] .card::after{mix-blend-mode:normal;
-  background:
-    linear-gradient(135deg,rgba(255,255,255,.85) 0%,rgba(255,255,255,.30) 22%,transparent 48%),
-    linear-gradient(90deg,transparent 30%,rgba(255,255,255,1) 50%,transparent 70%) top/100% 1px no-repeat}
+html[data-theme="light"] .card::after{
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.95),transparent)}
 
 /* ---------- 页面切换入场动效 ---------- */
 .page.enter .card{animation:rise .38s cubic-bezier(.22,.8,.3,1) both}
@@ -494,7 +488,7 @@ html[data-theme="light"] .card::after{mix-blend-mode:normal;
 <body>
 <div class="aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 <div class="grain" aria-hidden="true"></div>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v3.0.7</span></h1><span class="updated" id="updated">连接中…</span><span class="hdrbtns"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button><span class="tag" id="notifyTag" title="告警通知渠道" style="color:var(--dim)">📣 —</span></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v3.0.10</span></h1><span class="updated" id="updated">连接中…</span><span class="hdrbtns"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button><span class="tag" id="notifyTag" title="告警通知渠道" style="color:var(--dim)">📣 —</span></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs compact">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -863,7 +857,7 @@ async function patchCheck(){
       const checks = res.checks || [];
       const bad = checks.filter(c=>!c.ok);
       const good = checks.filter(c=>c.ok);
-      /* v3.0.7：失败项**置顶并高亮**——此前按原顺序铺开，失败项排在第 15 位，
+      /* v3.0.10：失败项**置顶并高亮**——此前按原顺序铺开，失败项排在第 15 位，
          手机上一屏翻不到，用户反馈「说有一项有问题但我怎么没看到」。 */
       const ordered = bad.concat(good);
       const head = bad.length
