@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.26 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.27 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -3954,6 +3954,8 @@ def poll_once():
     _s_ut, _b_ut = api_get(f'/api/p115/records?per_page=1&page=1&status=unrecognized'
                            f'&processed_from={urllib.parse.quote(today_prefix)}')
     _ur_today = (_b_ut or {}).get('total') or 0 if _s_ut == 200 else None
+    # v2.9.27：实时「当前未识别」快照（持久化保护前）——与「累计新增」分开展示（用户 2026-10-04 定版 C）
+    _ur_live = _ur_total
     # v2.8.22：异常值持久化消费——持久缓存（daily.json 今日键）1h 闸内优先；
     # 源头值异常跳水（< 持久值 50%）时保持久值（etkn 重启窗口不许洗掉异常数）
     _p_unrec = _dayweek_cache.get('unrec') or 0
@@ -3968,7 +3970,8 @@ def poll_once():
             _ur_today = _p_urtd
     _p_bad = _dayweek_cache.get('bad_tasks') or 0
     snap['records'] = {'success': _dayweek_cache['day'] if (_dw_ok and _dw_fresh) else None,
-                       'unrecognized': _ur_total,
+                       'unrecognized': _ur_total,          # 累计新增未识别（历史高水位，跨日保留）
+                       'unrecognized_live': _ur_live,      # 当前未识别（实时真值，未过持久化保护）
                        'unrecognized_today': _ur_today,
                        'total': _dayweek_cache['day'] if (_dw_ok and _dw_fresh) else None}
     snap['week'] = {'media': _dayweek_cache['week'] if _dw_fresh else None}
@@ -4230,7 +4233,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.26', 'readonly': False,
+                'version': 'v2.9.27', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4749,7 +4752,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.26，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.27，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)

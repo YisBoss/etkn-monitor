@@ -233,7 +233,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
   <div class="grid">
     <div class="card"><div class="k">待处理（媒体）</div><div class="v warn" id="cQueued">-<small>媒体</small></div><div class="sub" id="cQueuedSub">- 任务排队/运行</div></div>
     <div class="card"><div class="k">今日完成（媒体）</div><div class="v ok" id="cDone">-<small>媒体</small></div><div class="sub" id="cDoneSub">- 任务</div><div class="sub" id="cDoneWk" style="margin-top:2px;color:var(--dim)">本周 -</div></div>
-    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>今日</small></div><div class="sub" id="cBadSub">- 未识别 · - 失败/部分</div><div class="sub" id="cBadAll" style="margin-top:2px;color:var(--dim)">累计未识别 -</div></div>
+    <div class="card"><div class="k">异常（媒体）</div><div class="v bad" style="cursor:pointer" id="cBad" onclick="showBad()">-<small>今日</small></div><div class="sub" id="cBadSub">- 未识别 · - 失败/部分</div><div class="sub" id="cBadAll" style="margin-top:2px;color:var(--dim)">当前未识别 - · 累计新增 -</div></div>
     <div class="card"><div class="k">预计完成（ETA）</div><div class="eta" id="cEta">-</div><div class="sub" id="cEtaSub">滚动窗口计算</div><div class="sub" id="cEtaOrg" style="margin-top:2px">整理类预计 -</div></div>
     <div class="duo">
     <div class="card"><div class="k">分类队列（媒体·任务）</div><div id="kQ" style="margin-top:6px">-</div></div>
@@ -249,7 +249,7 @@ table td.num,table th.num{width:1%;white-space:nowrap;padding-left:14px;padding-
   <div class="grid">
     <div class="card w"><div class="k">今日分类统计（任务口径；成功/异常为媒体项）</div>
       <table id="tKind"><thead><tr><th>类型</th><th class="num">任务</th><th class="num">任务项</th><th class="num">成功媒体</th><th class="num">异常媒体</th><th class="num">失败/部分任务</th></tr></thead><tbody></tbody></table>
-      <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（p115 口径）</div>
+      <div class="sub" style="margin-top:6px">汇总对齐入库页：完成 <span id="sumDone">-</span> 媒体 · 异常 <span id="sumBad">-</span> 未识别（当前 · p115 口径）</div>
     </div>
     <div class="card w"><div class="k">手动操作</div>
       <div class="ops"><span class="opsl" id="opsLast2"></span><span class="opsr"><button class="act" id="btnOrg2" onclick="mOpen('手动整理网盘文件','调用 ETKN 原生功能：扫描 115 待整理目录并按现有规则识别整理。<br><br>提交后任务进入 ETKN 队列，可随时在 ETKN 任务中心取消。',()=>runTask('organize-p115',['btnOrg1','btnOrg2'],'提交中…','手动整理网盘文件'))">手动整理网盘文件</button><button class="act" id="btnSp2" onclick="runSpeedtest()">开始测速</button><button class="act lnk" id="btnPurge2" onclick="purgeRegister()">清空共享登记积压</button><button class="act lnk" onclick="patchCheck()">补丁自检</button><button class="act lnk" onclick="openEtknSite()">打开 ETKN 原站 ↗</button></span></div>
@@ -679,7 +679,7 @@ async function showBad(){
     const b=await (await fetch('/api/bad-media')).json();
     const rows=(b.items||[]);
     body.innerHTML = rows.length
-      ? `<div class="sub" style="margin-bottom:6px">${b.date} · 今日异常 ${b.total??rows.length}（未识别 ${b.unrecognized_today??'-'} · 最多展示 60） · 累计未识别 ${b.unrecognized_all ?? '-'}</div>`+
+      ? `<div class="sub" style="margin-bottom:6px">${b.date} · 今日异常 ${b.total??rows.length}（未识别 ${b.unrecognized_today??'-'} · 最多展示 60） · 当前未识别 ${b.unrecognized_all ?? '-'}</div>`+
         `<div class="flist" style="max-height:50vh">`+rows.map(x=>
           `<div class="sp"><span style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(x.name||'-').replace(/</g,'&lt;')}</span>`+
           `<span class="sub">${(x.at||'').slice(11,16)} ${(x.reason||x.status||'').slice(0,26)}</span></div>`).join('')+`</div>`
@@ -1121,7 +1121,7 @@ async function refresh(){
     const _urToday=rec.unrecognized_today??0, _badT=dn.bad_tasks??(s.failed_today?.length||0);
     document.getElementById('cBad').innerHTML=fmtCard(_urToday+_badT,'今日');
     document.getElementById('cBadSub').textContent=`未识别 ${_urToday} · 失败/部分任务 ${_badT} 个`;
-    document.getElementById('cBadAll').textContent=`累计未识别 ${rec.unrecognized??'-'}`;
+    document.getElementById('cBadAll').textContent=`当前未识别 ${rec.unrecognized_live??'-'} · 累计新增 ${rec.unrecognized??'-'}`;
     const e=s.eta||{}, eo=e.organize||{};
     document.getElementById('cEta').textContent=e.eta_text||'计算中';
     document.getElementById('cEtaSub').textContent=`速率 ${e.rate||0} 媒体/分 · 剩 ${e.remaining_media||0} 媒体（窗口 ${e.window_min||10} 分）${(e.rate===0&&e.remaining_media>0)?' · 窗口内暂无完成':''}`;
@@ -1146,7 +1146,7 @@ async function refresh(){
     // 分类统计：桌面 5 列 / 手机 3 列（任务·项、成功·异常合并），按断点重渲染
     renderKind(dn.by_kind||{});
     document.getElementById('sumDone').textContent=rec.success??'-';
-    document.getElementById('sumBad').textContent=rec.unrecognized??'-';
+    document.getElementById('sumBad').textContent=rec.unrecognized_live??'-';
     // 失败明细 + 重试按钮（仅刮削入库类：按 workflow_type 过滤）+ 空态占位
     const tf=document.querySelector('#tFail tbody');tf.innerHTML='';
     const frows=(s.failed_today||[]).slice(0,30);
