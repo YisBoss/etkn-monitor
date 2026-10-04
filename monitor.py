@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.13.2 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.13.4 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -496,6 +496,34 @@ def _menu_record(ok, msg):
     return ok, msg
 
 
+def _wecom_last_path() -> str:
+    base = os.environ.get('SETTINGS_PATH') or '/app/data/settings.json'
+    return os.path.join(os.path.dirname(base), 'wecom_last.json')
+
+
+def _wecom_last_load() -> None:
+    """v3.13.4：最近一次企微发送结果落盘——重启后不回「暂无」（此前纯内存，一重启就丢）。"""
+    try:
+        with open(_wecom_last_path(), encoding='utf-8') as f:
+            d = json.load(f)
+        if isinstance(d, dict) and d.get('ts'):
+            _wecom_last.update({'ts': str(d.get('ts')), 'ok': bool(d.get('ok')),
+                                'err': str(d.get('err') or '')[:200]})
+    except Exception:
+        pass
+
+
+def _wecom_last_set(ok, err) -> None:
+    """更新内存并落盘（两条发送路径共用）。"""
+    _wecom_last.update({'ts': _now().isoformat(timespec='seconds'),
+                        'ok': bool(ok), 'err': (err or '')[:200]})
+    try:
+        with open(_wecom_last_path(), 'w', encoding='utf-8') as f:
+            json.dump(dict(_wecom_last), f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _wecom_cfg() -> dict:
     return {'corpid': (SETTINGS.get('wecom_corpid') or '').strip(),
             'agentid': str(SETTINGS.get('wecom_agentid') or '').strip(),
@@ -696,7 +724,7 @@ def wecom_push(text: str, title: str = '', touser: str = '', buttons: list = Non
         ok, e = (True, '') if not iu else (False, '部分接收人无效：%s' % iu)
     else:
         ok, e = False, '%s %s' % (d.get('errcode'), d.get('errmsg'))
-    _wecom_last.update({'ts': _now().isoformat(timespec='seconds'), 'ok': ok, 'err': e})
+    _wecom_last_set(ok, e)
     return ok, e
 
 
@@ -743,7 +771,7 @@ def wecom_push_news(articles: list, touser: str = ''):
         ok, e = (True, '') if not iu else (False, '部分接收人无效：%s' % iu)
     else:
         ok, e = False, '%s %s' % (d.get('errcode'), d.get('errmsg'))
-    _wecom_last.update({'ts': _now().isoformat(timespec='seconds'), 'ok': ok, 'err': e})
+    _wecom_last_set(ok, e)
     return ok, e
 
 
@@ -3446,7 +3474,7 @@ def _dayweek_rebuild() -> None:
         # 旧实现直接读缓存 → 0 点后首轮 rebuild 把昨日值原样写进今日键，随后被下面的
         # 「防跳水」闸反复固化，面板「今日异常」长期虚高（2026-10-01 实测 1388，真值 ~250）。
         _cache_is_today = (_dayweek_cache.get('date') == today_d)
-        # v3.13.2 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
+        # v3.13.4 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
         # 把 daily.json「今日键」的日内口径（unrec_today/bad_tasks/by_kind_fail）写成 0；
         # 而 poll 回填只改内存缓存、要等下一轮 rebuild 才落盘 → 实测今日 unrec_today 长期落 0
         # （历史日正常，页面显示的是实时值所以看不出）。改为以「磁盘今日键」为下限，绝不回退。
@@ -4449,7 +4477,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v3.13.2', 'readonly': False,
+                'version': 'v3.13.4', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4536,7 +4564,7 @@ class Handler(BaseHTTPRequestHandler):
                                                'etkn_net': _etkn_net_env(),
                                                'etkn_deps': _etkn_deps_public()},
                                               ensure_ascii=False).encode())
-        if p == '/api/daily-trend':       # v3.13.2：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
+        if p == '/api/daily-trend':       # v3.13.4：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
             try:
                 _n = int(urllib.parse.parse_qs(u.query).get('days', ['14'])[0])
             except Exception:
@@ -5010,6 +5038,7 @@ def main():
     import faulthandler, sys
     faulthandler.dump_traceback_later(180, repeat=True, file=sys.stderr)
     _warmup_from_cache()
+    _wecom_last_load()   # v3.13.4：恢复最近一次企微发送结果（重启前写盘）
     # v2.9.30：EM 启动时对齐一次 ETKN 任务目录（用户明确要求：只随启动跟随，不做定时跟随）。
     # 放在各轮询线程 / HTTP 服务之前完成——启动即带最新目录，面板与企微菜单三处同步。
     # 拉不到 ETKN 时回退上次落盘缓存，再不行沿用静态白名单（绝不因跟随失败而起不来）。
@@ -5028,7 +5057,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v3.13.2，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v3.13.4，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
