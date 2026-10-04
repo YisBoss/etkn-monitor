@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.29 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.30 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -1070,6 +1070,8 @@ def relay_job_state() -> dict:
 
 _WECOM_LINK_MENU_NAME = '🔗快捷入口'      # 4+12 = 16B
 _WECOM_LINK_MENU_MAX = 5                 # 企微二级菜单上限 5（面板卡片链接最多可配 6）
+_WECOM_TC_MENU_NAME = '📚任务中心'        # v2.9.30：菜单尾「任务中心」项名（子按钮按动态分类重填）
+_WECOM_CAT_MENU_MAX = 5                  # v2.9.30：任务中心二级按钮上限（企微二级最多 5 个）
 _WECOM_MENU_TAIL = [
     {'name': '🔧运维操作', 'sub_button': [                       # 16B
         {'type': 'click', 'name': '📁整理一批', 'key': 'ORGANIZE'},   # 16B
@@ -1097,6 +1099,9 @@ def _menu_links_sig() -> str:
     links = (_norm_card_links(SETTINGS.get('card_links')) or CARD_LINKS_DEFAULT)
     links = links[:_WECOM_LINK_MENU_MAX]
     return '|'.join('%s>%s' % (x['text'], x['url']) for x in links)
+    # 说明（v2.9.30）：任务中心二级按钮已改为「按动态分类生成」，分类一变菜单就得重下发。
+    # 但指纹只在「下发前」更新（见 wecom_menu_apply），本轮启动若不为空即触发一次重下发，
+    # 之后各轮指纹一致不再打扰企微——不需要额外的定时对比。
 
 
 def _wecom_build_menu() -> dict:
@@ -1147,6 +1152,7 @@ def wecom_menu_apply():
     tok, err = wecom_token()
     if not tok:
         return _menu_record(False, err)
+    _menu_update_task_buttons()          # v2.9.30：二级「任务中心」按当前动态分类重填
     menu = _wecom_build_menu()
     _e = _wecom_menu_check(menu)
     if _e:
@@ -1214,6 +1220,163 @@ TASK_CATALOG = [
 ETKN_TASK_WHITELIST = {t[0]: t[1] for c in TASK_CATALOG for t in c['tasks']}
 # 企微菜单 click key → 分类（点分类 = 推一条图文消息展开该类的子任务）
 _WECOM_CAT_KEYS = {'CAT_%s' % c['key'].upper(): c for c in TASK_CATALOG}
+
+
+# ---------- v2.9.30 任务目录「EM 启动时跟随 ETKN」（明确不做定时跟随） ----------
+# 上面的 TASK_CATALOG 是 v2.9.10 人工挑的白名单，ETKN 作者改任务后 em 不会跟。v2.9.30：
+# EM **每次启动时**拉一次 ETKN /api/task-center/catalog，自动重建目录；面板「任务中心」、
+# 企微菜单「任务中心」、/api/task-catalog 三处都读同一个 TASK_CATALOG，因此一次刷新三处同步。
+# 不做定时跟随（按用户要求）；拉不到 ETKN 用上次落盘缓存，再不行才用上面的静态兜底。
+# 白名单安全策略**保留**：只收「就绪(ready) + 非破坏性 + 免参数可一键触发」的任务。
+TASK_CATALOG_SOURCE = {'from': 'static', 'ts': '', 'reason': '尚未刷新'}
+# 破坏性任务：删数据/改配置，绝不放进面板与企微菜单（点一下就执行，不可回退）
+_DANGEROUS_TASK_KEYS = {'delete-115-shares', 'execute-duplicate-media', 'apply-auto-tags',
+                        'manually-correct-organize-records', 'scan-duplicate-media',
+                        'acquire-cloud-resource'}
+# 需先选目标/带参数的任务：面板只会发空参数 {"parameters":{}} → 收进来是死按钮
+_NEEDS_PARAM_TASK_KEYS = {'refresh-one-virtual-library', 'maintain-virtual-library-path',
+                          'process-local-media-paths', 'process-virtual-media-paths',
+                          'create-logical-season-share'}
+_TASK_ICON_BY_CAT = {'media': '🎬', 'organize': '📁', 'subscription': '📺',
+                     'library': '📚', 'account': '🔑'}
+# ETKN 的 categories 接口只声明 4 类，account 类没给 label，这里兜底中文名
+_TASK_LABEL_FALLBACK = {'account': '账号与系统'}
+# 企微菜单二级按钮只有 16 字节，动态分类名太长会被截成「115 与整」这种；已知分类给短名，
+# 未知分类（ETKN 将来新增）退回「图标+label 截断」，仍然跟着变。
+_CAT_MENU_SHORT = {'media': '🎬媒体维护', 'organize': '📁115整理', 'subscription': '📺订阅追剧',
+                   'library': '📚媒体库', 'account': '🔑账号系统'}
+# 我方静态短描述（更贴面板口径）；ETKN 没有的 key 用它的 description 压成一行
+_TASK_DESC_STATIC = {t[0]: t[2] for c in TASK_CATALOG for t in c['tasks']}
+
+
+def _one_line(s: str, limit: int = 46) -> str:
+    s = re.sub(r'\s+', ' ', (s or '').strip())
+    return s if len(s) <= limit else s[:limit - 1] + '…'
+
+
+def _task_catalog_cache_path() -> str:
+    base = os.environ.get('SETTINGS_PATH') or '/app/data/settings.json'
+    return os.path.join(os.path.dirname(base), 'task_catalog_cache.json')
+
+
+def _task_catalog_cache_write(cat: list) -> None:
+    try:
+        p = _task_catalog_cache_path()
+        tmp = p + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'ts': _now().isoformat(timespec='seconds'), 'categories': cat},
+                      f, ensure_ascii=False, indent=1)
+        os.replace(tmp, p)
+    except Exception as e:
+        print('任务目录缓存落盘失败：%s' % str(e)[:120], flush=True)
+
+
+def _task_catalog_cache_load() -> list:
+    try:
+        with open(_task_catalog_cache_path(), encoding='utf-8') as f:
+            d = json.load(f)
+        cats = d.get('categories') if isinstance(d, dict) else None
+        if isinstance(cats, list) and cats:
+            TASK_CATALOG_SOURCE.update({'from': 'cache', 'ts': d.get('ts') or '',
+                                        'reason': 'ETKN 不可达，沿用上次缓存'})
+            return cats
+    except Exception:
+        pass
+    return []
+
+
+def _task_catalog_from_etkn() -> list:
+    """拉 ETKN 目录，按安全策略转成 em 的 TASK_CATALOG 结构；失败返回 []。"""
+    if not _cookie['value']:
+        with _sess_lock:
+            if not _cookie['value']:
+                login()
+    s, d = api_get('/api/task-center/catalog')
+    if s != 200 or not isinstance(d, dict):
+        return []
+    items = d.get('items') or []
+    cats_meta = {c.get('key'): c for c in (d.get('categories') or []) if isinstance(c, dict)}
+    order, labels, buckets = [], {}, {}
+    for it in items:
+        if it.get('implementation_status') != 'ready':
+            continue
+        k = it.get('key') or ''
+        if not k or k in _DANGEROUS_TASK_KEYS:
+            continue
+        ck = it.get('category') or 'other'
+        if ck not in buckets:
+            buckets[ck] = []
+            order.append(ck)
+        labels[ck] = ((cats_meta.get(ck) or {}).get('label')
+                      or _TASK_LABEL_FALLBACK.get(ck) or ck)
+        desc = _TASK_DESC_STATIC.get(k) or _one_line(it.get('description') or it.get('title') or '')
+        buckets[ck].append((k, it.get('title') or k, desc))
+    out = []
+    for ck in order:
+        tasks = [t for t in buckets[ck] if t[0] not in _NEEDS_PARAM_TASK_KEYS][:12]
+        if not tasks:
+            continue
+        out.append({'key': ck, 'label': labels.get(ck, ck),
+                    'icon': _TASK_ICON_BY_CAT.get(ck, '🧩'), 'tasks': tasks})
+    return out
+
+
+def refresh_task_catalog_cache(force: bool = False) -> bool:
+    """EM 启动时对齐 ETKN 任务目录（也可被 /api/task-catalog-refresh 手动触发）。"""
+    global TASK_CATALOG, ETKN_TASK_WHITELIST, _WECOM_CAT_KEYS
+    new = []
+    try:
+        new = _task_catalog_from_etkn()
+    except Exception as e:
+        print('任务目录跟随失败：%s' % str(e)[:140], flush=True)
+    if new:
+        TASK_CATALOG = new
+        TASK_CATALOG_SOURCE.update({'from': 'etkn',
+                                    'ts': _now().isoformat(timespec='seconds'),
+                                    'reason': '已对齐 ETKN 实时目录'})
+        _task_catalog_cache_write(new)
+        ok = True
+    else:
+        cached = _task_catalog_cache_load()
+        if cached:
+            TASK_CATALOG = cached
+            ok = True
+        else:
+            ok = False
+    ETKN_TASK_WHITELIST = {t[0]: t[1] for c in TASK_CATALOG for t in c['tasks']}
+    _WECOM_CAT_KEYS = {'CAT_%s' % c['key'].upper(): c for c in TASK_CATALOG}
+    print('任务目录：来源=%s，分类=%d，任务=%d（%s）'
+          % (TASK_CATALOG_SOURCE['from'], len(TASK_CATALOG),
+             len(ETKN_TASK_WHITELIST), TASK_CATALOG_SOURCE['reason']), flush=True)
+    return ok
+
+
+def _menu_task_cat_keys() -> list:
+    """企微菜单「任务中心」二级按钮（按当前动态分类生成，最多 5 个）。"""
+    out = []
+    for c in TASK_CATALOG[:_WECOM_CAT_MENU_MAX]:
+        key = str(c.get('key') or '')
+        if not key:
+            continue
+        label = _CAT_MENU_SHORT.get(key) or ('%s%s' % (c.get('icon') or '🧩', c.get('label') or key))
+        out.append({'type': 'click',
+                    'name': _wecom_trim(label, _WECOM_NAME_MAX),
+                    'key': 'CAT_%s' % key.upper()})
+    return out
+
+
+def _menu_update_task_buttons() -> None:
+    """把菜单尾「任务中心」的子按钮换成当前动态分类（改的是模块级 _WECOM_MENU_TAIL，
+    之后每次下发菜单都带着新分类）。"""
+    subs = _menu_task_cat_keys()
+    if not subs:
+        return
+    for m in _WECOM_MENU_TAIL:
+        if m.get('name') == _WECOM_TC_MENU_NAME:
+            m['sub_button'] = subs
+            return
+    # 兜底：尾菜单里没有该项就补一个（正常不会发生）
+    _WECOM_MENU_TAIL.append({'name': _WECOM_TC_MENU_NAME, 'sub_button': subs})
 # 「运维操作」里点了直接触发的任务（不走「分类→图文消息」这一层）
 _WECOM_ACTION_TASKS = {'CLEAN_TMP': 'cleanup-p115-temp-directory'}
 
@@ -4233,7 +4396,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.29', 'readonly': False,
+                'version': 'v2.9.30', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4241,7 +4404,8 @@ class Handler(BaseHTTPRequestHandler):
                             'trigger-organize', 'wecom-test', 'wecom-menu',
                             # v2.9.8 任务中心（白名单见 ETKN_TASK_WHITELIST）
                             # v2.9.10 分类目录 + 子任务确认页（/run-task/<key>）
-                            'run-task', 'task-catalog', 'run-task-page', 'relay-check',
+                            'run-task', 'task-catalog', 'task-catalog-refresh',
+                            'run-task-page', 'relay-check',
                             # v2.9.22 补丁自检
                             'patch-check'],
             }, ensure_ascii=False).encode())
@@ -4321,9 +4485,17 @@ class Handler(BaseHTTPRequestHandler):
                                               ensure_ascii=False).encode())
         if p == '/api/task-catalog':        # v2.9.10：面板「任务中心」与企微菜单同源
             return self._send(200, json.dumps(
-                {'categories': [{'key': c['key'], 'label': c['label'], 'icon': c['icon'],
+                {'source': dict(TASK_CATALOG_SOURCE),   # v2.9.30：来自 etkn/缓存/静态
+                 'categories': [{'key': c['key'], 'label': c['label'], 'icon': c['icon'],
                                  'tasks': [{'key': t[0], 'title': t[1], 'desc': t[2]}
                                            for t in c['tasks']]} for c in TASK_CATALOG]},
+                ensure_ascii=False).encode())
+        if p == '/api/task-catalog-refresh':    # v2.9.30：手动对齐一次（不改变「不定时」的约定）
+            _ok = refresh_task_catalog_cache(force=True)
+            _menu_update_task_buttons()
+            return self._send(200, json.dumps(
+                {'ok': _ok, 'source': dict(TASK_CATALOG_SOURCE),
+                 'categories': len(TASK_CATALOG), 'tasks': len(ETKN_TASK_WHITELIST)},
                 ensure_ascii=False).encode())
         m = re.match(r'^/run-task/([a-z0-9][a-z0-9\-]*)$', p)
         if m:                               # v2.9.10：企微图文消息里点子任务的确认页
@@ -4742,6 +4914,14 @@ def main():
     import faulthandler, sys
     faulthandler.dump_traceback_later(180, repeat=True, file=sys.stderr)
     _warmup_from_cache()
+    # v2.9.30：EM 启动时对齐一次 ETKN 任务目录（用户明确要求：只随启动跟随，不做定时跟随）。
+    # 放在各轮询线程 / HTTP 服务之前完成——启动即带最新目录，面板与企微菜单三处同步。
+    # 拉不到 ETKN 时回退上次落盘缓存，再不行沿用静态白名单（绝不因跟随失败而起不来）。
+    try:
+        refresh_task_catalog_cache()
+        _menu_update_task_buttons()
+    except Exception as e:
+        print('启动跟随任务目录失败：%s' % str(e)[:140], flush=True)
     threading.Thread(target=poll_loop, daemon=True).start()
     threading.Thread(target=fast_loop, daemon=True).start()
     threading.Thread(target=alarm_loop, daemon=True).start()
@@ -4752,7 +4932,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.29，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.30，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
