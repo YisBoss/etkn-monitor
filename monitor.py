@@ -1247,6 +1247,9 @@ _CAT_MENU_SHORT = {'media': '🎬媒体维护', 'organize': '📁115整理', 'su
                    'library': '📚媒体库', 'account': '🔑账号系统'}
 # 我方静态短描述（更贴面板口径）；ETKN 没有的 key 用它的 description 压成一行
 _TASK_DESC_STATIC = {t[0]: t[2] for c in TASK_CATALOG for t in c['tasks']}
+# 每类只放 8 项（企微图文单条上限），但**原先 v2.9.10 人工挑的那批必须优先保住**——
+# 否则自动跟随会把「清理临时目录」这类用户已在用的任务挤出去。这就是那份优先级。
+_STATIC_PRIORITY = {t[0] for c in TASK_CATALOG for t in c['tasks']}
 
 
 def _one_line(s: str, limit: int = 46) -> str:
@@ -1313,7 +1316,11 @@ def _task_catalog_from_etkn() -> list:
         buckets[ck].append((k, it.get('title') or k, desc))
     out = []
     for ck in order:
-        tasks = [t for t in buckets[ck] if t[0] not in _NEEDS_PARAM_TASK_KEYS][:12]
+        # 每类 ≤8：企微图文消息（news）单条最多 8 篇，面板与企微必须同口径。
+        # 原 v2.9.10 已收录的排在前面（保底不丢），ETKN 新增的排后面填空位。
+        _kept = [t for t in buckets[ck] if t[0] not in _NEEDS_PARAM_TASK_KEYS]
+        tasks = ([t for t in _kept if t[0] in _STATIC_PRIORITY]
+                 + [t for t in _kept if t[0] not in _STATIC_PRIORITY])[:8]
         if not tasks:
             continue
         out.append({'key': ck, 'label': labels.get(ck, ck),
