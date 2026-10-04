@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.30 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.31 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -1071,6 +1071,8 @@ def relay_job_state() -> dict:
 _WECOM_LINK_MENU_NAME = '🔗快捷入口'      # 4+12 = 16B
 _WECOM_LINK_MENU_MAX = 5                 # 企微二级菜单上限 5（面板卡片链接最多可配 6）
 _WECOM_TC_MENU_NAME = '📚任务中心'        # v2.9.30：菜单尾「任务中心」项名（子按钮按动态分类重填）
+_WECOM_TASK_LIST_PER_MSG = 8             # v2.9.31：微信里「点分类发子任务」每条消息最多几项
+                                         #（企微 news 单条硬上限 8 篇；超出就分成多条消息续发）
 _WECOM_CAT_MENU_MAX = 5                  # v2.9.30：任务中心二级按钮上限（企微二级最多 5 个）
 _WECOM_MENU_TAIL = [
     {'name': '🔧运维操作', 'sub_button': [                       # 16B
@@ -1316,11 +1318,11 @@ def _task_catalog_from_etkn() -> list:
         buckets[ck].append((k, it.get('title') or k, desc))
     out = []
     for ck in order:
-        # 每类 ≤8：企微图文消息（news）单条最多 8 篇，面板与企微必须同口径。
-        # 原 v2.9.10 已收录的排在前面（保底不丢），ETKN 新增的排后面填空位。
+        # v2.9.31：面板不再受「企微图文单条 8 篇」约束（微信侧改成分批续发），上限放宽到 40。
+        # 原 v2.9.10 已收录的排在前面（保底不丢），ETKN 新增的排后面。
         _kept = [t for t in buckets[ck] if t[0] not in _NEEDS_PARAM_TASK_KEYS]
         tasks = ([t for t in _kept if t[0] in _STATIC_PRIORITY]
-                 + [t for t in _kept if t[0] not in _STATIC_PRIORITY])[:8]
+                 + [t for t in _kept if t[0] not in _STATIC_PRIORITY])[:40]
         if not tasks:
             continue
         out.append({'key': ck, 'label': labels.get(ck, ck),
@@ -1518,15 +1520,24 @@ def _wecom_run_action(key: str):
             else:
                 wecom_push('⚠️ 触发整理失败：ETKN 返回 %s %s' % (s, str(b)[:120]))
         elif key in _WECOM_CAT_KEYS:
-            # v2.9.10 任务中心：点分类 → 推一条图文消息，每条 = 该分类下一个子任务。
-            # 子任务链接指向**确认页**（GET 只渲染按钮，预取不会误触发）。
+            # v2.9.10 任务中心：点分类 → 推图文消息，每条 = 该分类下一个子任务（点选即到确认页）。
+            # v2.9.31：一条 news 最多 8 篇 → 超过就**分成多条消息续发**，所以面板/目录里
+            # 每类可以多于 8 项。子任务链接指向**确认页**（GET 只渲染按钮，预取不会误触发）。
             cat = _WECOM_CAT_KEYS[key]
             arts = [{'title': '%s %s' % (cat['icon'], t[1]),
                      'description': '%s（点开确认后执行）' % t[2],
                      'url': _run_task_url(t[0])} for t in cat['tasks']]
-            ok, err = wecom_push_news(arts)
-            if not ok:
-                wecom_push('⚠️ 展开「%s」失败：%s' % (cat['label'], err))
+            if not arts:
+                wecom_push('⚠️「%s」下暂无可触发的任务。' % cat['label'])
+            else:
+                _n = _WECOM_TASK_LIST_PER_MSG
+                _parts = (len(arts) + _n - 1) // _n
+                for _i in range(0, len(arts), _n):
+                    ok, err = wecom_push_news(arts[_i:_i + _n])
+                    if not ok:
+                        wecom_push('⚠️ 展开「%s」（第 %d/%d 条）失败：%s'
+                                   % (cat['label'], _i // _n + 1, _parts, err))
+                        break
         elif key == 'PURGE':
             # v2.9.15：与面板「清空共享登记积压」同一个函数，绝不碰 running
             wecom_push('已触发清空共享登记积压，稍后推送结果…')
@@ -4403,7 +4414,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.30', 'readonly': False,
+                'version': 'v2.9.31', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4939,7 +4950,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.30，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.31，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
