@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v2.9.31 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v2.9.32 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -213,6 +213,11 @@ def settings_load():
             for k in SETTINGS_DEFAULTS:
                 if k in d:
                     SETTINGS[k] = d[k]
+            # v2.9.32：run_token 不在 SETTINGS_DEFAULTS 里（不想被设置页来回传），
+            # 但它必须跨重启保留——否则每次重启换令牌，微信里旧消息的任务链接全部失效
+            # （实际踩到：手机点任务报「失败 525/403」）。这里单独捞。
+            if isinstance(d.get('run_token'), str) and d['run_token'].strip():
+                SETTINGS['run_token'] = d['run_token'].strip()
     except Exception:
         pass
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
@@ -1391,13 +1396,41 @@ _WECOM_ACTION_TASKS = {'CLEAN_TMP': 'cleanup-p115-temp-directory'}
 
 # 任务中心链接令牌：进程级长期有效（图文消息里点开可能过很久），容器重启即轮换。
 # 只防「链接被预取/被猜到」，与面板其它接口同级的暴露面。
-_run_token = {'val': secrets.token_urlsafe(24)}
+_run_token = {'val': ''}
+
+
+def _get_run_token() -> str:
+    """子任务链接令牌：**持久化到设置**，重启复用。
+
+    v2.9.32：原先每次启动随机生成 → 一重启，微信里旧消息的链接全部失效
+    （实际踩到：手机点「小号池测速」报「失败 525/403」，因为那条消息是重启前发的）。
+    现在存 SETTINGS['run_token']，只在首次生成，之后重启不变，旧消息长期可用。"""
+    if _run_token['val']:
+        return _run_token['val']
+    v = ''
+    try:
+        v = (SETTINGS.get('run_token') or '').strip()
+    except Exception:
+        v = ''
+    if not v:
+        v = secrets.token_urlsafe(24)
+        try:
+            SETTINGS['run_token'] = v
+            settings_save()
+        except Exception:
+            pass
+    _run_token['val'] = v
+    return v
 
 
 def _run_task_url(task_key: str) -> str:
-    """子任务的可点链接：指向确认页（不是直接触发）——微信/企微打开链接时会预取，
-    直接触发等于「一打开消息就跑 26 个任务」。确认页是 GET，预取只会看到按钮。"""
-    return '%s/run-task/%s?token=%s' % (_panel_base(), task_key, _run_token['val'])
+    """子任务的可点链接：**点开即直接下发 ETKN**（v2.9.32 起不再需要二次确认）。
+
+    为什么保留一个「页面」而不是把触发塞进链接本身：微信消息里的链接只能是 GET，
+    而微信/企微会对链接做**服务端预取**——若 GET 即触发，一条消息就会把整类任务跑光。
+    现在的页面在加载后用 **JavaScript** 自动 POST 触发：预取器不执行 JS → 不会误触发；
+    用户真点开 → 立刻下发，只看到一条结果，少点一次「确认执行」。"""
+    return '%s/run-task/%s?token=%s' % (_panel_base(), task_key, _get_run_token())
 
 
 
@@ -1525,7 +1558,7 @@ def _wecom_run_action(key: str):
             # 每类可以多于 8 项。子任务链接指向**确认页**（GET 只渲染按钮，预取不会误触发）。
             cat = _WECOM_CAT_KEYS[key]
             arts = [{'title': '%s %s' % (cat['icon'], t[1]),
-                     'description': '%s（点开确认后执行）' % t[2],
+                     'description': '%s（点开即下发）' % t[2],
                      'url': _run_task_url(t[0])} for t in cat['tasks']]
             if not arts:
                 wecom_push('⚠️「%s」下暂无可触发的任务。' % cat['label'])
@@ -4315,36 +4348,32 @@ min-height:100vh;align-items:center;justify-content:center;margin:0}
 # 点开即跑等于打开一条消息就把整类任务全触发。
 _RUN_PAGE = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{title} · 确认</title><style>
+<title>{title} · 执行</title><style>
 body{{font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
 background:#0f1420;color:#e8ecf3;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}
 .card{{background:#171e2e;border:1px solid #2a3450;border-radius:14px;padding:28px 30px;max-width:420px;width:92%}}
 h1{{font-size:19px;margin:0 0 6px}} .sub{{color:#8b96ad;font-size:13px;margin-bottom:14px}}
 .tag{{display:inline-block;background:#1d2740;border:1px solid #33436b;border-radius:8px;
 padding:2px 8px;font-size:12px;color:#9fb3d9;margin-bottom:12px}}
-.btns{{display:flex;gap:10px}} button{{flex:1;padding:11px 0;border-radius:9px;border:0;font-size:15px;cursor:pointer}}
-.b-ok{{background:#2f81f7;color:#fff}} .b-no{{background:#232c42;color:#c3cbdc}}
-#msg{{margin-top:14px;font-size:13px;min-height:18px}}
-.ok{{color:#3fb950}} .bad{{color:#f85149}}</style></head><body>
+#msg{{margin-top:6px;font-size:15px;min-height:20px}}
+.ok{{color:#3fb950}} .bad{{color:#f85149}} .wait{{color:#9fb3d9}}</style></head><body>
 <div class="card"><div class="tag">{cat}</div>
 <h1>{title}</h1><div class="sub">{desc}</div>
-<div class="btns">
-<button type="button" class="b-no" autofocus onclick="location.href='about:blank'">取消</button>
-<button type="button" class="b-ok" id="bOk" onclick="doGo()">确认执行</button>
-</div><div id="msg"></div></div>
+<div id="msg" class="wait">正在下发…</div></div>
 <script>
-async function doGo(){{
-  const m=document.getElementById('msg'),o=document.getElementById('bOk');
-  o.disabled=true;m.textContent='提交中…';m.className='';
+/* v2.9.32：点开即下发（不再要二次确认）。用 JS 自动 POST 而不是 GET 触发——
+   微信/企微会预取链接，预取器不执行 JS，所以不会「一收到消息就跑光整类任务」。 */
+(async function(){{
+  const m=document.getElementById('msg');
   try{{
     const r=await fetch(location.pathname,{{method:'POST',
       headers:{{'Content-Type':'application/json'}},
       body:JSON.stringify({{token:new URLSearchParams(location.search).get('token')||''}})}});
     const d=await r.json().catch(()=>({{}}));
     if(r.ok&&d.ok){{m.textContent='✅ '+d.msg;m.className='ok';}}
-    else{{m.textContent='❌ '+(d.error||d.msg||('失败 '+r.status));m.className='bad';o.disabled=false;}}
-  }}catch(e){{m.textContent='❌ '+e;m.className='bad';o.disabled=false;}}
-}}
+    else{{m.textContent='❌ '+(d.error||d.msg||('失败 '+r.status));m.className='bad';}}
+  }}catch(e){{m.textContent='❌ '+e;m.className='bad';}}
+}})();
 </script></body></html>"""
 
 _RUN_PAGE_BAD = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
@@ -4352,7 +4381,7 @@ _RUN_PAGE_BAD = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 <style>body{font-family:system-ui,sans-serif;background:#0f1420;color:#e8ecf3;display:flex;
 min-height:100vh;align-items:center;justify-content:center;margin:0}
 .c{text-align:center;color:#8b96ad} b{color:#f85149;font-size:17px}</style></head><body>
-<div class="c"><b>链接已失效</b><div style="margin-top:8px">请回到「任务中心」重新点分类，<br>用最新一条图文消息里的子任务</div></div>
+<div class="c"><b>链接令牌无效</b><div style="margin-top:8px">请回到「任务中心」重新点分类，<br>用最新一条图文消息里的子任务</div></div>
 </body></html>"""
 
 
@@ -4414,7 +4443,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v2.9.31', 'readonly': False,
+                'version': 'v2.9.32', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4520,7 +4549,7 @@ class Handler(BaseHTTPRequestHandler):
             tkey = m.group(1)
             tok_q = (urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                      .get('token') or [''])[0]
-            if not (tok_q and tok_q == _run_token['val']):
+            if not (tok_q and tok_q == _get_run_token()):
                 return self._send(403, _RUN_PAGE_BAD.encode(), 'text/html; charset=utf-8')
             cat, t = _find_cat_of(tkey)
             if not t:
@@ -4558,6 +4587,7 @@ class Handler(BaseHTTPRequestHandler):
             d[_k + '_set'] = bool(d.get(_k))
             d.pop(_k, None)
         d.pop('wecom_panel_url', None)   # v2.9.8：该设置已移除（旧 settings.json 里的残留不回传）
+        d.pop('run_token', None)         # v2.9.32：子任务链接令牌是触发凭据，永不回传前端
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
@@ -4806,7 +4836,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:                                 # v2.9.10 任务中心：确认页点「确认执行」
             tkey = m.group(1)
             b = self._body()
-            if str(b.get('token') or '') != _run_token['val']:
+            if str(b.get('token') or '') != _get_run_token():
                 return self._send(403, json.dumps(
                     {'ok': False, 'error': '令牌无效，请回任务中心重新点分类'},
                     ensure_ascii=False).encode())
@@ -4950,7 +4980,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v2.9.31，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v2.9.32，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
