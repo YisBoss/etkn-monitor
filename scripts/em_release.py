@@ -31,14 +31,11 @@ PROXY = os.environ.get('EM_RELEASE_PROXY', '')
 
 # ---------- 隐私闸门：命中即中止（开源口径） ----------
 PRIVACY_PATTERNS = [
-    (r'[\w.-]*example\.com', '部署者的私人域名'),
-    (r'[\w.-]*example\.com', '部署者的私人域名'),
     # 只拦「非文档占位段」的私网地址：192.168.1.x 是本文档统一的占位网段，放行。
     (r'\b(?:192\.168\.(?!1\.)\d{1,3}\.\d{1,3}'
      r'|10\.\d{1,3}\.\d{1,3}\.\d{1,3}'
      r'|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b',
      '局域网 IP（文档占位请用 192.168.1.x）'),
-    (r'\b103\.236\.\d{1,3}\.\d{1,3}\b', '部署者的公网 IP'),
     (r'gh[ps]_[A-Za-z0-9_]{20,}', 'GitHub 令牌'),
     (r'github_pat_[A-Za-z0-9_]{20,}', 'GitHub 令牌'),
     (r'sk-[A-Za-z0-9]{20,}', 'API 密钥'),
@@ -48,6 +45,24 @@ PRIVACY_PATTERNS = [
 ]
 # 文档示例网段/域名，允许出现
 ALLOW = ('example.com', 'your_', '<你的')
+
+
+# 「部署者自己的」域名与公网 IP 放在**仓库之外**的本地清单里（每行一条正则，'#' 开头为注释）。
+# 为什么不写在本文件：把私人域名当检测规则写进脚本，脚本一进公开仓库就等于泄露它自己。
+# 文件不存在时只管通用模式（私网段/IP 形态/密钥形态/Webhook 形态），照样能拦住绝大多数泄露。
+DENYLIST_FILE = os.path.expanduser('~/.hermes/workspace/.creds/em_privacy_denylist.txt')
+
+
+def _owner_patterns():
+    out = []
+    try:
+        for line in open(DENYLIST_FILE, encoding='utf-8'):
+            line = line.strip()
+            if line and not line.startswith('#'):
+                out.append((line, '部署者的私有信息（本地清单）'))
+    except FileNotFoundError:
+        pass
+    return out
 
 
 def sh(args, cwd=None, env=None, check=False):
@@ -72,6 +87,7 @@ def pat():
 def privacy_scan(repo, extra_texts=()):
     """扫描所有被跟踪文件 + 版本说明文本。返回命中列表。"""
     hits = []
+    patterns = list(PRIVACY_PATTERNS) + _owner_patterns()
     files = git(repo, 'ls-files').split('\n')
     for f in files:
         p = os.path.join(repo, f)
@@ -81,13 +97,13 @@ def privacy_scan(repo, extra_texts=()):
             t = open(p, encoding='utf-8', errors='replace').read()
         except Exception:
             continue
-        for pat_s, label in PRIVACY_PATTERNS:
+        for pat_s, label in patterns:
             for m in set(re.findall(pat_s, t)):
                 if any(a in m for a in ALLOW):
                     continue
                 hits.append('%s: %s（%s）' % (f, m[:60], label))
     for t in extra_texts:
-        for pat_s, label in PRIVACY_PATTERNS:
+        for pat_s, label in patterns:
             for m in set(re.findall(pat_s, t or '')):
                 if any(a in m for a in ALLOW):
                     continue
