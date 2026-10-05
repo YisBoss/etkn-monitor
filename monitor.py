@@ -46,13 +46,38 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 BASE = os.environ.get('ETKN_BASE_URL', 'http://127.0.0.1:5257').rstrip('/')
-def _detect_lan_host() -> str:
-    """未配置 MONITOR_LAN_HOST 时自动探出本机局域网地址。
+# 谁打开过面板，就用谁的地址当「面板地址」（内存态，不落盘）。
+# 为什么不靠容器自探：面板跑在 Docker 里时，socket 探到的只能是网桥地址（形如 172.x.x.x），
+# 对用户手机完全不可达 —— 探了等于没探。而从请求的 Host 头学到的，才是用户真正在用的地址。
+_panel_host_seen = ''
 
-    做法：UDP socket「连」一个外网地址（纯本地操作，不真发包），内核按路由表
-    选中出口网卡，读回本地地址。这样全新安装不做任何配置，卡片里的「打开面板」
-    链接就是能直接点开的地址，而不是只有容器自己才通的 127.0.0.1。
-    探测失败（离线/无默认路由）返回空串，调用方再回落 127.0.0.1:端口。
+
+def _learn_panel_host(host_header: str) -> None:
+    """记下用户访问面板时用的地址（形如 192.168.1.10:8620 / em.example.com）。
+
+    必须跳过「本机自访问」的几种写法 —— 否则在宿主机上按教程打开的
+    `http://localhost:8620` 会被学走，推给手机的消息里链接就点了没反应。
+    注意：Host 头通常**带端口**（localhost:8620），所以先剥端口再判定。
+    """
+    global _panel_host_seen
+    h = (host_header or '').strip()
+    if not h:
+        return
+    host_only = h
+    if h.startswith('['):                      # IPv6 形如 [::1]:8620
+        host_only = h[1:].split(']')[0]
+    elif h.count(':') == 1:                    # 域名/IPv4 形如 host:port
+        host_only = h.rsplit(':', 1)[0]
+    if host_only.lower() in ('localhost', '127.0.0.1', '::1', '0.0.0.0', ''):
+        return
+    _panel_host_seen = h
+
+
+def _detect_lan_host() -> str:
+    """最后兜底：探本机出口地址。
+
+    注意：容器里只能探到网桥地址（对用户不可达），所以它排在「请求 Host」之后，
+    只用于「从未有人打开过面板」且没配 MONITOR_LAN_HOST 的场景。
     """
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -68,7 +93,7 @@ def _detect_lan_host() -> str:
     return ''
 
 
-LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '').strip() or _detect_lan_host()
+LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '').strip()
 ETKN_PUBLIC_URL = os.environ.get('ETKN_PUBLIC_URL', BASE).rstrip('/')   # 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
 ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板「打开 ETKN 原站」按钮（空=提示未配置）
 
@@ -2675,8 +2700,15 @@ def _hosts_loop() -> None:
 
 
 def _panel_base() -> str:
-    """面板外网基址（卡片「打开面板」按钮用）。未配置内网地址时回落 127.0.0.1:端口。"""
-    fb = LAN_HOST or ('127.0.0.1:%d' % int(os.environ.get('MONITOR_PORT', '8620')))
+    """给用户的消息里「打开面板」链接的基址。优先级（从高到低）：
+
+    1. 设置项 trigger_public_base —— 部署者显式指定，永远最优先；
+    2. **从请求 Host 学到的地址** —— 用户实际能打开面板的那个地址，最贴合现实；
+    3. MONITOR_LAN_HOST 环境变量 —— 显式配置的兜底（用于「启动即推送、此时还没人访问过」）；
+    4. 容器/主机自探的出口地址；5. 127.0.0.1:端口（最终兜底）。
+    """
+    fb = _panel_host_seen or LAN_HOST or _detect_lan_host() \
+        or ('127.0.0.1:%d' % int(os.environ.get('MONITOR_PORT', '8620')))
     return (SETTINGS.get('trigger_public_base') or f'http://{fb}').rstrip('/')
 
 
@@ -4651,6 +4683,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(code, body)
 
     def do_GET(self):
+        _learn_panel_host(self.headers.get('Host'))
         u = urllib.parse.urlparse(self.path)
         p = u.path
         if p == '/wecom/callback':        # v2.9.5 企微回调 URL 校验（GET 回明文 echostr）
@@ -5029,6 +5062,7 @@ class Handler(BaseHTTPRequestHandler):
                                       'warn': '；'.join(_warn_items)[:300]})
 
     def do_POST(self):
+        _learn_panel_host(self.headers.get('Host'))
         u = urllib.parse.urlparse(self.path)
         p = u.path
         if p == '/wecom/callback':        # v2.9.5 企微回调（用户消息 / 菜单点击事件）
