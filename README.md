@@ -1,4 +1,4 @@
-# etkn-monitor —— ETKN 监控（v2.9.21）
+# etkn-monitor —— ETKN 监控（v3.18.3）
 
 手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试、手动整理触发、异常媒体明细。
 
@@ -391,8 +391,14 @@ curl http://127.0.0.1:8620/api/meta
 > 没有 `.env` 也能启动（`env_file` 是可选项，需要 Docker Compose ≥ 2.24），
 > 但连不上 ETKN —— 面板会一直显示取数失败。变量含义见 `.env.example` 和下面「配置」表。
 
-**自动喂料（可选）**：需要把 CloudDrive 的 115 目录挂进容器——在 `.env` 里写
-`CLOUD115_DIR=/你的/CloudDrive/115`。不写则该功能不可用，其余功能不受影响。
+**自动喂料（可选）**：走 **CloudDrive2（CD2）的 WebDAV**，在**面板 → 设置 →【喂料】**里配：
+源目录、目标目录、CD2 地址与账号密码（在 CD2 里另建一个只读账号更稳妥）。
+保存时面板会**当场连一次 CD2 验证**，不通则整组回滚、不会写入坏配置。
+（容器里那个 `/cloud115` 挂载点只是可选占位，与本功能无关：喂料靠 CD2 的 HTTP 接口
+在云盘侧直接移动文件，不经过本地挂载。）
+
+**内网地址（可选）**：`MONITOR_LAN_HOST` 留空时会**自动探测**本机局域网地址，
+卡片里的「打开面板」链接即可直接点开；探测不到（离线/无默认路由）才回落 `127.0.0.1:端口`。
 
 **hosts 巡检 / 自动重启（可选）**：需要容器能 SSH 到运行 ETKN 的那台机器，
 在 `.env` 里配 `SSH_HOST` / `SSH_PORT` / `SSH_USER` / `SUDO_PASSWORD`。
@@ -403,6 +409,33 @@ curl http://127.0.0.1:8620/api/meta
 cd etkn-monitor
 git pull
 docker compose up -d --build
+```
+
+## 开发与发版（维护者）
+
+> 普通用户按上面「部署 / 更新版本」即可，本节只对改代码、发新版的人有意义。
+
+**发版一条命令搞定**（提交 → 推 main → 打 tag → 建 Release → 补齐历史缺失的 Release）：
+
+```bash
+python3 scripts/em_release.py v3.19.0 --note "本版改了哪些内容（一两句话）"
+# 或把说明写进文件：--note-file CHANGELOG.md
+# 只补齐「有 tag 但没 Release」的历史版本：python3 scripts/em_release.py --sync
+```
+
+脚本会做两件容易忘的事：
+
+1. **隐私闸门**——推送前扫描全部被跟踪文件与版本说明，命中私人域名、内网/公网 IP、
+   API 密钥、飞书 Webhook、企业微信企业 ID 等即**中止发版**（开源仓库不允许出现部署者的私人信息）。
+   确需跳过（例如同一网段的中性示例）用 `--skip-privacy`，但请先确认那确实是示例。
+2. **Release 补齐**——GitHub 发行版页面只认 **Release 对象**，光 `git push --tags` 不会更新页面。
+   脚本每次都会核对「tag ↔ Release」是否一一对应，缺的自动补，避免页面停在旧版本。
+
+凭据从 `~/.hermes/workspace/.creds/github_etkn_monitor.txt` 读取（运行时读，不落盘、不回显）。
+需要走代理才能连 GitHub 时，用环境变量指定（默认直连）：
+
+```bash
+EM_RELEASE_PROXY=http://192.168.1.1:7890 python3 scripts/em_release.py v3.19.0 --note "…"
 ```
 
 ## 配置
@@ -421,9 +454,13 @@ docker compose up -d --build
 | FAST_INTERVAL | 快速活跃队列轮询间隔（秒） | 2 |
 | MONITOR_PORT | 监听端口 | 8620 |
 | MONITOR_LAN_HOST | 面板内网地址（清空提醒链接用） | 空（回落 127.0.0.1:端口） |
-| CLOUD115_DIR | 自动喂料用的 CloudDrive 115 目录（宿主机路径） | 空（该功能不可用） |
+| ACCESS_PASS | 面板访问口令（部署即带；也可稍后在面板【面板安全】里设） | 空（不鉴权） |
+| ETKN_HARDCODED_DOMAINS | 补录 ETKN 代码里写死的域名（逗号分隔），让域名取样不漏 | 空 |
 | SSH_HOST / SSH_PORT / SSH_USER / SUDO_PASSWORD | hosts 巡检 / 自动重启要 SSH 到跑 ETKN 的机器 | 空 / 22 / root / 空 |
 | ETKN_CONTAINER | 自动重启时操作的容器名 | etkn |
+| CLOUD115_DIR | *（已废弃）* 旧版喂料用的本地挂载；现喂料走 CD2 WebDAV，无需此项 | 空 |
+
+> 自动喂料的**源目录/目标目录/CD2 地址与账号**在面板里配（设置 →【喂料】），不是环境变量。
 
 ## 通知渠道
 
@@ -610,6 +647,12 @@ docker compose up -d --build
 - **「中转池」是可选功能，默认关**。开启后管理员密码与 `/v1` 调用密钥只写在**本机配置文件**里，
   `GET /api/settings` 只回 `*_set` 布尔（不回明文），保存时留空即「不修改」。
   本仓库的代码与文档里**不含任何真实地址或凭据**（地址一律用占位符）。
+- ⚠️ **面板默认不鉴权**：为方便内网直接使用，出厂状态任何人访问都能**读取并修改全部设置**。
+  **请勿把面板直接暴露到公网**；确需公网访问，先在**面板 → 设置 →【面板安全】**里设一个
+  **访问口令**（也可用环境变量 `ACCESS_PASS` 在部署时就带上）。设置后浏览器首次打开需输一次口令，
+  之后凭 Cookie 免输；推送给你的消息里带的链接会自带一次性令牌，点开无需再输。
+- 容器内以 root 运行、并把仓库目录 `./:/app:ro` 只读挂入；面板只监听你映射的端口，
+  不做任何出网探测（除你配置的 ETKN / CD2 / 通知渠道地址外）。
 
 ## 接口
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.3 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -46,9 +46,35 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 
 BASE = os.environ.get('ETKN_BASE_URL', 'http://127.0.0.1:5257').rstrip('/')
-LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '')   # 内网面板地址（清空提醒链接用），空则回落 127.0.0.1:端口
+def _detect_lan_host() -> str:
+    """未配置 MONITOR_LAN_HOST 时自动探出本机局域网地址。
+
+    做法：UDP socket「连」一个外网地址（纯本地操作，不真发包），内核按路由表
+    选中出口网卡，读回本地地址。这样全新安装不做任何配置，卡片里的「打开面板」
+    链接就是能直接点开的地址，而不是只有容器自己才通的 127.0.0.1。
+    探测失败（离线/无默认路由）返回空串，调用方再回落 127.0.0.1:端口。
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('8.8.8.8', 80))
+            host = s.getsockname()[0]
+        finally:
+            s.close()
+        if host and not host.startswith('127.'):
+            return '%s:%s' % (host, os.environ.get('MONITOR_PORT', '8620'))
+    except Exception:
+        pass
+    return ''
+
+
+LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '').strip() or _detect_lan_host()
 ETKN_PUBLIC_URL = os.environ.get('ETKN_PUBLIC_URL', BASE).rstrip('/')   # 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
 ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板「打开 ETKN 原站」按钮（空=提示未配置）
+
+# 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
+# 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
+VERSION = 'v3.18.3'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -216,7 +242,9 @@ _ACCESS_COOKIE = 'em_auth'
 
 
 def _access_pass() -> str:
-    return str(SETTINGS.get('access_pass') or '').strip()
+    """访问口令：面板设置项优先；未设时用环境变量 ACCESS_PASS 兜底
+    （便于「部署即带口令」，无需先登录面板再设）。"""
+    return str(SETTINGS.get('access_pass') or os.environ.get('ACCESS_PASS') or '').strip()
 
 
 def _access_token() -> str:
@@ -4658,7 +4686,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v3.18.1', 'readonly': False,
+                'version': VERSION, 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -5302,7 +5330,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v3.18.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor {VERSION}，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
