@@ -2367,7 +2367,9 @@ def _auto_stall_handler(rid, c) -> None:
 # ============ v2.8 hosts 自动更新（域名漂移自愈；v2.8.8 起域名可配置） ============
 # v2.8.8：域名改 settings['hosts_domain']（用户自填，默认空=不监控）；
 # _HOSTS_DOMAIN 兼容包装：优先取设置，空时回退旧常量（存量部署不受影响）。
-_HOSTS_DOMAIN_CONST = 'shared.example.com'
+# 默认不内置任何域名（开源仓库不放部署者的私人域名）。
+# 实际监控哪个域由设置项 hosts_domain（用户自填）决定；这里只在未配置时兜底。
+_HOSTS_DOMAIN_CONST = ''
 _HOSTS_MARKER = '# etkn-monitor-managed'   # 我们负责的行的标记，其他行绝不碰
 _hosts_state = {'last_run': 0.0, 'timer': None}
 
@@ -4003,9 +4005,15 @@ _ETKN_SOURCE_EXTRA = {'/api/configuration/fanart': ('assets.fanart.tv',)}
 # 隐含域名：ETKN 配置里只有开关、URL 写在 ETKN 代码里，配置查不到，只能内置映射
 _ETKN_IMPLIED = {'tmdb': 'image.tmdb.org', 'fanart': 'assets.fanart.tv'}
 # v2.9.2.9 硬编码域名：ETKN 代码里的常量 URL，配置里完全没有，只能内置
-#   auth.example.com   = platform/entitlements.py 的 ETK_PRO_AUTH_URL（Pro 授权）
-#   hdhive.example.com = integrations/re0.py 的 DEFAULT_RELAY_URL（re0 订阅中继）
-_ETKN_HARDCODED = ('auth.example.com', 'hdhive.example.com')
+#   例：Pro 授权域名（platform/entitlements.py 的 ETK_PRO_AUTH_URL）、
+#       订阅中继域名（integrations/re0.py 的 DEFAULT_RELAY_URL）——
+#       两者都在 ETKN 代码里写死，配置里查不到。
+# 开源版默认**为空**（不放任何具体域名）；需要时由部署者用环境变量注入：
+#   ETKN_HARDCODED_DOMAINS="a.example.com,b.example.com"
+# 用途：某版 ETKN 把 Pro 授权地址、订阅中继地址写成**代码常量**，配置里查不到，
+# 只能在这里补，否则「ETKN 在用域名」取样会漏掉这两个。
+_ETKN_HARDCODED = tuple(x.strip() for x in
+                        (os.environ.get('ETKN_HARDCODED_DOMAINS') or '').split(',') if x.strip())
 
 
 def _pick(d, key):
