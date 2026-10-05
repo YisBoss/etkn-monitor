@@ -1,5 +1,0 @@
-v3.18.2: 开源口径——源码移除部署者的私人域名（结构性脱敏）
-- monitor.py 不再内置任何具体域名：_HOSTS_DOMAIN_CONST 置空（由设置项 hosts_domain 决定）
-- _ETKN_HARDCODED 改为环境变量 ETKN_HARDCODED_DOMAINS 注入，默认空
-- README 里出现具体域名的示例改为占位符
-- 配合 git 历史重写：全历史文件与提交消息中的私人域名/IP 已清除

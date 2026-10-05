@@ -20,9 +20,8 @@ services:
     volumes:
       - ./:/app:ro
       - ./data:/app/data
-      # 可选：自动喂料要在「同一挂载内」做 os.rename（115 云盘秒级移动）。
-      # 在 .env 里写 CLOUD115_DIR=/你的/CloudDrive/115 才启用；不写则自动喂料不可用（其余功能不受影响）。
-      - ${CLOUD115_DIR:-./cloud115-not-configured}:/cloud115:rw
+      # 注：自动喂料走 CloudDrive2 的 WebDAV 接口（面板【喂料】里配），不依赖本地挂载，
+      #     所以这里不再挂 cloud115。
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8620/api/meta >/dev/null 2>&1 || exit 1"]
       interval: 60s
