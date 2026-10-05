@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -175,7 +175,7 @@ SETTINGS_DEFAULTS = {
     'relay_api_key': '',           # 中转池 /v1 调用密钥（探针用；与管理员密码是两套，实测不通用）
     'relay_model': '',             # 探针模型（留空=跳过探针，只报池状态）
     'relay_min_quota': 50,         # 配额门槛（%）：5 小时配额低于它视为真实耗尽，不自动清锁
-    # ---- v3.18.0 访问口令（面板安全）：空=不启用鉴权（保持旧行为）；只存本机、不回传前端 ----
+    # ---- v3.18.1 访问口令（面板安全）：空=不启用鉴权（保持旧行为）；只存本机、不回传前端 ----
     'access_pass': '',
 }
 
@@ -207,7 +207,7 @@ def _pick_settings_path() -> str:
 SETTINGS_PATH = _pick_settings_path()
 SETTINGS = dict(SETTINGS_DEFAULTS)
 
-# ---------- v3.18.0 访问口令（治「面板对公网裸奔」：匿名可读走密钥、可改配置） ----------
+# ---------- v3.18.1 访问口令（治「面板对公网裸奔」：匿名可读走密钥、可改配置） ----------
 # 口令为空 → 全放行（与旧版行为完全一致，存量部署无感）。
 # 口令非空 → 三条放行路径：①本机回环（容器健康检查/本机脚本）②链接令牌 ?k=（卡片/任务链接带）
 # ③HTTP Basic（浏览器弹窗登录后下发 Cookie，后续免重复输入）。企微回调 URL 单独豁免（服务器来调，
@@ -267,6 +267,21 @@ def _auth_check(handler, parsed) -> bool:
     return False
 
 
+# ---------- v3.18.1 凭据掩码防护（结构性） ----------
+# 教训：设置页把「已保存」的回显做成掩码串后，一旦哪条路径把掩码当成真值提交，
+# 密码就会被写成字面量 "***" → CD2/路由器/企微全线认证失败，而且报错还指向别处
+# （CD2 密码变 *** 时，喂料报的是「源目录不可读，请检查 /cloud115 挂载」——查错了方向）。
+# 这里把「哪些是密钥」「什么值算掩码」集中定义，保存与载入两端各兜一道。
+_SECRET_KEYS = ('cd2_pass', 'router_pass', 'wecom_secret', 'wecom_token', 'wecom_aeskey',
+                'relay_admin_pass', 'relay_api_key', 'access_pass')
+_MASK_RE = re.compile(r'^\s*[*·•]{3,}\s*$')     # *** / ****** / ··· 这类占位串
+
+
+def _is_mask(v) -> bool:
+    """v3.18.1：判断一个值是不是「掩码占位」而非真凭据。"""
+    return bool(v) and bool(_MASK_RE.match(str(v)))
+
+
 def settings_load():
     try:
         with open(SETTINGS_PATH, 'r', encoding='utf-8') as f:
@@ -280,11 +295,17 @@ def settings_load():
             # （实际踩到：手机点任务报「失败 525/403」）。这里单独捞。
             if isinstance(d.get('run_token'), str) and d['run_token'].strip():
                 SETTINGS['run_token'] = d['run_token'].strip()
-            # v3.18.0：访问口令同理（不在 SETTINGS_DEFAULTS 回传列表，但必须跨重启保留）
+            # v3.18.1：访问口令同理（不在 SETTINGS_DEFAULTS 回传列表，但必须跨重启保留）
             if isinstance(d.get('access_pass'), str) and d['access_pass'].strip():
                 SETTINGS['access_pass'] = d['access_pass'].strip()
     except Exception:
         pass
+    # v3.18.1：配置文件中残留的掩码串一律不当作凭据（否则会拿着 "***" 去认证）
+    for _k in _SECRET_KEYS:
+        if _is_mask(SETTINGS.get(_k)):
+            print('[settings] 警告：%s 存的是掩码占位串（不是真凭据），已按「未设置」处理，'
+                  '请到设置页重新填写' % _k, flush=True)
+            SETTINGS[_k] = ''
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
               'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
               'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
@@ -567,7 +588,7 @@ def _wecom_last_path() -> str:
 
 
 def _wecom_last_load() -> None:
-    """v3.18.0：最近一次企微发送结果落盘——重启后不回「暂无」（此前纯内存，一重启就丢）。"""
+    """v3.18.1：最近一次企微发送结果落盘——重启后不回「暂无」（此前纯内存，一重启就丢）。"""
     try:
         with open(_wecom_last_path(), encoding='utf-8') as f:
             d = json.load(f)
@@ -1813,7 +1834,7 @@ def _wecom_callback_msg(raw: str, query: dict):
 
 # ================= v2.8 CD2 WebDAV 客户端（喂料通道） =================
 def _cd2_dav(method: str, path: str, dest: str = None, data: bytes = None,
-             depth: str = None) -> tuple:
+             depth: str = None, timeout: int = 60) -> tuple:
     """CloudDrive2 WebDAV 调用（Basic 认证）。返回 (status, body)。凭据读设置，不落日志。"""
     from urllib.parse import quote
     user = SETTINGS.get('cd2_user') or ''
@@ -1829,7 +1850,7 @@ def _cd2_dav(method: str, path: str, dest: str = None, data: bytes = None,
         h['Destination'] = base + quote(dest)
     req = urllib.request.Request(base + quote(path), method=method, headers=h, data=data)
     try:
-        r = urllib.request.urlopen(req, timeout=60)
+        r = urllib.request.urlopen(req, timeout=timeout)
         return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -2082,6 +2103,40 @@ def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_fil
             body[:100], '请到面板手动触发「手动整理网盘文件」'])
 
 
+_feed_err_state = {}
+
+
+def _feed_err_suppress(key: str, detail: str = '') -> bool:
+    """v3.18.1：喂料错误去重——同一 key+detail 首次放行，之后每 30 分钟才报一次。
+    兜底轮询每 150s 一轮，不去重会把同一句告警刷成几十条（用户截图即此）。返回 True=本次应推送。"""
+    sig = '%s|%s' % (key, detail)
+    now = time.time()
+    last = _feed_err_state.get(sig)
+    if last is None or now - last >= 1800:
+        _feed_err_state[sig] = now
+        return True
+    return False
+
+
+def _cd2_reason_of(s, b) -> str:
+    """v3.18.1：把 CD2 返回码翻成一句人能直接用的话（保存校验与喂料告警共用）。"""
+    body = (b or b'').decode('utf-8', 'replace').strip()[:80] \
+        if isinstance(b, (bytes, bytearray)) else str(b or '')[:80]
+    if s == 401:
+        return 'CD2 认证失败（HTTP 401）——设置页的 CD2 账号/密码无效'
+    if s == 404:
+        return 'CD2 里找不到该目录（HTTP 404）——路径或名称已变'
+    if s == 0:
+        return '连不上 CD2（%s）——地址/端口不通或 CD2 未运行' % body
+    return 'CD2 返回 HTTP %s%s' % (s, (' · ' + body) if body else '')
+
+
+def _cd2_probe_reason(src: str) -> str:
+    """v3.18.1：源目录读不到时实探一次，给出**真实原因**（认证 / 连接 / 路径）。"""
+    s, b = _cd2_dav('PROPFIND', src, depth='0', timeout=8)
+    return '原因：' + _cd2_reason_of(s, b)
+
+
 def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
     """喂料主流程：扫描→计划→转移→触发原生整理。
     转移失败/触发失败→飞书告警卡片；空源目录→飞书提示。全程忙锁+冷却。
@@ -2108,8 +2163,15 @@ def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
         limit = max(1, int(SETTINGS['feed_batch_limit'] or 500))   # v2.8.6：每批文件夹数
         scanned = _feed_scan_entries(src)
         if scanned is None:
-            _alert_push('feed_err', '自动喂料失败', [
-                f'源目录不可读：{src}', '多半是 /cloud115 挂载未生效或权限变化，请检查容器挂载'])
+            # v3.18.1：这条链路是 CD2 WebDAV（不是 /cloud115 挂载），且固定刷同一句没法定位。
+            # 现在把真实原因（认证失败 / 连不上 / 路径不存在）带上，并做**去重**：同一原因
+            # 只在首次与每 30 分钟各报一次，不再每 150s 刷屏。
+            _reason = _cd2_probe_reason(src)
+            if _feed_err_suppress('src_unreadable', _reason):
+                _alert_push('feed_err', '自动喂料失败', [
+                    f'源目录不可读：{src}', _reason,
+                    '本链路走 CD2 WebDAV（与 /cloud115 挂载无关）',
+                    '检查：① 设置页「CD2 地址/账号/密码」是否仍有效 ② CD2 里该目录是否存在'])
             return 'err'
         dirs, loose = scanned
         # v2.8.12：夹+散文件都空才算「源目录已空」（用户 9/19 晚定案：散文件参与转移）
@@ -2589,7 +2651,7 @@ def _panel_base() -> str:
 
 
 def _access_q() -> str:
-    """v3.18.0：开了访问口令时，给「推给用户的链接」带上 ?k=<令牌>，点开免输口令。
+    """v3.18.1：开了访问口令时，给「推给用户的链接」带上 ?k=<令牌>，点开免输口令。
     未启用口令时返回空串（链接保持原样）。"""
     return ('&k=%s' % _access_token()) if _access_pass() else ''
 
@@ -3545,7 +3607,7 @@ def _dayweek_rebuild() -> None:
         # 旧实现直接读缓存 → 0 点后首轮 rebuild 把昨日值原样写进今日键，随后被下面的
         # 「防跳水」闸反复固化，面板「今日异常」长期虚高（2026-10-01 实测 1388，真值 ~250）。
         _cache_is_today = (_dayweek_cache.get('date') == today_d)
-        # v3.18.0 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
+        # v3.18.1 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
         # 把 daily.json「今日键」的日内口径（unrec_today/bad_tasks/by_kind_fail）写成 0；
         # 而 poll 回填只改内存缓存、要等下一轮 rebuild 才落盘 → 实测今日 unrec_today 长期落 0
         # （历史日正常，页面显示的是实时值所以看不出）。改为以「磁盘今日键」为下限，绝不回退。
@@ -4506,7 +4568,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _authed(self, parsed) -> bool:
-        """v3.18.0：访问口令校验。通过且走的是 Basic 时，顺手下发 Cookie（后续免弹窗）。"""
+        """v3.18.1：访问口令校验。通过且走的是 Basic 时，顺手下发 Cookie（后续免弹窗）。"""
         ok = _auth_check(self, parsed)
         if ok and _access_pass():
             h = self.headers.get('Authorization') or ''
@@ -4541,12 +4603,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _wecom_cb_get(self, u):
-        """v2.9.5 企微回调 URL 校验（GET 回明文 echostr）。v3.18.0：豁免访问口令。"""
+        """v2.9.5 企微回调 URL 校验（GET 回明文 echostr）。v3.18.1：豁免访问口令。"""
         code, body, ctype = _wecom_callback_verify(urllib.parse.parse_qs(u.query))
         return self._send(code, body.encode('utf-8'), ctype)
 
     def _wecom_cb_post(self, u):
-        """v2.9.5 企微回调（用户消息 / 菜单点击事件）。v3.18.0：豁免访问口令。"""
+        """v2.9.5 企微回调（用户消息 / 菜单点击事件）。v3.18.1：豁免访问口令。"""
         _n = int(self.headers.get('Content-Length') or 0)
         _raw = self.rfile.read(_n).decode('utf-8', 'replace') if _n else ''
         code, body = _wecom_callback_msg(_raw, urllib.parse.parse_qs(u.query))
@@ -4557,7 +4619,7 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         if p == '/wecom/callback':        # v2.9.5 企微回调 URL 校验（GET 回明文 echostr）
             return self._wecom_cb_get(u)
-        if not self._authed(u):           # v3.18.0：访问口令（未设口令时恒放行）
+        if not self._authed(u):           # v3.18.1：访问口令（未设口令时恒放行）
             return self._deny()
         if p in ('/', '/index.html'):
             try:
@@ -4588,7 +4650,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v3.18.0', 'readonly': False,
+                'version': 'v3.18.1', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4675,7 +4737,7 @@ class Handler(BaseHTTPRequestHandler):
                                                'etkn_net': _etkn_net_env(),
                                                'etkn_deps': _etkn_deps_public()},
                                               ensure_ascii=False).encode())
-        if p == '/api/daily-trend':       # v3.18.0：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
+        if p == '/api/daily-trend':       # v3.18.1：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
             try:
                 _n = int(urllib.parse.parse_qs(u.query).get('days', ['14'])[0])
             except Exception:
@@ -4749,7 +4811,7 @@ class Handler(BaseHTTPRequestHandler):
             d['webhook_masked'] = (m.group(1) + '***' + m.group(2)[-4:]) if m else '***'
         else:
             d['webhook_masked'] = ''
-        d['cd2_pass_set'] = bool(d.get('cd2_pass'))   # v3.18.0：补掩码位（原缺，前端无法显示「已保存」）
+        d['cd2_pass_set'] = bool(d.get('cd2_pass'))   # v3.18.1：补掩码位（原缺，前端无法显示「已保存」）
         d.pop('cd2_pass', None)         # v2.8：CD2 密码永不回传前端（留空=不修改）
         d['router_pass_set'] = bool(d.get('router_pass'))  # v2.8.10：掩码态回传
         d.pop('router_pass', None)      # v2.8.10：路由器 SSH 密码同样不回传
@@ -4764,7 +4826,7 @@ class Handler(BaseHTTPRequestHandler):
             d.pop(_k, None)
         d.pop('wecom_panel_url', None)   # v2.9.8：该设置已移除（旧 settings.json 里的残留不回传）
         d.pop('run_token', None)         # v2.9.32：子任务链接令牌是触发凭据，永不回传前端
-        d.pop('access_pass', None)       # v3.18.0：访问口令永不回传，只回「是否已启用」
+        d.pop('access_pass', None)       # v3.18.1：访问口令永不回传，只回「是否已启用」
         d['access_enabled'] = bool(_access_pass())
         d['access_set'] = bool(_access_pass())
         d['access_token'] = _access_token() if _access_pass() else ''   # 仅用于链接递推（浏览量=哈希值）
@@ -4780,7 +4842,9 @@ class Handler(BaseHTTPRequestHandler):
         b = self._body()
         if not isinstance(b, dict):
             return self._send(400, '{"error":"bad body"}'.encode())
-        _warn_items = []                # v3.18.0：被拒绝的输入收集起来，随响应回传（不再静默吞掉）
+        _warn_items = []                # v3.18.1：被拒绝的输入收集起来，随响应回传（不再静默吞掉）
+        _secrets_before = {_k: SETTINGS.get(_k) for _k in _SECRET_KEYS}   # 终点兜底用
+        _cd2_before = {_k: SETTINGS.get(_k) for _k in ('cd2_dav_url', 'cd2_user', 'cd2_pass')}
         if 'webhook_url' in b and isinstance(b['webhook_url'], str):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
         for k in ('push_enabled', 'feishu_enabled', 'alert_500_enabled', 'alert_speed_enabled',
@@ -4819,14 +4883,19 @@ class Handler(BaseHTTPRequestHandler):
         if 'cd2_user' in b and isinstance(b['cd2_user'], str):
             SETTINGS['cd2_user'] = b['cd2_user'].strip()
         if b.get('cd2_pass'):               # 密码：留空=不修改（前端 undefined 则整个键缺失）
-            SETTINGS['cd2_pass'] = str(b['cd2_pass'])
+            # v3.18.1：掩码串「***」绝不当成密码落盘。曾经踩到：设置页把显示掩码回填进输入框，
+            # 保存时原样提交 → cd2_pass 变成字面量 "***" → WebDAV 全部 401 →
+            # 喂料每轮报「源目录不可读」（告警还误导去查 /cloud115 挂载）。企微三件套早有此防护。
+            _cp = str(b['cd2_pass'])
+            if '***' not in _cp:
+                SETTINGS['cd2_pass'] = _cp
         if 'card_links' in b:               # v2.7（六）：卡片按钮列表，空/非法剔除
             cl = _norm_card_links(b['card_links'])
             SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
         if 'speed_targets' in b:            # v2.8.7 测速目标：清洗落盘（空列表合法=清空全部）
             SETTINGS['speed_targets'] = _norm_speed_targets(b['speed_targets'])
         if 'hosts_domain' in b and isinstance(b['hosts_domain'], str):
-            # v3.18.0：支持逗号/分号/空白分隔的多个域名（与读口径 _HOSTS_DOMAINS() 对齐）。
+            # v3.18.1：支持逗号/分号/空白分隔的多个域名（与读口径 _HOSTS_DOMAINS() 对齐）。
             # 旧版把整串当一个域名做 fullmatch → 填多个整串被拒收置空，
             # 等于「照提示填了多域名，监控被静默关停」（界面文案却写着支持多个）。
             _doms, _baddom = [], []
@@ -4852,7 +4921,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         if 'router_user' in b and isinstance(b['router_user'], str):
             SETTINGS['router_user'] = b['router_user'].strip()
-        if 'router_pass' in b and isinstance(b['router_pass'], str):
+        if 'router_pass' in b and isinstance(b['router_pass'], str) and '***' not in b['router_pass']:
             SETTINGS['router_pass'] = b['router_pass']   # 空串=清空；掩码回传不外泄
         # v2.9.5 企业微信：非密字段直写；三件套「空值或掩码 = 保留原值」
         # （否则「不动表单直接保存」会把已存好的 Secret/Token/AESKey 覆盖成掩码串）
@@ -4866,10 +4935,16 @@ class Handler(BaseHTTPRequestHandler):
                 SETTINGS[_k] = _v.strip()
         if (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret')) != _w_before:
             _wecom_tok['v'] = ''        # 换了企业/应用 → 缓存的 access_token 立即作废
-        # v3.18.0 访问口令：留空=不修改；显式填「-」（或点「清除口令」）才能关掉鉴权
+        # v3.18.1 访问口令：留空=不修改；显式填「-」（或点「清除口令」）才能关掉鉴权
         _ap = b.get('access_pass')
         if isinstance(_ap, str) and _ap.strip():
             SETTINGS['access_pass'] = '' if _ap.strip() == '-' else _ap.strip()
+        # v3.18.1 终点兜底：任何密钥字段若最终变成掩码串，一律还原为保存前的值并告警。
+        # 不依赖各字段各自的防护——将来新增密码项自动被覆盖，不会再出现「掩码当真密码」。
+        for _k in _SECRET_KEYS:
+            if _is_mask(SETTINGS.get(_k)):
+                SETTINGS[_k] = _secrets_before.get(_k) or ''
+                _warn_items.append('%s 收到的是掩码占位串，已忽略（保留原值）' % _k)
         SETTINGS.pop('wecom_panel_url', None)   # v2.9.8：设置已移除，顺手清掉旧残留
         # v2.9.20 中转池（可选）：开关/地址/模型/门槛直写；两套凭据「空或掩码=保留原值」
         if 'relay_enabled' in b:
@@ -4888,6 +4963,17 @@ class Handler(BaseHTTPRequestHandler):
                 SETTINGS[_k] = _v.strip()
         # v2.9.15：「🔗快捷入口」的 URL 直接来自 card_links，链接变了菜单必须重下发。
         # 旧版（v2.9.8）菜单里没有动态 URL，所以没有这套逻辑；现在按指纹判断，没变就不打扰企微。
+        # v3.18.1：改动 CD2 连接参数时**当场实测一次**，把问题挡在保存这一步。
+        # 之前 CD2 密码被写坏，用户是几天后从「喂料失败」告警里才知道的，而且指错了方向。
+        if any(_k in b for _k in ('cd2_dav_url', 'cd2_user', 'cd2_pass')):
+            _cs, _cb = _cd2_dav('PROPFIND', SETTINGS.get('feed_src_dir') or '/', depth='0',
+                                timeout=8)
+            if _cs != 207:
+                # v3.18.1：验证不过就**不保存这组值**，回滚到保存前的可用配置。
+                # 只提示但照存，等于把面板留在「坏配置」状态——喂料会一直失败。
+                for _k, _v in _cd2_before.items():
+                    SETTINGS[_k] = _v
+                _warn_items.append('CD2 连接验证失败，已保留原配置：' + _cd2_reason_of(_cs, _cb))
         _need_menu = (SETTINGS.get('wecom_enabled')
                       and _menu_links_sig() != _wecom_menu_sig['v'])
         try:
@@ -4897,7 +4983,7 @@ class Handler(BaseHTTPRequestHandler):
                                               ensure_ascii=False).encode())
         _menu_msg = ''
         if _need_menu:
-            # v3.18.0：卡片链接变了 → **同步**重下发企微菜单并把结果带回面板。
+            # v3.18.1：卡片链接变了 → **同步**重下发企微菜单并把结果带回面板。
             # 原来丢后台线程、结果不回传：用户改完链接看不到菜单到底更新没（前端读 d.menu_msg
             # 而后端从不返回该字段 —— 死字段）。现在同步跑（gettoken+menu/create ~1-2s，
             # 面板走 CDN 源站 15s 超时，余量充足）。
@@ -4911,12 +4997,12 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         if p == '/wecom/callback':        # v2.9.5 企微回调（用户消息 / 菜单点击事件）
             return self._wecom_cb_post(u)
-        if not self._authed(u):           # v3.18.0：访问口令（未设口令时恒放行）
+        if not self._authed(u):           # v3.18.1：访问口令（未设口令时恒放行）
             return self._deny()
         if p == '/api/settings':
             return self._do_settings_post()
         if p == '/api/test-push':
-            # v3.18.0：正文与「送达渠道」按**已开启的通道**生成——只开企微时不再谎称飞书可达
+            # v3.18.1：正文与「送达渠道」按**已开启的通道**生成——只开企微时不再谎称飞书可达
             chs = []
             if SETTINGS.get('feishu_enabled', True):
                 chs.append('飞书')
@@ -5189,7 +5275,7 @@ def main():
     import faulthandler, sys
     faulthandler.dump_traceback_later(180, repeat=True, file=sys.stderr)
     _warmup_from_cache()
-    _wecom_last_load()   # v3.18.0：恢复最近一次企微发送结果（重启前写盘）
+    _wecom_last_load()   # v3.18.1：恢复最近一次企微发送结果（重启前写盘）
     # v2.9.30：EM 启动时对齐一次 ETKN 任务目录（用户明确要求：只随启动跟随，不做定时跟随）。
     # 放在各轮询线程 / HTTP 服务之前完成——启动即带最新目录，面板与企微菜单三处同步。
     # 拉不到 ETKN 时回退上次落盘缓存，再不行沿用静态白名单（绝不因跟随失败而起不来）。
@@ -5208,7 +5294,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v3.18.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v3.18.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
