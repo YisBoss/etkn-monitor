@@ -7,11 +7,15 @@
 #   ① compose 被重写 → mount 行丢了 → 补丁静默失效（fulfilled 退回 ~22s，功能不坏但变慢）
 #   ② 镜像里上游改了同一个文件 → 我们的补丁是「整文件副本」→ 会把新版盖回去，
 #      上游的修复/新功能静默丢失（这个更危险）
-#      三处补丁（repository / shared_pool / p115）逐个比对，任一跑偏都报 need_rebase=true
+#      五处补丁（repository / shared_pool / p115 / tmdb / scrape_repository）逐个比对，
+#      任一跑偏都报 need_rebase=true
 # 本脚本就是把这两件事查出来。
 #
 # 退出码：0 = 全部正常；1 = 有问题（详见输出里的 problems[]）
 # 用法：etkn-patch-check.sh [--json|--text]     默认 --json
+#
+# 变更记录：
+#   v2 覆盖范围 3 处 → 5 处（补上 tmdb / scrape_repository 两个盲区）
 
 ETKN_DIR=${ETKN_DIR:-/vol1/1000/docker/etkn}
 MON_DIR=${MON_DIR:-/vol1/1000/docker/etkn-monitor}
@@ -19,9 +23,13 @@ COMPOSE=${COMPOSE:-$ETKN_DIR/docker-compose.yml}
 PATCH_REPO=${PATCH_REPO:-$ETKN_DIR/repository_patch.py}
 PATCH_POOL=${PATCH_POOL:-$ETKN_DIR/shared_pool_patch.py}
 PATCH_P115=${PATCH_P115:-$ETKN_DIR/p115_patch.py}
+PATCH_TMDB=${PATCH_TMDB:-$ETKN_DIR/tmdb_patch.py}
+PATCH_SCRAPE=${PATCH_SCRAPE:-$ETKN_DIR/scrape_repository_patch.py}
 ORIG_REPO=${ORIG_REPO:-$ETKN_DIR/repository.py.orig}
 ORIG_POOL=${ORIG_POOL:-$ETKN_DIR/shared_pool.py.orig}
 ORIG_P115=${ORIG_P115:-$ETKN_DIR/p115.py.orig}
+ORIG_TMDB=${ORIG_TMDB:-$ETKN_DIR/tmdb.py.orig}
+ORIG_SCRAPE=${ORIG_SCRAPE:-$ETKN_DIR/scrape_repository.py.orig}
 STATE=${STATE:-$MON_DIR/data/patch-check.state}
 IMAGE=${IMAGE:-hbq0405/etkn:latest}
 CTR=${CTR:-etkn}
@@ -30,11 +38,19 @@ CTR=${CTR:-etkn}
 EXPECT_REPO=${EXPECT_REPO:-d08462056b43ef56793490b181286e7a}
 # 期望值：p115_patch.py 的 md5（换补丁时必须同步改这里）
 # 含两项修复：①网络层重试 ②堵住 115 /files 的 offset 回绕死循环
-EXPECT_P115=${EXPECT_P115:-1350f9246e2059dc1fa2a3b9f9be8529}
+# 注意：这个值过去是「死变量」——定义了但脚本正文从没引用过，等于没在校验。
+#       v2 起真正生效：补丁文件 md5 与它不一致会直接报错。
+EXPECT_P115=${EXPECT_P115:-0d700a83359199c1c91c2363a627477f}
+# 期望值：shared_pool / tmdb / scrape_repository 三处补丁的 md5
+EXPECT_POOL=${EXPECT_POOL:-dcc0dacb0a4401aa1615f16ea7ef99a0}
+EXPECT_TMDB=${EXPECT_TMDB:-2fe8956fe028be981021a70f92ac016f}
+EXPECT_SCRAPE=${EXPECT_SCRAPE:-c30a9c3d4c3ec5e1d28790b95e7f84bb}
 
 REPO_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/repository.py
 POOL_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/shared_pool.py
 P115_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/p115.py
+TMDB_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/tmdb.py
+SCRAPE_IN_CTR=/usr/local/lib/python3.12/site-packages/etk_vnext/modules/scrape/repository.py
 
 MODE=json
 [ "$1" = "--text" ] && MODE=text
@@ -58,61 +74,65 @@ add() {  # add <key> <ok:0|1> <detail>
     fi
 }
 
+# 通用：校验「部署补丁文件 md5 == 期望 md5」
+check_expect() {  # check_expect <key> <补丁文件> <期望md5> <名字>
+    _got="$(md5_of "$2")"
+    if [ -z "$_got" ]; then
+        add "$1" 1 "$4 补丁不存在或不可读：$2"
+    elif [ "$_got" = "$3" ]; then
+        add "$1" 0 "$4 md5=${_got}（与期望一致）"
+    else
+        add "$1" 1 "$4 md5=${_got} ≠ 期望 ${3}（补丁文件被改过或换过）"
+    fi
+}
+
+# 通用：校验「容器内实际文件 md5 == 部署补丁 md5」
+check_mounted() {  # check_mounted <key> <补丁文件> <容器内路径> <名字> <后果说明>
+    _pf="$(md5_of "$2")"
+    _ct="$(docker exec "$CTR" md5sum "$3" 2>/dev/null | cut -d' ' -f1)"
+    if [ -z "$_ct" ]; then
+        add "$1" 1 "读不到容器内 $3（容器未运行？）"
+    elif [ -z "$_pf" ]; then
+        add "$1" 1 "$4 补丁文件不可读：$2"
+    elif [ "$_pf" = "$_ct" ]; then
+        add "$1" 0 "容器内 $4 md5=${_ct}（== 部署补丁，已生效）"
+    else
+        add "$1" 1 "容器内 $4 md5=${_ct} ≠ 部署补丁 md5=${_pf} → $5"
+    fi
+}
+
 # ---------- ① compose 里的 mount 行 ----------
 MOUNT_REPO_LINE="$(grep -c 'repository_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/repository.py' "$COMPOSE" 2>/dev/null)"
 MOUNT_POOL_LINE="$(grep -c 'shared_pool_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/shared_pool.py' "$COMPOSE" 2>/dev/null)"
 MOUNT_P115_LINE="$(grep -c 'p115_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/p115.py' "$COMPOSE" 2>/dev/null)"
+MOUNT_TMDB_LINE="$(grep -c 'tmdb_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/tmdb.py' "$COMPOSE" 2>/dev/null)"
+MOUNT_SCRAPE_LINE="$(grep -c 'scrape_repository_patch.py:/usr/local/lib/python3.12/site-packages/etk_vnext/modules/scrape/repository.py' "$COMPOSE" 2>/dev/null)"
 _miss=""
 [ "${MOUNT_REPO_LINE:-0}" -lt 1 ] && _miss="$_miss repository"
 [ "${MOUNT_POOL_LINE:-0}" -lt 1 ] && _miss="$_miss shared_pool"
 [ "${MOUNT_P115_LINE:-0}" -lt 1 ] && _miss="$_miss p115"
+[ "${MOUNT_TMDB_LINE:-0}" -lt 1 ] && _miss="$_miss tmdb"
+[ "${MOUNT_SCRAPE_LINE:-0}" -lt 1 ] && _miss="$_miss scrape_repository"
 if [ -z "$_miss" ]; then
-    add mount_lines 0 "compose 三行 bind-mount 均在（repository + shared_pool + p115）"
+    add mount_lines 0 "compose 五行 bind-mount 均在（repository + shared_pool + p115 + tmdb + scrape_repository）"
 else
     add mount_lines 1 "compose 缺少 bind-mount 行：${_miss# } → 对应补丁已失效"
 fi
 
-# ---------- ② 部署目录里的补丁文件本身 ----------
-GOT_REPO="$(md5_of "$PATCH_REPO")"
-if [ "$GOT_REPO" = "$EXPECT_REPO" ]; then
-    add patch_file 0 "repository_patch.py md5=${GOT_REPO}（与期望一致）"
-elif [ -z "$GOT_REPO" ]; then
-    add patch_file 1 "repository_patch.py 不存在或不可读：$PATCH_REPO"
-else
-    add patch_file 1 "repository_patch.py md5=${GOT_REPO} ≠ 期望 ${EXPECT_REPO}（补丁文件被改过或换过）"
-fi
+# ---------- ② 部署目录里的补丁文件本身（五处都校验 md5） ----------
+check_expect patch_file       "$PATCH_REPO"   "$EXPECT_REPO"   repository_patch.py
+check_expect patch_file_pool  "$PATCH_POOL"   "$EXPECT_POOL"   shared_pool_patch.py
+check_expect patch_file_p115  "$PATCH_P115"   "$EXPECT_P115"   p115_patch.py
+check_expect patch_file_tmdb  "$PATCH_TMDB"   "$EXPECT_TMDB"   tmdb_patch.py
+check_expect patch_file_scrape "$PATCH_SCRAPE" "$EXPECT_SCRAPE" scrape_repository_patch.py
 
-# ---------- ③ 运行中容器实际看到的 repository.py ----------
-GOT_IN_CTR="$(docker exec "$CTR" md5sum "$REPO_IN_CTR" 2>/dev/null | cut -d' ' -f1)"
-if [ "$GOT_IN_CTR" = "$EXPECT_REPO" ]; then
-    add container_mount 0 "容器内 repository.py md5=${GOT_IN_CTR}（补丁已生效）"
-elif [ -z "$GOT_IN_CTR" ]; then
-    add container_mount 1 "读不到容器内 $REPO_IN_CTR（容器未运行？）"
-else
-    add container_mount 1 "容器内 repository.py md5=${GOT_IN_CTR} ≠ 期望 ${EXPECT_REPO} → 补丁没挂上（fulfilled 会退回 ~22s）"
-fi
+# ---------- ③ 容器内实际生效的文件（五处都校验 == 部署补丁） ----------
+check_mounted container_mount  "$PATCH_REPO"   "$REPO_IN_CTR"   repository.py   "补丁没挂上（fulfilled 会退回 ~22s）"
+check_mounted shared_pool      "$PATCH_POOL"   "$POOL_IN_CTR"   shared_pool.py  "shared_pool 补丁没挂上"
+check_mounted p115_patch       "$PATCH_P115"   "$P115_IN_CTR"   p115.py         "p115 补丁没挂上（115 会再现 offset 回绕死循环）"
+check_mounted tmdb_patch       "$PATCH_TMDB"   "$TMDB_IN_CTR"   tmdb.py         "tmdb 补丁没挂上（TLS 读超时会 0 重试）"
+check_mounted scrape_repository "$PATCH_SCRAPE" "$SCRAPE_IN_CTR" scrape/repository.py "scrape 补丁没挂上"
 
-# ---------- ④ shared_pool 补丁是否也在生效 ----------
-GOT_POOL_FILE="$(md5_of "$PATCH_POOL")"
-GOT_POOL_CTR="$(docker exec "$CTR" md5sum "$POOL_IN_CTR" 2>/dev/null | cut -d' ' -f1)"
-if [ -n "$GOT_POOL_FILE" ] && [ "$GOT_POOL_FILE" = "$GOT_POOL_CTR" ]; then
-    add shared_pool 0 "容器内 shared_pool.py md5=${GOT_POOL_CTR}（== 部署补丁，已生效）"
-elif [ -z "$GOT_POOL_CTR" ]; then
-    add shared_pool 1 "读不到容器内 $POOL_IN_CTR（容器未运行？）"
-else
-    add shared_pool 1 "容器内 shared_pool.py md5=${GOT_POOL_CTR} ≠ 部署补丁 md5=${GOT_POOL_FILE} → shared_pool 补丁没挂上"
-fi
-
-# ---------- ⑤ p115 补丁（网络层重试 + 堵 115 /files offset 回绕死循环） ----------
-GOT_P115_FILE="$(md5_of "$PATCH_P115")"
-GOT_P115_CTR="$(docker exec "$CTR" md5sum "$P115_IN_CTR" 2>/dev/null | cut -d' ' -f1)"
-if [ -z "$GOT_P115_FILE" ]; then
-    add p115_patch 1 "p115_patch.py 不存在或不可读：$PATCH_P115"
-elif [ "$GOT_P115_FILE" = "$GOT_P115_CTR" ]; then
-    add p115_patch 0 "容器内 p115.py md5=${GOT_P115_CTR}（== 部署补丁，已生效）"
-else
-    add p115_patch 1 "容器内 p115.py md5=${GOT_P115_CTR} ≠ 部署补丁 md5=${GOT_P115_FILE} → p115 补丁没挂上（115 会再现 offset 回绕死循环）"
-fi
 # 挂上文件还不够：ETKN 是单进程 uvicorn、不热加载，进程没重启就还是旧代码。
 # 这里直接问运行中的进程有没有收敛闸。
 GOT_P115_GUARD="$(docker exec "$CTR" python -c "import etk_vnext.integrations.p115 as m; print(hasattr(m.P115StorageProvider,'_guard_page_offset'))" 2>/dev/null | tr -d '\r\n')"
@@ -122,14 +142,14 @@ else
     add p115_guard 1 "运行中的 p115 客户端没有 _guard_page_offset → 补丁未加载（需 docker restart $CTR），115 offset 回绕会死循环刷接口"
 fi
 
-# ---------- ⑥ 上游是否改过同一个文件（需不需要 rebase） ----------
-# 三处补丁都是「整文件副本」：镜像一更新，只要上游改过同名文件，我们的旧副本
+# ---------- ④ 上游是否改过同一个文件（需不需要 rebase） ----------
+# 五处补丁都是「整文件副本」：镜像一更新，只要上游改过同名文件，我们的旧副本
 # 就会把上游的修复/新功能静默盖回去（我们的补丁可能只有十几行，盖掉的却是几百行）。
 # 这里逐个文件比对「镜像内原版」 vs 「我们保存的 .orig 基准」。
-# docker create + docker cp 有点重，按「镜像 ID + 三个基准的 md5」缓存：都没变就复用上次结论
+# docker create + docker cp 有点重，按「镜像 ID + 五个基准的 md5」缓存：都没变就复用上次结论
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
 IMG_CREATED="$(docker image inspect "$IMAGE" --format '{{.Created}}' 2>/dev/null)"
-ORIG_KEY="$(md5_of "$ORIG_REPO")/$(md5_of "$ORIG_POOL")/$(md5_of "$ORIG_P115")"
+ORIG_KEY="$(md5_of "$ORIG_REPO")/$(md5_of "$ORIG_POOL")/$(md5_of "$ORIG_P115")/$(md5_of "$ORIG_TMDB")/$(md5_of "$ORIG_SCRAPE")"
 CACHED_ID=""; CACHED_VERDICT=""; CACHED_DETAIL=""; CACHED_ORIG=""
 if [ -f "$STATE" ]; then
     CACHED_ID="$(sed -n 's/^image_id=//p' "$STATE" | head -1)"
@@ -165,7 +185,9 @@ else
     for _spec in \
         "$ORIG_REPO|$REPO_IN_CTR|repository" \
         "$ORIG_POOL|$POOL_IN_CTR|shared_pool" \
-        "$ORIG_P115|$P115_IN_CTR|p115"
+        "$ORIG_P115|$P115_IN_CTR|p115" \
+        "$ORIG_TMDB|$TMDB_IN_CTR|tmdb" \
+        "$ORIG_SCRAPE|$SCRAPE_IN_CTR|scrape_repository"
     do
         _orig="${_spec%%|*}"; _rest="${_spec#*|}"
         _path="${_rest%%|*}"; _name="${_rest##*|}"

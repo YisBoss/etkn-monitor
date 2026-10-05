@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.16.2 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
+   ETKN 监控 · 界面 v3.17.0 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -323,7 +323,7 @@ button.act.lnk:hover:not(:disabled){border-color:var(--acc);color:var(--acc);bac
 .sp{display:flex;justify-content:space-between;gap:8px;padding:8px 0;border-bottom:1px solid var(--line)}
 .sp:last-child{border-bottom:none}
 @media(max-width:480px){
-  .twrap table.sptab{min-width:0}   /* v3.16.2：测速表手机端走卡片堆叠，取消 min-width:520 撑宽导致的横滚 */
+  .twrap table.sptab{min-width:0}   /* v3.17.0：测速表手机端走卡片堆叠，取消 min-width:520 撑宽导致的横滚 */
   .sptab thead{display:none}
   .sptab tr{display:block;padding:8px 0;border-bottom:1px solid var(--line)}
   .sptab td{display:inline-block;border:none;padding:2px 6px 2px 0}
@@ -431,8 +431,8 @@ input[type=number]{width:90px}
 .edrow-cl{grid-template-columns:minmax(0,88px) minmax(0,1fr) auto}
 .edrow-st{grid-template-columns:minmax(0,1.3fr) minmax(0,.9fr) minmax(0,1fr) auto}
 .edrow .act{white-space:nowrap}
-.edwrap{flex:1 1 auto;min-width:0}   /* v3.16.2：编辑区容器（原内联 flex:1 移入样式表，避免压过窄屏规则） */
-/* v3.16.2：窄屏「卡片按钮/测速目标」行改「字段换行 + 删除整行」。
+.edwrap{flex:1 1 auto;min-width:0}   /* v3.17.0：编辑区容器（原内联 flex:1 移入样式表，避免压过窄屏规则） */
+/* v3.17.0：窄屏「卡片按钮/测速目标」行改「字段换行 + 删除整行」。
    修 bug：编辑区被左侧标签挤到 ~166px 时，名称(88)+删除(112) 已占满 →
    链接框被 grid 压成 0px、删除按钮压到链接框上（用户报的重叠）。 */
 @media(max-width:640px){
@@ -460,7 +460,7 @@ input[type=number]{width:90px}
   background:var(--glass-2);border-top:1px solid var(--glass-line);
   backdrop-filter:blur(20px) saturate(170%);-webkit-backdrop-filter:blur(20px) saturate(170%);
   box-shadow:0 -12px 30px -22px rgba(0,0,0,.9)}
-/* v3.16.2：手机端三按钮同一行（均分三列） */
+/* v3.17.0：手机端三按钮同一行（均分三列） */
 @media(max-width:900px){.stickybar{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
   .stickybar button{min-width:0;width:100%;padding:9px 4px;font-size:12px;white-space:nowrap}}
 @media(min-width:900px){.stickybar{margin:12px -15px -15px;padding:11px 15px}}
@@ -496,7 +496,7 @@ html[data-theme="light"] .card::after{
 /* 手动操作：手机端末位按钮通栏（避免半列空置）*/
 @media(max-width:900px){.ops .opsr button:last-child{grid-column:1/-1}}
 
-/* ---------- v3.16.2 布局修整 ---------- */
+/* ---------- v3.17.0 布局修整 ---------- */
 .card.metric{display:flex;flex-direction:column}
 .card.metric>:last-child{margin-top:auto}
 .duo>.card:first-child{display:flex;flex-direction:column}
@@ -504,19 +504,19 @@ html[data-theme="light"] .card::after{
 @media(max-width:900px){.duo>.card:first-child{min-height:104px}}
 .flist{min-height:64px}
 
-/* ---------- v3.16.2 趋势卡 ---------- */
+/* ---------- v3.17.0 趋势卡 ---------- */
 .trendbox{display:flex;flex-direction:column;gap:5px}
 .trendrow{display:flex;align-items:center;gap:8px;font-size:12px}
 .trendrow .td{flex:0 0 44px;color:var(--sub);font-variant-numeric:tabular-nums}
 .trendrow .tbar{flex:1;display:flex;gap:2px;height:14px;background:var(--zebra);border-radius:7px;overflow:hidden}
 .trendrow .tbar i{display:block;height:100%;min-width:2px}
-.trendrow .tok{background:var(--ok)}   /* v3.16.2：纯色与图例一致（渐变易被误读为两类） */
-.trendrow .tbad{background:var(--warn);opacity:.9}   /* v3.16.2：新增未识别→黄 */
-.trendrow .tfail{background:var(--bad);opacity:.8}   /* v3.16.2：失败·部分任务→红 */
+.trendrow .tok{background:var(--ok)}   /* v3.17.0：纯色与图例一致（渐变易被误读为两类） */
+.trendrow .tbad{background:var(--warn);opacity:.9}   /* v3.17.0：新增未识别→黄 */
+.trendrow .tfail{background:var(--bad);opacity:.8}   /* v3.17.0：失败·部分任务→红 */
 .trendrow .tn small.s2{color:var(--warn)}   /* 新增未识别 */
 .trendrow .tn small.s3{color:var(--bad)}    /* 失败·部分任务 */
 .trendrow.trendsum{margin-top:6px;padding:8px;border-radius:9px;font-weight:700;
-  background:var(--tag-bg);box-shadow:inset 0 0 0 1px var(--line-hi)}   /* v3.16.2：中性描边，避免像按钮 */
+  background:var(--tag-bg);box-shadow:inset 0 0 0 1px var(--line-hi)}   /* v3.17.0：中性描边，避免像按钮 */
 .trendrow.trendsum .td{color:var(--tx);font-weight:800;letter-spacing:.02em}
 .trendrow.trendsum .tn{font-weight:800;font-size:13.5px;font-variant-numeric:tabular-nums}
 .trendrow .tn{flex:0 0 auto;color:var(--tx);font-weight:650;font-variant-numeric:tabular-nums}
@@ -530,7 +530,7 @@ html[data-theme="light"] .card::after{
 <body>
 <div class="aurora" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 <div class="grain" aria-hidden="true"></div>
-<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v3.16.2</span></h1><span class="updated" id="updated">连接中…</span><span class="hdrbtns"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
+<div class="hdr"><h1>ETKN 监控 <span class="tag" id="roTag">v3.17.0</span></h1><span class="updated" id="updated">连接中…</span><span class="hdrbtns"><button class="act" id="btnCfg" onclick="openCfg()" style="min-width:44px">⚙️</button><button class="act" id="btnTheme" onclick="toggleTheme()" style="min-width:44px">🌓</button></span></div>
 <div id="jamBar" style="display:none;background:var(--toast-warn-bg);color:var(--toast-warn-tx);border:1px solid var(--toast-warn-bd);border-radius:9px;padding:7px 12px;font-size:12px;margin-bottom:10px"></div>
 <div class="tabs compact">
 <button id="tab1" class="on" onclick="sw(1)">入库进度</button>
@@ -712,14 +712,14 @@ function sw(n){
   if(_pg){_pg.classList.remove('enter');void _pg.offsetWidth;_pg.classList.add('enter');}
   if(n===2)loadPage2Hist();   // v2.9.1：推送/测速历史卡片随任务统计页加载
   if(n===3&&!window._cfgLoadedOnce){try{cfgLoad();window._cfgLoadedOnce=true;}catch(e){}}
-  if(n===3)loadTrend();   // v3.16.2：进入设置页拉趋势
+  if(n===3)loadTrend();   // v3.17.0：进入设置页拉趋势
 }
 /* v2.9.1：历史卡片数据加载——首次先补拉设置（测速历史表头要显示目标备注），再拉两类历史 */
 async function loadPage2Hist(){
   try{if(!window._cfgLoadedOnce){await cfgLoad();window._cfgLoadedOnce=true;}}catch(e){}
   cfgLoadPush();cfgLoadSpeed();
 }
-/* v3.16.2：近 14 天趋势（后端 /api/daily-trend 读 data/daily.json，今日为实时值） */
+/* v3.17.0：近 14 天趋势（后端 /api/daily-trend 读 data/daily.json，今日为实时值） */
 async function loadTrend(){
   const box=document.getElementById('trendBox'); if(!box)return;
   try{
@@ -737,7 +737,7 @@ async function loadTrend(){
         '<span class="tbar"><i class="tok" style="width:'+sw+'%"></i><i class="tbad" style="width:'+bw+'%"></i><i class="tfail" style="width:'+fw+'%"></i></span>'+
         '<span class="tn">'+s+'<small class="s2">/'+b+'</small><small class="s3">/'+f+'</small></span></div>';
     }).join('')
-    /* v3.16.2：14 日合计行 */
+    /* v3.17.0：14 日合计行 */
     +(()=>{const S=ds.reduce((a,x)=>({s:a.s+(x.succ||0),u:a.u+(x.unrec_today||0),f:a.f+(x.bad_tasks||0)}),{s:0,u:0,f:0});
         return '<div class="trendrow trendsum" title="近 '+ds.length+' 日合计（'+ds[0].date+' ~ '+ds[ds.length-1].date+'）">'+
           '<span class="td">合计</span><span class="tbar" style="visibility:hidden"></span>'+
@@ -853,7 +853,7 @@ async function runSpeedtest(){
   }catch(e){
     toast('测速失败：'+String(e).slice(0,60),'bad');
     if(box&&!box.innerHTML.trim())box.innerHTML='<div class="sub bad">测速失败，请重试</div>';
-  }finally{                       // v3.16.2：无论如何必复位按钮，杜绝「永远测速中」
+  }finally{                       // v3.17.0：无论如何必复位按钮，杜绝「永远测速中」
     if(btn){btn.disabled=false;btn.textContent='开始测速';}
     spBusy=false;
   }
@@ -1073,7 +1073,7 @@ function tglAll(show){
   if(show)document.querySelectorAll('#cfgForm .setgroup').forEach(g=>SETG_OPEN.add(g.dataset.g));
   setgApply();
 }
-/* v3.16.2：展开/收起合并为一个按钮——全开时点=收起，否则点=展开；按钮文案跟当前状态走 */
+/* v3.17.0：展开/收起合并为一个按钮——全开时点=收起，否则点=展开；按钮文案跟当前状态走 */
 function tglAllToggle(){
   const groups=[...document.querySelectorAll('#cfgForm .setgroup')];
   const allOpen=groups.length>0&&groups.every(g=>SETG_OPEN.has(g.dataset.g));
@@ -1343,7 +1343,7 @@ async function cfgTestPush(){
   const b=document.getElementById('btnCfgTest');b.disabled=true;b.textContent='发送中…';
   try{
     const d=await (await fetch('/api/test-push',{method:'POST'})).json();
-    const ch=(d.channels&&d.channels.length)?d.channels.join('、'):'';   // v3.16.2：按实际开启的通道播报
+    const ch=(d.channels&&d.channels.length)?d.channels.join('、'):'';   // v3.17.0：按实际开启的通道播报
     if(d.ok)toast('测试推送已送达'+(ch||'推送渠道'),'ok');
     else toast('推送失败：'+String(d.err||'').slice(0,120),'bad');
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
@@ -1445,14 +1445,14 @@ function ntRow(nt){
   if(!nt||!Object.keys(nt).length)return '';
   const ch=[];
   if(nt.feishu)ch.push('飞书');
-  if(nt.wecom)ch.push('企微');   // v3.16.2：不再显示（代理），按用户口径只留「企微」
+  if(nt.wecom)ch.push('企微');   // v3.17.0：不再显示（代理），按用户口径只留「企微」
   else if(nt.wecom_on)ch.push('<span style="color:var(--bad)">企微未配齐</span>');
   const body=nt.enabled?(ch.length?ch.join(' · '):'<span style="color:var(--bad)">无可用通道</span>')
                         :'<span style="color:var(--dim)">已静默</span>';
   const last=nt.last||{};
   const lt=last.ts?(last.ts.slice(11,16)+(last.ok?' <span style="color:var(--ok)">成功</span>'
                                                  :' <span style="color:var(--bad)">失败</span>'))
-                                   :'<span style="color:var(--dim)">暂无</span>';   // v3.16.2：空占位由「—」改为「暂无」
+                                   :'<span style="color:var(--dim)">暂无</span>';   // v3.17.0：空占位由「—」改为「暂无」
   return `<div class="row"><span>通知渠道</span><span class="sub">${body} · 最近企微发送 ${lt}</span></div>`;
 }
 /* ---- 主刷新 ---- */
@@ -1478,7 +1478,7 @@ async function refresh(){
     const lagTxt=lagMin==null?'':(lagMin>=1?` · 统计截至 ${slowTs}(滞后${lagMin}分)`:'');
     const staleTxt=s.stale?` · <span style="color:var(--warn)">数据恢复中（当前为重启前缓存，后台更新中）</span>`:'';
     document.getElementById('updated').innerHTML=`<span class="dot" style="background:var(--${s.healthy?'ok':'bad'});margin:0 6px 0 0"></span>更新于 ${hm}${lagTxt}${staleTxt} · ${s.healthy?'服务正常':'服务异常'}`;
-    renderNotify(s.notify||{});       // v2.9.6：页头「通知渠道」徽标（v3.16.2 起并入状态行 title）
+    renderNotify(s.notify||{});       // v2.9.6：页头「通知渠道」徽标（v3.17.0 起并入状态行 title）
     {const _ue=document.getElementById('updated');if(_ue)_ue.title='通知渠道：'+notifyText(s.notify||{});}
     const a=s.active||{}, rec=s.records||{}, dn=s.done||{};
     document.getElementById('cQueued').innerHTML=fmtCard(a.media||0,'媒体');
@@ -1493,7 +1493,7 @@ async function refresh(){
     document.getElementById('cBadAll').textContent=`累计未识别 ${rec.unrecognized??'-'}`;
     const e=s.eta||{}, eo=e.organize||{};
     document.getElementById('cEta').textContent=e.eta_text||'计算中';
-    // v3.16.2：ETA 卡精简——主值已是结论（运行中/等待领取/具体时长），副行不再重复状态词与窗口配置
+    // v3.17.0：ETA 卡精简——主值已是结论（运行中/等待领取/具体时长），副行不再重复状态词与窗口配置
     {const _r=e.rate||0,_rm=e.remaining_media||0;
      document.getElementById('cEtaSub').textContent=
        _rm?`剩 ${_rm} 媒体${_r>0?` · ${_r} 媒体/分`:' · 暂无完成'}`:'队列已清空';}
