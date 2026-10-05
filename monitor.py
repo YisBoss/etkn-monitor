@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.17.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -26,6 +26,7 @@ v2.1/v2.2/v2.3 功能（重试收敛/手动整理/异常明细/手动操作卡/�
 """
 import base64
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -174,6 +175,8 @@ SETTINGS_DEFAULTS = {
     'relay_api_key': '',           # 中转池 /v1 调用密钥（探针用；与管理员密码是两套，实测不通用）
     'relay_model': '',             # 探针模型（留空=跳过探针，只报池状态）
     'relay_min_quota': 50,         # 配额门槛（%）：5 小时配额低于它视为真实耗尽，不自动清锁
+    # ---- v3.18.0 访问口令（面板安全）：空=不启用鉴权（保持旧行为）；只存本机、不回传前端 ----
+    'access_pass': '',
 }
 
 
@@ -204,6 +207,65 @@ def _pick_settings_path() -> str:
 SETTINGS_PATH = _pick_settings_path()
 SETTINGS = dict(SETTINGS_DEFAULTS)
 
+# ---------- v3.18.0 访问口令（治「面板对公网裸奔」：匿名可读走密钥、可改配置） ----------
+# 口令为空 → 全放行（与旧版行为完全一致，存量部署无感）。
+# 口令非空 → 三条放行路径：①本机回环（容器健康检查/本机脚本）②链接令牌 ?k=（卡片/任务链接带）
+# ③HTTP Basic（浏览器弹窗登录后下发 Cookie，后续免重复输入）。企微回调 URL 单独豁免（服务器来调，
+# 且自带签名校验），否则回调会被一起挡掉。
+_ACCESS_COOKIE = 'em_auth'
+
+
+def _access_pass() -> str:
+    return str(SETTINGS.get('access_pass') or '').strip()
+
+
+def _access_token() -> str:
+    """Cookie / 链接令牌值：口令的 sha256 前 24 位（不把明文口令写进 Cookie 与链接）。"""
+    return hashlib.sha256(_access_pass().encode('utf-8')).hexdigest()[:24]
+
+
+def _tok_ok(v) -> bool:
+    return bool(v) and hmac.compare_digest(str(v), _access_token())
+
+
+def _is_loopback(handler) -> bool:
+    try:
+        return handler.client_address[0] in ('127.0.0.1', '::1', '::ffff:127.0.0.1')
+    except Exception:
+        return False
+
+
+def _cookie_ok(handler) -> bool:
+    for part in (handler.headers.get('Cookie') or '').split(';'):
+        if '=' in part:
+            cn, cv = part.strip().split('=', 1)
+            if cn == _ACCESS_COOKIE and _tok_ok(cv):
+                return True
+    return False
+
+
+def _auth_check(handler, parsed) -> bool:
+    """鉴权总判。返回 True=放行。"""
+    pw = _access_pass()
+    if not pw:
+        return True                     # 未设口令 = 不启用鉴权
+    if _is_loopback(handler):
+        return True                     # 本机回环（健康检查、本机脚本）
+    q = urllib.parse.parse_qs(parsed.query or '')
+    if q.get('k') and _tok_ok(q['k'][0] if q['k'] else ''):
+        return True                     # 链接令牌（卡片按钮 / 任务链接）
+    h = handler.headers.get('Authorization') or ''
+    if h.startswith('Basic '):
+        try:
+            raw = base64.b64decode(h[6:]).decode('utf-8', 'replace')
+            if ':' in raw and hmac.compare_digest(raw.split(':', 1)[1], pw):
+                return True             # HTTP Basic（用户名随意，只校验口令）
+        except Exception:
+            pass
+    if _cookie_ok(handler):
+        return True                     # 浏览器弹窗登录后下发的 Cookie
+    return False
+
 
 def settings_load():
     try:
@@ -218,6 +280,9 @@ def settings_load():
             # （实际踩到：手机点任务报「失败 525/403」）。这里单独捞。
             if isinstance(d.get('run_token'), str) and d['run_token'].strip():
                 SETTINGS['run_token'] = d['run_token'].strip()
+            # v3.18.0：访问口令同理（不在 SETTINGS_DEFAULTS 回传列表，但必须跨重启保留）
+            if isinstance(d.get('access_pass'), str) and d['access_pass'].strip():
+                SETTINGS['access_pass'] = d['access_pass'].strip()
     except Exception:
         pass
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
@@ -502,7 +567,7 @@ def _wecom_last_path() -> str:
 
 
 def _wecom_last_load() -> None:
-    """v3.17.1：最近一次企微发送结果落盘——重启后不回「暂无」（此前纯内存，一重启就丢）。"""
+    """v3.18.0：最近一次企微发送结果落盘——重启后不回「暂无」（此前纯内存，一重启就丢）。"""
     try:
         with open(_wecom_last_path(), encoding='utf-8') as f:
             d = json.load(f)
@@ -1458,7 +1523,7 @@ def _run_task_url(task_key: str) -> str:
     而微信/企微会对链接做**服务端预取**——若 GET 即触发，一条消息就会把整类任务跑光。
     现在的页面在加载后用 **JavaScript** 自动 POST 触发：预取器不执行 JS → 不会误触发；
     用户真点开 → 立刻下发，只看到一条结果，少点一次「确认执行」。"""
-    return '%s/run-task/%s?token=%s' % (_panel_base(), task_key, _get_run_token())
+    return '%s/run-task/%s?token=%s%s' % (_panel_base(), task_key, _get_run_token(), _access_q())
 
 
 
@@ -2523,6 +2588,12 @@ def _panel_base() -> str:
     return (SETTINGS.get('trigger_public_base') or f'http://{fb}').rstrip('/')
 
 
+def _access_q() -> str:
+    """v3.18.0：开了访问口令时，给「推给用户的链接」带上 ?k=<令牌>，点开免输口令。
+    未启用口令时返回空串（链接保持原样）。"""
+    return ('&k=%s' % _access_token()) if _access_pass() else ''
+
+
 def _norm_card_links(raw) -> list:
     """清洗用户配置的按钮列表：非空名+合法 http(s) URL 才保留，最多 6 个。"""
     out = []
@@ -2546,10 +2617,10 @@ def _card_buttons(tok: str = '') -> list:
     btns = []
     if tok:
         btns.append({'text': '整理下一批',
-                     'url': _panel_base() + '/trigger/organize?token=' + tok,
+                     'url': _panel_base() + '/trigger/organize?token=' + tok + _access_q(),
                      'type': 'primary'})
     for it in _norm_card_links(SETTINGS.get('card_links')) or CARD_LINKS_DEFAULT:
-        btns.append({'text': it['text'], 'url': it['url'], 'type': 'default'})
+        btns.append({'text': it['text'], 'url': it['url'] + _access_q(), 'type': 'default'})
     return btns
 
 
@@ -3474,7 +3545,7 @@ def _dayweek_rebuild() -> None:
         # 旧实现直接读缓存 → 0 点后首轮 rebuild 把昨日值原样写进今日键，随后被下面的
         # 「防跳水」闸反复固化，面板「今日异常」长期虚高（2026-10-01 实测 1388，真值 ~250）。
         _cache_is_today = (_dayweek_cache.get('date') == today_d)
-        # v3.17.1 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
+        # v3.18.0 修复：进程重启后 _dayweek_cache 为空 → _cache_is_today=False → 首轮 rebuild
         # 把 daily.json「今日键」的日内口径（unrec_today/bad_tasks/by_kind_fail）写成 0；
         # 而 poll 回填只改内存缓存、要等下一轮 rebuild 才落盘 → 实测今日 unrec_today 长期落 0
         # （历史日正常，页面显示的是实时值所以看不出）。改为以「磁盘今日键」为下限，绝不回退。
@@ -4359,7 +4430,7 @@ async function doGo(){{
   const m=document.getElementById('msg'),o=document.getElementById('bOk');
   o.disabled=true;m.textContent='触发中…';m.className='';
   try{{
-    const r=await fetch('/trigger/organize',{{method:'POST',
+    const r=await fetch('/trigger/organize'+location.search,{{method:'POST',
       headers:{{'Content-Type':'application/json'}},
       body:JSON.stringify({{token:'{token}'}})}});
     const d=await r.json().catch(()=>({{}}));
@@ -4400,7 +4471,7 @@ padding:2px 8px;font-size:12px;color:#9fb3d9;margin-bottom:12px}}
 (async function(){{
   const m=document.getElementById('msg');
   try{{
-    const r=await fetch(location.pathname,{{method:'POST',
+    const r=await fetch(location.pathname+location.search,{{method:'POST',
       headers:{{'Content-Type':'application/json'}},
       body:JSON.stringify({{token:new URLSearchParams(location.search).get('token')||''}})}});
     const d=await r.json().catch(()=>({{}}));
@@ -4434,20 +4505,60 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):      # 静默访问日志
         pass
 
+    def _authed(self, parsed) -> bool:
+        """v3.18.0：访问口令校验。通过且走的是 Basic 时，顺手下发 Cookie（后续免弹窗）。"""
+        ok = _auth_check(self, parsed)
+        if ok and _access_pass():
+            h = self.headers.get('Authorization') or ''
+            if h.startswith('Basic ') and not _cookie_ok(self):
+                self._set_cookie = True
+        return ok
+
+    def _deny(self):
+        body = ('<!doctype html><meta charset="utf-8"><title>需要访问口令</title>'
+                '<body style="font-family:system-ui,-apple-system,sans-serif;background:#0f1420;'
+                'color:#e8ecf3;display:flex;min-height:100vh;align-items:center;justify-content:center;'
+                'margin:0"><div style="text-align:center"><b style="font-size:17px">需要访问口令</b>'
+                '<div style="color:#8b96ad;margin-top:8px;font-size:13px;line-height:1.7">'
+                '本面板已开启访问口令。<br>请在弹出的登录框输入口令后重试。</div></div>').encode('utf-8')
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="etkn-monitor"')
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self._set_cookie = False
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send(self, code, body: bytes, ctype='application/json; charset=utf-8'):
         self.send_response(code)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        if getattr(self, '_set_cookie', False):
+            self.send_header('Set-Cookie', '%s=%s; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax'
+                             % (_ACCESS_COOKIE, _access_token()))
         self.end_headers()
         self.wfile.write(body)
+
+    def _wecom_cb_get(self, u):
+        """v2.9.5 企微回调 URL 校验（GET 回明文 echostr）。v3.18.0：豁免访问口令。"""
+        code, body, ctype = _wecom_callback_verify(urllib.parse.parse_qs(u.query))
+        return self._send(code, body.encode('utf-8'), ctype)
+
+    def _wecom_cb_post(self, u):
+        """v2.9.5 企微回调（用户消息 / 菜单点击事件）。v3.18.0：豁免访问口令。"""
+        _n = int(self.headers.get('Content-Length') or 0)
+        _raw = self.rfile.read(_n).decode('utf-8', 'replace') if _n else ''
+        code, body = _wecom_callback_msg(_raw, urllib.parse.parse_qs(u.query))
+        return self._send(code, body)
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         p = u.path
         if p == '/wecom/callback':        # v2.9.5 企微回调 URL 校验（GET 回明文 echostr）
-            code, body, ctype = _wecom_callback_verify(urllib.parse.parse_qs(u.query))
-            return self._send(code, body.encode('utf-8'), ctype)
+            return self._wecom_cb_get(u)
+        if not self._authed(u):           # v3.18.0：访问口令（未设口令时恒放行）
+            return self._deny()
         if p in ('/', '/index.html'):
             try:
                 with open(os.path.join(STATIC, 'index.html'), 'rb') as f:
@@ -4477,7 +4588,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({
                 'base_url': BASE, 'eta_window_min': ETA_WINDOW_MIN,
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
-                'version': 'v3.17.1', 'readonly': False,
+                'version': 'v3.18.0', 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
@@ -4564,7 +4675,7 @@ class Handler(BaseHTTPRequestHandler):
                                                'etkn_net': _etkn_net_env(),
                                                'etkn_deps': _etkn_deps_public()},
                                               ensure_ascii=False).encode())
-        if p == '/api/daily-trend':       # v3.17.1：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
+        if p == '/api/daily-trend':       # v3.18.0：近 N 天趋势（读 data/daily.json；今日用实时值覆盖）
             try:
                 _n = int(urllib.parse.parse_qs(u.query).get('days', ['14'])[0])
             except Exception:
@@ -4638,7 +4749,7 @@ class Handler(BaseHTTPRequestHandler):
             d['webhook_masked'] = (m.group(1) + '***' + m.group(2)[-4:]) if m else '***'
         else:
             d['webhook_masked'] = ''
-        d['cd2_pass_set'] = bool(d.get('cd2_pass'))   # v3.17.1：补掩码位（原缺，前端无法显示「已保存」）
+        d['cd2_pass_set'] = bool(d.get('cd2_pass'))   # v3.18.0：补掩码位（原缺，前端无法显示「已保存」）
         d.pop('cd2_pass', None)         # v2.8：CD2 密码永不回传前端（留空=不修改）
         d['router_pass_set'] = bool(d.get('router_pass'))  # v2.8.10：掩码态回传
         d.pop('router_pass', None)      # v2.8.10：路由器 SSH 密码同样不回传
@@ -4653,6 +4764,10 @@ class Handler(BaseHTTPRequestHandler):
             d.pop(_k, None)
         d.pop('wecom_panel_url', None)   # v2.9.8：该设置已移除（旧 settings.json 里的残留不回传）
         d.pop('run_token', None)         # v2.9.32：子任务链接令牌是触发凭据，永不回传前端
+        d.pop('access_pass', None)       # v3.18.0：访问口令永不回传，只回「是否已启用」
+        d['access_enabled'] = bool(_access_pass())
+        d['access_set'] = bool(_access_pass())
+        d['access_token'] = _access_token() if _access_pass() else ''   # 仅用于链接递推（浏览量=哈希值）
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
@@ -4665,6 +4780,7 @@ class Handler(BaseHTTPRequestHandler):
         b = self._body()
         if not isinstance(b, dict):
             return self._send(400, '{"error":"bad body"}'.encode())
+        _warn_items = []                # v3.18.0：被拒绝的输入收集起来，随响应回传（不再静默吞掉）
         if 'webhook_url' in b and isinstance(b['webhook_url'], str):
             SETTINGS['webhook_url'] = b['webhook_url'].strip()
         for k in ('push_enabled', 'feishu_enabled', 'alert_500_enabled', 'alert_speed_enabled',
@@ -4682,10 +4798,13 @@ class Handler(BaseHTTPRequestHandler):
             if k in b:
                 try:
                     v = int(b[k])
-                    if v >= lo:
-                        SETTINGS[k] = v
-                except Exception:
-                    pass
+                except (TypeError, ValueError):
+                    _warn_items.append('%s 填的不是数字，已忽略' % k)
+                    continue
+                if v >= lo:
+                    SETTINGS[k] = v
+                else:
+                    _warn_items.append('%s 填的 %d 低于下限 %d，已忽略' % (k, v, lo))
         if 'finish_scope' in b and b['finish_scope'] in ('ok', 'all'):
             SETTINGS['finish_scope'] = b['finish_scope']
         if 'trigger_public_base' in b and isinstance(b['trigger_public_base'], str):
@@ -4707,10 +4826,22 @@ class Handler(BaseHTTPRequestHandler):
         if 'speed_targets' in b:            # v2.8.7 测速目标：清洗落盘（空列表合法=清空全部）
             SETTINGS['speed_targets'] = _norm_speed_targets(b['speed_targets'])
         if 'hosts_domain' in b and isinstance(b['hosts_domain'], str):
-            hd = b['hosts_domain'].strip().lower().rstrip('.')
-            if hd and not re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+', hd):
-                hd = ''                     # 非法域名=拒收置空（巡检自动跳过）
-            SETTINGS['hosts_domain'] = hd
+            # v3.18.0：支持逗号/分号/空白分隔的多个域名（与读口径 _HOSTS_DOMAINS() 对齐）。
+            # 旧版把整串当一个域名做 fullmatch → 填多个整串被拒收置空，
+            # 等于「照提示填了多域名，监控被静默关停」（界面文案却写着支持多个）。
+            _doms, _baddom = [], []
+            for _tok in re.split(r'[,，;；\s]+', b['hosts_domain'].strip().lower()):
+                _d = _tok.strip().rstrip('.')
+                if not _d:
+                    continue
+                if re.fullmatch(r'[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+', _d):
+                    if _d not in _doms:
+                        _doms.append(_d)
+                else:
+                    _baddom.append(_d)
+            SETTINGS['hosts_domain'] = ','.join(_doms)
+            if _baddom:
+                _warn_items.append('域名格式有误已剔除：' + '、'.join(_baddom))
         # v2.8.10 路由器连接 4 项（公版化）：写前清洗；密码原样存本地 settings.json
         if 'router_ip' in b and isinstance(b['router_ip'], str):
             SETTINGS['router_ip'] = b['router_ip'].strip()
@@ -4735,6 +4866,10 @@ class Handler(BaseHTTPRequestHandler):
                 SETTINGS[_k] = _v.strip()
         if (SETTINGS.get('wecom_corpid'), SETTINGS.get('wecom_secret')) != _w_before:
             _wecom_tok['v'] = ''        # 换了企业/应用 → 缓存的 access_token 立即作废
+        # v3.18.0 访问口令：留空=不修改；显式填「-」（或点「清除口令」）才能关掉鉴权
+        _ap = b.get('access_pass')
+        if isinstance(_ap, str) and _ap.strip():
+            SETTINGS['access_pass'] = '' if _ap.strip() == '-' else _ap.strip()
         SETTINGS.pop('wecom_panel_url', None)   # v2.9.8：设置已移除，顺手清掉旧残留
         # v2.9.20 中转池（可选）：开关/地址/模型/门槛直写；两套凭据「空或掩码=保留原值」
         if 'relay_enabled' in b:
@@ -4762,26 +4897,26 @@ class Handler(BaseHTTPRequestHandler):
                                               ensure_ascii=False).encode())
         _menu_msg = ''
         if _need_menu:
-            # v3.17.1：卡片链接变了 → **同步**重下发企微菜单并把结果带回面板。
+            # v3.18.0：卡片链接变了 → **同步**重下发企微菜单并把结果带回面板。
             # 原来丢后台线程、结果不回传：用户改完链接看不到菜单到底更新没（前端读 d.menu_msg
             # 而后端从不返回该字段 —— 死字段）。现在同步跑（gettoken+menu/create ~1-2s，
             # 面板走 CDN 源站 15s 超时，余量充足）。
             _ok, _msg = wecom_menu_apply()
             _menu_msg = ('企微菜单已按新链接重下发（手机端需退出应用重新进入才刷新）' if _ok else '企微菜单重下发失败：' + str(_msg))
-        return self._do_settings_get({'menu_msg': _menu_msg})
+        return self._do_settings_get({'menu_msg': _menu_msg,
+                                      'warn': '；'.join(_warn_items)[:300]})
 
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
         p = u.path
         if p == '/wecom/callback':        # v2.9.5 企微回调（用户消息 / 菜单点击事件）
-            _n = int(self.headers.get('Content-Length') or 0)
-            _raw = self.rfile.read(_n).decode('utf-8', 'replace') if _n else ''
-            code, body = _wecom_callback_msg(_raw, urllib.parse.parse_qs(u.query))
-            return self._send(code, body)
+            return self._wecom_cb_post(u)
+        if not self._authed(u):           # v3.18.0：访问口令（未设口令时恒放行）
+            return self._deny()
         if p == '/api/settings':
             return self._do_settings_post()
         if p == '/api/test-push':
-            # v3.17.1：正文与「送达渠道」按**已开启的通道**生成——只开企微时不再谎称飞书可达
+            # v3.18.0：正文与「送达渠道」按**已开启的通道**生成——只开企微时不再谎称飞书可达
             chs = []
             if SETTINGS.get('feishu_enabled', True):
                 chs.append('飞书')
@@ -5054,7 +5189,7 @@ def main():
     import faulthandler, sys
     faulthandler.dump_traceback_later(180, repeat=True, file=sys.stderr)
     _warmup_from_cache()
-    _wecom_last_load()   # v3.17.1：恢复最近一次企微发送结果（重启前写盘）
+    _wecom_last_load()   # v3.18.0：恢复最近一次企微发送结果（重启前写盘）
     # v2.9.30：EM 启动时对齐一次 ETKN 任务目录（用户明确要求：只随启动跟随，不做定时跟随）。
     # 放在各轮询线程 / HTTP 服务之前完成——启动即带最新目录，面板与企微菜单三处同步。
     # 拉不到 ETKN 时回退上次落盘缓存，再不行沿用静态白名单（绝不因跟随失败而起不来）。
@@ -5073,7 +5208,7 @@ def main():
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
-    print(f'etkn-monitor v3.17.1，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
+    print(f'etkn-monitor v3.18.0，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
           f'慢轮询 {POLL_INTERVAL}s（全量），ETA 窗口 {ETA_WINDOW_MIN}min，'
           f'喂料=CD2 WebDAV 通道（兜底轮询 {FEED_FALLBACK_INTERVAL}s），hosts 巡检=每小时',
           flush=True)
