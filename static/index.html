@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.6 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
+   ETKN 监控 · 界面 v3.18.7 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -626,6 +626,7 @@ html[data-theme="light"] .card::after{
         <div class="setrow"><label>500 命中阈值<span class="why">今日条数</span></label><input type="number" id="cfgT500" min="1"></div>
         <div class="setrow"><label>整理任务静止告警<span class="why">静止 ≥ N 分推送，重复间隔 M 分</span></label><div class="setbox"><input type="number" id="cfgTStall" min="1"><span class="sub">分 / 重复</span><input type="number" id="cfgRStall" min="5"><span class="sub">分</span><label class="switch"><input type="checkbox" id="cfgAStall"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>大文件宽限<span class="why">运行超1小时阈值放宽到30分钟</span></label><label class="switch"><input type="checkbox" id="cfgGrace"><span class="slider"></span></label></div>
+        <div class="setrow"><label>整理任务空转告警<span class="why">同一任务重跑 ≥ N 轮推送，重复间隔 M 分</span></label><div class="setbox"><input type="number" id="cfgTLoop" min="2"><span class="sub">轮 / 重复</span><input type="number" id="cfgRLoop" min="10"><span class="sub">分</span><label class="switch"><input type="checkbox" id="cfgALoop"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>整理任务清空提醒<span class="why">汇总含/隐藏失败行</span></label><div class="setbox"><select id="cfgFScope"><option value="all">汇总含失败行</option><option value="ok">汇总隐藏失败行</option></select><label class="switch"><input type="checkbox" id="cfgAFin"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>一键整理入口<span class="why">清空提醒附「整理下一批」，令牌30分钟一次性</span></label><label class="switch"><input type="checkbox" id="cfgTrg"><span class="slider"></span></label></div>
         <div class="setrow"><label>静止告警自动重启 etkn<span class="why">仅 restart；30分钟冷却+24小时≤2次；默认关</span></label><label class="switch"><input type="checkbox" id="cfgAutoRst"><span class="slider"></span></label></div>
@@ -1157,6 +1158,9 @@ async function cfgLoad(){
     document.getElementById('cfgTStall').value=d.stall_threshold_min??10;
     document.getElementById('cfgRStall').value=d.stall_repeat_min??30;
     document.getElementById('cfgGrace').checked=!!d.stall_grace_enabled;
+    document.getElementById('cfgALoop').checked=d.alert_loop_enabled!==false;
+    document.getElementById('cfgTLoop').value=d.loop_prepare_max??5;
+    document.getElementById('cfgRLoop').value=d.loop_repeat_min??120;
     document.getElementById('cfgAFin').checked=!!d.alert_finish_enabled;
     document.getElementById('cfgFScope').value=d.finish_scope||'all';
     document.getElementById('cfgTrg').checked=!!d.trigger_enabled;
@@ -1236,6 +1240,9 @@ async function cfgSave(){
         stall_threshold_min:+document.getElementById('cfgTStall').value||10,
         stall_repeat_min:+document.getElementById('cfgRStall').value||30,
         stall_grace_enabled:document.getElementById('cfgGrace').checked,
+        alert_loop_enabled:document.getElementById('cfgALoop').checked,
+        loop_prepare_max:+document.getElementById('cfgTLoop').value||5,
+        loop_repeat_min:+document.getElementById('cfgRLoop').value||120,
         alert_finish_enabled:document.getElementById('cfgAFin').checked,
         finish_scope:document.getElementById('cfgFScope').value,
         trigger_enabled:document.getElementById('cfgTrg').checked,

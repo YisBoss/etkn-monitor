@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.6 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.7 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.6'
+VERSION = 'v3.18.7'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -177,6 +177,13 @@ SETTINGS_DEFAULTS = {
     'stall_threshold_min': 10,     # 静止判定阈值（分钟）
     'stall_repeat_min': 30,        # 持续静止重复提醒间隔（分钟）
     'stall_grace_enabled': True,   # 大文件宽限开关（运行>1小时阈值放宽到 30 分钟）
+    # ---- v3.18.7 整理任务空转检测（重跑轮次判据）----
+    # 为什么另立判据：静止判据看的是「日志尾时间是否推进」，而 staging 批次若清不空
+    # （被拒文件读源失败、移不进未识别），ETKN 会每 ~13 分钟重跑一轮 prepare→execute，
+    # 日志一直在刷 → 静止判据永远判「有推进」→ 告警永不触发（8 号实锤 17 小时 42 轮）。
+    'alert_loop_enabled': True,    # 空转告警开关（默认开）
+    'loop_prepare_max': 5,         # 累计重跑轮次上限（超过=判定空转）
+    'loop_repeat_min': 120,        # 空转重复提醒间隔（分钟）
     'alert_finish_enabled': True,  # 整理任务清空提醒开关
     'finish_scope': 'all',         # 推送范围：ok=汇总隐藏失败行 / all=含失败行
     # ---- v2.5.5 一键整理入口（清空提醒富文本） ----
@@ -2880,6 +2887,8 @@ STALL_GRACE_RUNTIME_MIN = 60  # 触发宽限的运行时长下限（分钟）
 
 _organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_queued': 0,
                    'last_clear_at': None, 'pending_clear': False,
+                   # v3.18.7 空转检测：loop_seen[rid]={'last_id','prep','first'}
+                   'loop_seen': {}, 'loop_fired': {}, 'loop_last_push': {},
                    'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
                              'm_ok': 0, 'm_bad': 0, 'started_at': None,
                              'last': None, 'last_ts': None, 'flow': {},
@@ -2908,6 +2917,30 @@ def _parse_ts(v):
         return datetime.fromisoformat((v or '').replace('Z', '+00:00')).astimezone(TZ)
     except Exception:
         return None
+
+
+def _log_new_prepare(run_id, after_id):
+    """v3.18.7 增量拉取 run_id 的新日志，返回 (重跑轮次数, 本页最新日志 id, 是否还有更多)。
+
+    判据口径：organize.prepare.started 每个整理轮次只发一次，正常任务全程恒 1 条；
+    空转任务则每轮 +1 线性增长。用 after_id 增量拉（不回溯历史），首次观察只取
+    最新一条做基线，避免把任务启动时那一轮也算成重跑。
+    """
+    try:
+        if after_id:
+            q = f'/api/workflows/{run_id}/logs?limit=1000&after_id={int(after_id)}'
+        else:
+            q = f'/api/workflows/{run_id}/logs?limit=1'
+        s, b = api_get(q)
+        if s != 200 or not isinstance(b, dict):
+            return 0, None, False
+        items = b.get('items') or []
+        n = sum(1 for it in items
+                if str(it.get('event_type')) == 'organize.prepare.started')
+        return (n, (b.get('last_id') or (items[-1].get('id') if items else None)),
+                bool(b.get('has_more')))
+    except Exception:
+        return 0, None, False
 
 
 def _fmt_hhmm(v):
@@ -3258,6 +3291,47 @@ def check_organize_running(now=None):
             else:
                 _organize_state['stall_fired'].pop(rid, None)
                 _organize_state['stall_last_push'].pop(rid, None)
+
+    # ---- v3.18.7 空转告警（重跑轮次判据）----
+    # 与静止告警互补：静止判「日志不推进」，空转判「日志在刷但原地打转」。
+    # 判据：增量累计 organize.prepare.started 条数（正常任务恒 1，空转每轮 +1）。
+    if SETTINGS['push_enabled'] and SETTINGS.get('alert_loop_enabled', True):
+        lp_max = max(2, int(SETTINGS.get('loop_prepare_max') or 5))
+        lp_rep = max(10, int(SETTINGS.get('loop_repeat_min') or 120))
+        for rid, c in cur.items():
+            seen = _organize_state['loop_seen'].get(rid)
+            if seen is None:                     # 首次观察：只记基线，不回溯历史
+                _, lid, _ = _log_new_prepare(rid, None)
+                _organize_state['loop_seen'][rid] = {'last_id': lid, 'prep': 0,
+                                                     'first': time.time()}
+                continue
+            n_prep, new_lid, _more = _log_new_prepare(rid, seen.get('last_id'))
+            if n_prep:
+                seen['prep'] += n_prep
+            if new_lid:
+                seen['last_id'] = new_lid
+            if seen['prep'] < lp_max:
+                continue
+            now_ts = time.time()
+            if (rid in _organize_state['loop_fired']
+                    and now_ts - _organize_state['loop_last_push'].get(rid, 0) < lp_rep * 60):
+                continue
+            _organize_state['loop_fired'][rid] = True
+            _organize_state['loop_last_push'][rid] = now_ts
+            remain = max(0, c['item'] - c['ok'] - c['bad'])
+            run_h = (now_ts - seen['first']) / 3600.0
+            _alert_push('loop', '整理任务空转（反复重跑）', [
+                f'任务 #{rid}「{c["title"][:40]}」已重跑 {seen["prep"]} 轮',
+                f'进度 {c["ok"]}/{c["item"]}（剩 {remain}）· 观察 {run_h:.1f} 小时',
+                qline,
+                '典型原因：批次里被拒文件读源失败、移不进未识别 → 待整理区清不空 → 每轮重扫重报',
+                '建议：取消该任务，把卡住的文件从待整理区清出后再重派'],
+                buttons=_card_buttons())
+        for rid in list(_organize_state['loop_seen']):      # 任务消失即清状态
+            if rid not in cur:
+                _organize_state['loop_seen'].pop(rid, None)
+                _organize_state['loop_fired'].pop(rid, None)
+                _organize_state['loop_last_push'].pop(rid, None)
 
     _organize_state['snap'] = {rid: {'cnt': c['cnt'], 'last_at': c.get('last_at')}
                                for rid, c in cur.items()}
