@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.5 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
+   ETKN 监控 · 界面 v3.18.6 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -257,11 +257,11 @@ button.act:disabled{opacity:.45;border-color:var(--line);color:var(--sub);cursor
 button.act.lnk{border-color:var(--line-hi);color:var(--tx);background:transparent;opacity:.88}
 button.act.lnk:hover:not(:disabled){border-color:var(--acc);color:var(--acc);background:var(--tag-bg)}
 /* 主操作：实心强调（文字用 --bg 保证深浅两色都高对比） */
-#btnCfgSave,#btnCfgTest{border-color:transparent;color:var(--bg);font-weight:750;
+#btnCfgSave{border-color:transparent;color:var(--bg);font-weight:750;
   background:linear-gradient(135deg,var(--acc),var(--acc2));
   box-shadow:0 12px 30px -14px var(--acc)}
-#btnCfgSave:hover:not(:disabled),#btnCfgTest:hover:not(:disabled){color:var(--bg);filter:brightness(1.08)}
-#btnCfgSave::after,#btnCfgTest::after{display:none}
+#btnCfgSave:hover:not(:disabled){color:var(--bg);filter:brightness(1.08)}
+#btnCfgSave::after{display:none}
 
 /* ---------- 手动操作区 ---------- */
 .ops{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;margin-top:10px}
@@ -396,8 +396,8 @@ button.act.lnk:hover:not(:disabled){border-color:var(--acc);color:var(--acc);bac
 .setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;
   padding:10px 2px;border-bottom:1px solid var(--line);flex-wrap:wrap}
 .setrow:last-of-type{border-bottom:none}
-.setrow>label:first-child{font-size:13.5px;font-weight:500;flex:0 0 160px;align-items:flex-start;text-align:left}
-.setrow .why{font-size:11px;color:var(--dim);margin-left:6px;font-weight:400;line-height:1.5}
+.setrow>label:first-child{font-size:13.5px;font-weight:500;flex:0 0 160px;min-width:0;align-items:flex-start;text-align:left;display:flex;flex-direction:column;gap:3px}
+.setrow .why{font-size:11px;color:var(--dim);margin-left:0;font-weight:400;line-height:1.5;display:block}
 .setbox{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .fourrow{display:grid;grid-template-columns:1.2fr .7fr .9fr 1.1fr;gap:8px}
 .fourrow label{font-size:11px;color:var(--dim);display:block;margin-bottom:3px}
@@ -419,6 +419,13 @@ input[type=number]{width:90px}
 .setrow>input[type=text]{flex:1;min-width:200px}
 .setrow>select,.setrow>input[type=number]{flex:0 0 120px}
 .setrow>input[type=checkbox]{flex:0 0 auto}
+/* v3.18.6：窄屏下标题列自适应（小字注释不再挤在 160px 里折 3~4 行）；
+   开关仍留在标题右侧同一行，仅输入类控件整行落到下一行。
+   注意：必须放在上面 .setrow>input 规则之后，否则被覆盖。 */
+@media(max-width:640px){
+  .setrow>label:first-child{flex:1 1 auto}
+  .setrow>input[type=text],.setrow>input[type=password],.setrow>input[type=number]{flex:1 1 100%}
+}
 @media(max-width:480px){
   .edrow input{min-height:44px;font-size:14px}
   input[type=text],input[type=number]{min-width:0}
@@ -582,10 +589,9 @@ html[data-theme="light"] .card::after{
   <div class="grid">
     <div class="card w">
       <div id="cfgForm">
-        <div class="sub" style="margin:4px 0 2px">点分组名展开／收起</div>
-        <div class="setgroup" data-g="1" onclick="tglGroup(this)">【推送 · 总览】<span class="tgl">▶</span></div>
+        <div class="setgroup" data-g="1" onclick="tglGroup(this)">【推送 · 总览】<span class="why" style="font-weight:400;font-size:11px;margin-left:8px;opacity:0.8">点此展开／收起</span><span class="tgl">▶</span></div>
         <div class="setrow"><label>推送总开关<span class="why">关闭则全部静默（下面两条渠道一起停）</span></label><label class="switch"><input type="checkbox" id="cfgPush"><span class="slider"></span></label></div>
-        <div class="setrow"><label>卡片按钮（链接≤6 个）<span class="why">飞书与企微卡片共用；「整理下一批」固定带令牌不在此配</span></label>
+        <div class="setrow"><label>卡片按钮（链接≤6 个）<span class="why">飞书与企微卡片共用；「整理下一批」固定带令牌不在此配置</span></label>
           <div class="edwrap"><div id="clList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="clAdd()">＋新增按钮</button></div></div></div>
         <div class="setrow"><label>外网面板地址<span class="why">卡片按钮链接的基址（「整理下一批」等）；空=内网面板地址</span></label><input type="text" id="cfgTrgBase" placeholder="https://monitor.example.com" style="max-width:260px"></div>
@@ -1542,7 +1548,7 @@ async function refresh(){
     frows.forEach(x=>{
       const btn=canRetry(x)
         ?`<button class="act" onclick="retryTask(${x.id},'${(x.title||'').replace(/'/g,'')}')">重试</button>`
-        :`<span class="sub" style="font-size:11px">不支持</span>`;
+        :`<span class="sub" style="font-size:11px"></span>`;
       const _err=[x.stage,x.err].filter(Boolean).join('：');
       tf.insertAdjacentHTML('beforeend',
         `<tr><td>${x.id}</td><td>${f1(x.title)||x.kind}</td><td class="ttl" title="${((_err?_err+' ⏎ ':'')+(x.title||'')).replace(/"/g,'&quot;')}">${(x.title||'').slice(0,18)}</td><td class="num bad">${x.bad_media||x.media||0}</td><td class="num">${(x.finished_at||'').slice(11,16)}</td><td class="num" style="text-align:right">${btn}</td></tr>`)});

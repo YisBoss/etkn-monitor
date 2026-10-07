@@ -1,4 +1,4 @@
-# etkn-monitor —— ETKN 监控（v3.18.5）
+# etkn-monitor —— ETKN 监控（v3.18.6）
 
 手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试、手动整理触发、异常媒体明细。
 
