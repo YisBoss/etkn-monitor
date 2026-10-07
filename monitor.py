@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.7 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.8 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.7'
+VERSION = 'v3.18.8'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -184,6 +184,7 @@ SETTINGS_DEFAULTS = {
     'alert_loop_enabled': True,    # 空转告警开关（默认开）
     'loop_prepare_max': 5,         # 累计重跑轮次上限（超过=判定空转）
     'loop_repeat_min': 120,        # 空转重复提醒间隔（分钟）
+    'auto_cancel_enabled': True,   # 空转自动取消任务开关（默认开；护栏见 _auto_cancel_allowed）
     'alert_finish_enabled': True,  # 整理任务清空提醒开关
     'finish_scope': 'all',         # 推送范围：ok=汇总隐藏失败行 / all=含失败行
     # ---- v2.5.5 一键整理入口（清空提醒富文本） ----
@@ -2424,6 +2425,51 @@ def _auto_stall_handler(rid, c) -> None:
             f'任务 #{rid} 触发自动处置，但执行失败', f'错误：{out}'])
 
 
+# ============ v3.18.8 空转自动取消（重跑轮次判据的自动处置） ============
+_loop_cancel_state = {'cancels': [], 'done': set()}   # cancels=24h 窗口时刻表；done=已动手过的任务
+
+
+def _auto_cancel_allowed(rid) -> str:
+    """护栏检查：返回 ''=允许；否则返回拒绝原因（写入告警）。"""
+    if rid in _loop_cancel_state['done']:
+        return '该任务已自动取消过，不重复动手'
+    now = time.time()
+    _loop_cancel_state['cancels'] = [t for t in _loop_cancel_state['cancels']
+                                     if now - t < 86400]
+    if len(_loop_cancel_state['cancels']) >= 2:
+        return '24 小时内已自动取消 2 次，超出上限，不再自动取消'
+    return ''
+
+
+def _auto_loop_cancel(rid, c) -> None:
+    """空转告警触发时的自动处置：取消该整理任务（只取消，不重启、不重建）。
+
+    为什么只取消：空转的根因是「待整理区清不空」，取消能把循环与 TG 刷屏立刻止住；
+    重启治不了空转（任务起来照样循环），重建更会放大问题。
+    """
+    if not (SETTINGS['push_enabled'] and SETTINGS.get('auto_cancel_enabled', True)):
+        return
+    why = _auto_cancel_allowed(rid)
+    if why:
+        _alert_push('loop', '整理任务空转（自动取消受限）', [
+            f'任务 #{rid} 触发自动处置，但{why}', '请人工按标准流程处置'])
+        return
+    s, b = api_post(f'/api/workflows/{rid}/cancel')
+    now = time.time()
+    _loop_cancel_state['cancels'].append(now)
+    _loop_cancel_state['done'].add(rid)
+    title = ((c or {}).get('title') or '')[:40]
+    if s == 200 and isinstance(b, dict) and b.get('cancelled'):
+        _alert_push('auto_cancel', '已自动取消空转任务', [
+            f'任务 #{rid}「{title}」重跑超限，已自动取消',
+            'TG 的「本批次失败」刷屏应随即停止',
+            '待整理区若仍有读不出的文件，下一批可能复现——建议清出后重派'],
+            tcolor='green')
+    else:
+        _alert_push('loop', '自动取消空转任务失败，需人工介入', [
+            f'任务 #{rid}「{title}」自动取消失败', f'HTTP {s} {str(b)[:100]}'])
+
+
 # ============ v2.8 hosts 自动更新（域名漂移自愈；v2.8.8 起域名可配置） ============
 # v2.8.8：域名改 settings['hosts_domain']（用户自填，默认空=不监控）；
 # _HOSTS_DOMAIN 兼容包装：优先取设置，空时回退旧常量（存量部署不受影响）。
@@ -3327,6 +3373,7 @@ def check_organize_running(now=None):
                 '典型原因：批次里被拒文件读源失败、移不进未识别 → 待整理区清不空 → 每轮重扫重报',
                 '建议：取消该任务，把卡住的文件从待整理区清出后再重派'],
                 buttons=_card_buttons())
+            _auto_loop_cancel(rid, c)          # v3.18.8 告警后自动处置（开关+护栏内）
         for rid in list(_organize_state['loop_seen']):      # 任务消失即清状态
             if rid not in cur:
                 _organize_state['loop_seen'].pop(rid, None)
