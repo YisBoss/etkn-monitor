@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.8 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.9 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.8'
+VERSION = 'v3.18.9'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -5041,14 +5041,16 @@ class Handler(BaseHTTPRequestHandler):
                   'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
                   'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
-                  'wecom_enabled'):
+                  'wecom_enabled',
+                  'alert_loop_enabled', 'auto_cancel_enabled'):   # v3.18.9 空转告警/自动取消
             if k in b:
                 SETTINGS[k] = bool(b[k])
         for k, lo in (('interval_500_min', 5), ('interval_speed_min', 0),
                       ('count_500_threshold', 1), ('backlog_threshold', 1),
                       ('speed_threshold_ms', 1000),
                       ('stall_threshold_min', 1), ('stall_repeat_min', 5),
-                      ('feed_batch_limit', 1), ('feed_trigger_delay', 0)):
+                      ('feed_batch_limit', 1), ('feed_trigger_delay', 0),
+                      ('loop_prepare_max', 2), ('loop_repeat_min', 10)):   # v3.18.9 空转阈值
             if k in b:
                 try:
                     v = int(b[k])
