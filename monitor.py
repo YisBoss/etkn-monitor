@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.11 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.13 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.11'
+VERSION = 'v3.18.13'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -4015,6 +4015,85 @@ _patch_job = {'running': False, 'result': None, 'err': '', 'ts': 0.0,
               'started': 0.0, 'alerted': ''}
 _patch_job_lock = threading.Lock()
 
+# v3.18.12 一键修复：rebase job 状态（复用 _patch_job 模式）
+_REBASE_SCRIPT = '/vol1/1000/docker/etkn/auto_rebase_patch.py'
+_rebase_job = {'running': False, 'ok': None, 'err': '', 'ts': 0.0, 'started': 0.0, 'log': ''}
+_rebase_job_lock = threading.Lock()
+
+
+def _rebase_do():
+    """通过 _host_ssh 在宿主机上后台跑 auto_rebase_patch.py，轮询日志文件直到完成。"""
+    LOG_FILE = '/tmp/etkn_rebase.log'
+    trigger_cmd = (
+        "nohup sh -c 'python3 {script} >{log} 2>&1; echo __EXIT__$? >>{log}'"
+        " >/dev/null 2>&1 &"
+    ).format(script=_REBASE_SCRIPT, log=LOG_FILE)
+    with _rebase_job_lock:
+        _rebase_job['started'] = time.time()
+    # 清旧日志再触发
+    _host_ssh(f'> {LOG_FILE}', timeout=5)
+    ok_trigger, _ = _host_ssh(trigger_cmd, timeout=10)
+    if not ok_trigger:
+        with _rebase_job_lock:
+            _rebase_job['ok'] = False
+            _rebase_job['err'] = '无法 SSH 到宿主机触发脚本'
+            _rebase_job['ts'] = time.time()
+            _rebase_job['running'] = False
+        return
+    # 轮询：最多 180s，每 3s 读一次日志，找 __EXIT__ 行
+    deadline = time.time() + 180
+    log_content = ''
+    exit_code = None
+    while time.time() < deadline:
+        time.sleep(3)
+        _, out = _host_ssh(f'cat {LOG_FILE} 2>/dev/null', timeout=10)
+        if out:
+            log_content = out
+        if '__EXIT__' in log_content:
+            for ln in log_content.splitlines():
+                if ln.startswith('__EXIT__'):
+                    try:
+                        exit_code = int(ln.replace('__EXIT__', '').strip())
+                    except Exception:
+                        exit_code = 1
+            break
+    if exit_code is None:
+        exit_code = 1
+        log_content += '\n[timeout: 脚本超过 180s 未完成]'
+    ok = exit_code == 0
+    log_tail = log_content.strip()[-800:]
+    with _rebase_job_lock:
+        _rebase_job['ok'] = ok
+        _rebase_job['err'] = '' if ok else log_tail[-200:]
+        _rebase_job['log'] = log_tail
+        _rebase_job['ts'] = time.time()
+        _rebase_job['running'] = False
+    if ok:
+        _alert_push('patch', 'ETKN 补丁自动修复完成', ['shared_pool.py 已 rebase 到最新镜像'], tcolor='green')
+    else:
+        _alert_push('patch', 'ETKN 补丁自动修复失败', [log_tail[-150:]], tcolor='red')
+    _patch_job_start('dedup')
+
+
+def _rebase_job_start() -> bool:
+    with _rebase_job_lock:
+        if _rebase_job['running']:
+            return False
+        _rebase_job['running'] = True
+    threading.Thread(target=_rebase_do, daemon=True).start()
+    return True
+
+
+def _rebase_job_state() -> dict:
+    with _rebase_job_lock:
+        d = dict(_rebase_job)
+        if _rebase_job['started']:
+            d['elapsed'] = round(
+                (time.time() - _rebase_job['started']) if _rebase_job['running']
+                else max(0.0, _rebase_job['ts'] - _rebase_job['started']), 1)
+        return d
+
+
 
 def _patch_check_run(timeout: int = 120):
     """跑一次宿主上的补丁自检脚本。返回 (ok, dict|None, err)。"""
@@ -4864,7 +4943,7 @@ class Handler(BaseHTTPRequestHandler):
                             'run-task', 'task-catalog', 'task-catalog-refresh',
                             'run-task-page', 'relay-check',
                             # v2.9.22 补丁自检
-                            'patch-check'],
+                            'patch-check', 'patch-rebase'],
             }, ensure_ascii=False).encode())
         if p == '/api/bad-media':
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -4901,6 +4980,9 @@ class Handler(BaseHTTPRequestHandler):
             # v2.9.22 ETKN bind-mount 补丁自检：GET 只读内存状态（异步任务见 _patch_loop）
             return self._send(200, json.dumps(_patch_job_state(),
                                               ensure_ascii=False).encode())
+        if p == '/api/patch-rebase':
+            # v3.18.12 一键修复：GET 只读 rebase job 状态
+            return self._send(200, json.dumps(_rebase_job_state(), ensure_ascii=False).encode())
         if p == '/api/hosts-status':
             # v2.8.19：只读回显当前绑定（grep 路由器 hosts，不解析不改）——GET 版；
             # 匹配口径与 _hosts_check_one 一致：含域名的任意行（不限标记行，兼容旧绑定）
@@ -5290,6 +5372,12 @@ class Handler(BaseHTTPRequestHandler):
             # v2.9.22 面板按钮：开一个后台自检并推卡片，立刻返回（面板走 CDN，不能同步等 SSH）
             started = _patch_job_start('always')
             d = _patch_job_state()
+            d['started'] = started
+            return self._send(200, json.dumps(d, ensure_ascii=False).encode())
+        if p == '/api/patch-rebase':
+            # v3.18.12 一键修复：开后台 rebase 任务，立刻返回
+            started = _rebase_job_start()
+            d = _rebase_job_state()
             d['started'] = started
             return self._send(200, json.dumps(d, ensure_ascii=False).encode())
         if p == '/api/hermes/switch':

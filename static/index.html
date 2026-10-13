@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.11 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
+   ETKN 监控 · 界面 v3.18.13 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -981,6 +981,36 @@ async function purgeRegister(){
 /* v2.9.22 ETKN bind-mount 补丁自检（更新镜像后必查）。
    面板走 EdgeOne CDN（源站 15s 超时），所以自检是异步任务：POST 只负责开跑，
    这里再轮询 GET 取结果。检查项见宿主脚本 scripts/etkn-patch-check.sh。 */
+/* v3.18.12 一键修复：自动 rebase shared_pool.py 补丁到当前镜像 */
+let rebaseBusy = false;
+async function patchRebase(){
+  if(rebaseBusy){toast('修复进行中，请稍候','warn');return;}
+  rebaseBusy = true;
+  mClose();
+  toast('⏳ 开始自动修复，约 30~60 秒…','info');
+  try{
+    await fetch('/api/patch-rebase',{method:'POST'});
+    let d={}, tries=0;
+    do{
+      await new Promise(s=>setTimeout(s,2000));
+      const r = await fetch('/api/patch-rebase');
+      d = await r.json();
+      tries++;
+    } while(d.running && tries<60);
+    if(d.ok===true){
+      toast('✅ 补丁已自动修复，ETKN 已重启','ok');
+      opsStamp('补丁修复', true);
+      // 自动触发一次补丁自检刷新状态
+      setTimeout(()=>patchCheck(),3000);
+    } else {
+      const msg = String(d.err||d.log||'未知错误').slice(0,120);
+      toast('❌ 自动修复失败：'+msg,'bad');
+      opsStamp('补丁修复', false);
+    }
+  }catch(e){toast('修复请求失败：'+String(e).slice(0,80),'bad');}
+  rebaseBusy = false;
+}
+
 let patchBusy = false;
 async function patchCheck(){
   if(patchBusy) return;
@@ -1015,7 +1045,13 @@ async function patchCheck(){
             ? `<div style="margin:3px 0">✅ <b>${esc(c.key)}</b><br><span style="color:var(--sub)">${esc(c.detail)}</span></div>`
             : `<div style="background:rgba(248,81,73,.10);border-left:3px solid #f85149;border-radius:6px;padding:6px 9px;margin:6px 0"><div>❌ <b style="color:#f85149">${esc(c.key)}</b></div><span style="color:var(--sub)">${esc(c.detail)}</span></div>`).join('')
         + '</div>';
-      mOpen(bad.length?`补丁自检 · ${bad.length} 项未通过`:'ETKN 补丁自检', html);
+      /* v3.18.12 一键修复按钮 */
+      const fixBtn = bad.length
+        ? `<div style="margin-top:14px;text-align:center">`
+          +`<button onclick="patchRebase()" style="background:#388bfd;color:#fff;border:none;border-radius:8px;padding:8px 22px;font-size:14px;cursor:pointer;font-weight:600">🔧 立即修复（自动 rebase）</button>`
+          +`<div style="color:var(--sub);font-size:11px;margin-top:5px">将自动提取镜像原始文件并重新打补丁，约 30 秒</div></div>`
+        : '';
+      mOpen(bad.length?`补丁自检 · ${bad.length} 项未通过`:'ETKN 补丁自检', html+(fixBtn||''));
       if(bad.length){ toast(`补丁自检有问题：${bad.length} 项`,'warn'); opsStamp('补丁自检', false); }
       else { toast('补丁自检通过：全部正常','ok'); opsStamp('补丁自检', true); }
     }

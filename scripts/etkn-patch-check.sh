@@ -62,7 +62,7 @@ check_one() {  # <补丁文件> <容器内路径> <期望md5> <短名>
 }
 
 check_one "$ETKN_DIR/repository_patch.py"  "$SITE/modules/subscription/repository.py" "d08462056b43ef56793490b181286e7a" repository
-check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"          "c13d1c75910e76cfb1cd0ec3e0989979" shared_pool
+check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"          "f1310475fbf0673d53d011b4c29ef7c6" shared_pool
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
