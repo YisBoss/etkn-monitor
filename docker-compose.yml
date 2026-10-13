@@ -21,6 +21,7 @@ services:
     volumes:
       - ./:/app:ro
       - ./data:/app/data
+      - /vol1/1000/docker/etkn/mem-trend.log:/app/data/mem-trend.log:ro  # 内存趋势日志（只读）
       # 注：自动喂料走 CloudDrive2 的 WebDAV 接口（面板【喂料】里配），不依赖本地挂载，
       #     所以这里不再挂 cloud115。
     healthcheck:

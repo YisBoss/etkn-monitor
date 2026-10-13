@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.10 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.11 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.10'
+VERSION = 'v3.18.11'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -4969,6 +4969,36 @@ class Handler(BaseHTTPRequestHandler):
                     _it.update(_fut)
                 _days.append(_it)
             return self._send(200, json.dumps({'days': _days, 'today': _today},
+                                              ensure_ascii=False).encode())
+        if p == '/api/mem-trend':          # v3.18.x：ETKN 内存趋势（读 mem-trend.log，近 N 小时）
+            try:
+                _nh = int(urllib.parse.parse_qs(u.query).get('hours', ['24'])[0])
+            except Exception:
+                _nh = 24
+            _nh = max(1, min(168, _nh))   # 1h ~ 7天
+            _nlines = _nh * 12             # 每5分钟一行
+            _mem_log = '/app/data/mem-trend.log'  # bind-mount from host mem-trend.log
+            _pts = []
+            try:
+                with open(_mem_log, 'r', encoding='utf-8', errors='replace') as _f:
+                    _all = _f.readlines()
+                for _ln in _all[-_nlines:]:
+                    _ln = _ln.strip()
+                    if not _ln:
+                        continue
+                    _m = re.match(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*?mem=(\d+)MB.*?running=(\d+).*?steps5m=(\d+)', _ln)
+                    if _m:
+                        _pts.append({
+                            'ts': _m.group(1),
+                            'mem': int(_m.group(2)),
+                            'running': int(_m.group(3)),
+                            'steps5m': int(_m.group(4)),
+                        })
+            except FileNotFoundError:
+                pass
+            except Exception as _e:
+                return self._send(500, json.dumps({'error': str(_e)}, ensure_ascii=False).encode())
+            return self._send(200, json.dumps({'points': _pts, 'hours': _nh},
                                               ensure_ascii=False).encode())
         if p == '/api/task-catalog':        # v2.9.10：面板「任务中心」与企微菜单同源
             return self._send(200, json.dumps(
