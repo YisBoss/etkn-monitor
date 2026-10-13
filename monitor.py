@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.9 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.10 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.9'
+VERSION = 'v3.18.10'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -2143,10 +2143,23 @@ def _feed_err_partial(picks_dirs: list, picks_files: list, moved_dirs: list,
 
 def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_files: int = 0) -> None:
     """v2.7.2①：转移成功后延迟触发原生整理；③失败时识别 115 限流给重试指引。
-    v2.8.14：成功不再单独推卡（合并进「自动喂料完成」单卡）；n_dirs/n_files 仅留签名兼容。"""
+    v2.8.14：成功不再单独推卡（合并进「自动喂料完成」单卡）；n_dirs/n_files 仅留签名兼容。
+    v3.18.10：连接类失败自动重试 3 次（修「ETKN 重启窗口撞车 → Connection reset」）。"""
     payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
                               'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
-    s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+    # v3.18.10：连接类失败（s == -1，如 ETKN 被看门狗重启时的 Connection reset）自动重试，
+    # 最多 3 次、间隔 15s，绕过 ~20s 的重启窗口；限流/HTTP 4xx/5xx 不重试（重试无意义）。
+    s, b = None, None
+    for _attempt in range(3):
+        s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+        if s in (200, 201, 202):
+            break
+        if _attempt < 2 and s == -1:
+            print('[feed] 触发整理连接失败（%s），15s 后重试（%d/3）'
+                  % (str(b)[:60], _attempt + 2), flush=True)
+            time.sleep(15)
+            continue
+        break
     if s in (200, 201, 202):
         rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
         if rid:
@@ -3997,7 +4010,7 @@ def _host_ssh(cmd: str, timeout: int = 20):
 # 脚本输出 JSON、退出码 0=正常 / 1=有问题。本模块只负责调用 + 推送。
 # ⚠️ 面板走 EdgeOne CDN（源站 15s 超时）→ 自检必须异步，绝不能在请求线程里等 SSH。
 _PATCH_SCRIPT = str(os.environ.get('PATCH_CHECK_SCRIPT') or '').strip()
-_PATCH_INTERVAL = int(os.environ.get('PATCH_CHECK_INTERVAL', '21600'))   # 默认 6 小时
+_PATCH_INTERVAL = int(os.environ.get('PATCH_CHECK_INTERVAL', '3600'))   # 默认 1 小时（原 6h：面板会长时间显示过时结果）
 _patch_job = {'running': False, 'result': None, 'err': '', 'ts': 0.0,
               'started': 0.0, 'alerted': ''}
 _patch_job_lock = threading.Lock()
@@ -4070,7 +4083,7 @@ def _patch_do(push: str = 'none') -> dict:
     if push != 'none' and (push == 'always' or changed) and SETTINGS.get('push_enabled'):
         if res.get('ok'):
             _alert_push('patch', 'ETKN 补丁自检通过',
-                        ['compose mount 行 / 补丁 md5 / 容器内生效 / 上游一致性 全部正常'],
+                        ['2 个补丁（repository / shared_pool）的部署链 + 上游一致性 全部正常'],
                         tcolor='green')
         else:
             _alert_push('patch', 'ETKN 补丁自检未通过（更新镜像后必查）',
@@ -4113,7 +4126,7 @@ def _patch_job_state() -> dict:
 
 
 def _patch_loop() -> None:
-    """每 _PATCH_INTERVAL 跑一次自检（失败集合变化才推送）。"""
+    """每 _PATCH_INTERVAL 跑一次自检（失败集合变化才推送）。v1.3.34 起默认 1h（原 6h 太滞后）。"""
     time.sleep(300)                          # 启动 5 分钟后再跑，别和首轮采集抢
     while True:
         try:
@@ -5484,7 +5497,7 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
-    threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（6h）
+    threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（默认 1h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
     print(f'etkn-monitor {VERSION}，端口 {port}，快轮询 {FAST_INTERVAL}s（活跃队列）/'
