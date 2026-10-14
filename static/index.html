@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.13 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
+   ETKN 监控 · 界面 v3.18.14 —— 毛玻璃重构 + 布局修整（Hermes 2026-10-04）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -692,7 +692,7 @@ html[data-theme="light"] .card::after{
           &nbsp;<a href="#" style="color:var(--acc);text-decoration:none" onclick="loadMemTrend(72);return false">3天</a>
         </span>
       </div>
-      <div class="sub" style="margin:2px 0 8px">ETKN 容器内存（cgroup memory.current）；颜色：<span style="color:var(--ok)">绳</span>&lt;4GB &nbsp;<span style="color:var(--warn)">黄</span>4-8GB &nbsp;<span style="color:var(--bad)">红</span>&gt;8GB</div>
+      <div class="sub" style="margin:2px 0 8px">ETKN 容器内存（cgroup memory.current）；颜色：<span style="color:var(--ok)">绿</span>&lt;4GB &nbsp;<span style="color:var(--warn)">黄</span>4-8GB &nbsp;<span style="color:var(--bad)">红</span>&gt;8GB</div>
       <div id="memTrendBox" style="min-height:80px">加载中…</div>
     </div>
   </div>
@@ -777,44 +777,59 @@ async function loadMemTrend(h){
     const d=await (await fetch('/api/mem-trend?hours='+_memTrendHours,{cache:'no-store'})).json();
     const pts=(d.points||[]);
     if(!pts.length){box.innerHTML='<div class="sub">暂无数据（mem-trend.log 未生成）</div>';return;}
-    const W=Math.min(box.clientWidth||600,800), H=80;
-    const mxMem=Math.max(1,...pts.map(x=>x.mem));
-    const mxRun=Math.max(1,...pts.map(x=>x.running));
+    // 固定坐标系，用 viewBox 自动缩放
+    const PL=44,PR=8,PT=8,PB=20, CW=600,CH=100;
+    const VW=CW+PL+PR, VH=CH+PT+PB;
+    const mxMem=Math.max(8192,...pts.map(x=>x.mem));
     const n=pts.length;
-    // SVG 折线图
-    const px=(i)=>Math.round(i/(n-1||1)*W);
-    const py=(v,mx)=>Math.round(H-(v/mx)*H);
-    const memColor=(mb)=>mb>8192?'var(--bad)':mb>4096?'var(--warn)':'var(--ok)';
-    // 内存折线（逐段着色）
-    let memPath='', prevX=0, prevY=0;
-    let segs=pts.map((p,i)=>{const x=px(i),y=py(p.mem,Math.max(mxMem,1024));return {x,y,mem:p.mem};});
-    let memSegs=segs.map((s,i)=>i===0?'':`<line x1="${segs[i-1].x}" y1="${segs[i-1].y}" x2="${s.x}" y2="${s.y}" stroke="${memColor(s.mem)}" stroke-width="2" stroke-linecap="round"/>`).join('');
-    // running dots
-    let runDots=pts.map((p,i)=>{
-      if(!p.running)return '';
-      const x=px(i),r=Math.min(4,2+p.running);
-      return `<circle cx="${x}" cy="${Math.round(H-8)}" r="${r}" fill="var(--acc)" opacity="0.7" title="${p.ts} running=${p.running}"/>`;
-    }).join('');
-    // 水平阈值线
-    const y4g=py(4096,Math.max(mxMem,1024)), y8g=py(8192,Math.max(mxMem,1024));
+    const px=i=>PL+Math.round(i/(n-1||1)*CW);
+    const py=v=>PT+Math.round(CH-(v/mxMem)*CH);
+    const mc=mb=>mb>8192?'var(--bad)':mb>4096?'var(--warn)':'var(--ok)';
+    // 网格 + Y轴
+    let grid='',yLbl='';
+    [0,2048,4096,6144,8192].filter(v=>v<=mxMem).forEach(v=>{
+      const y=py(v);
+      grid+=`<line x1="${PL}" y1="${y}" x2="${PL+CW}" y2="${y}" stroke="var(--dim)" stroke-width="0.6" opacity="0.2"/>`;
+      yLbl+=`<text x="${PL-4}" y="${y+4}" text-anchor="end" font-size="9" fill="var(--sub)">${v===0?'0':(v/1024)+'G'}</text>`;
+    });
+    // 警戒线
     let hlines='';
-    if(mxMem>4096) hlines+=`<line x1="0" y1="${y4g}" x2="${W}" y2="${y4g}" stroke="var(--warn)" stroke-width="1" stroke-dasharray="4,4" opacity="0.5"/>`;
-    if(mxMem>8192) hlines+=`<line x1="0" y1="${y8g}" x2="${W}" y2="${y8g}" stroke="var(--bad)" stroke-width="1" stroke-dasharray="4,4" opacity="0.5"/>`;
-    // 当前值标注
+    [[4096,'var(--warn)'],[8192,'var(--bad)']].forEach(([v,col])=>{
+      if(v<mxMem) hlines+=`<line x1="${PL}" y1="${py(v)}" x2="${PL+CW}" y2="${py(v)}" stroke="${col}" stroke-width="1" stroke-dasharray="5,4" opacity="0.6"/>`;
+    });
+    // 面积填充（底边固定在 py(0)=PT+CH）
+    const BOTY=PT+CH;
+    const polyPts=pts.map((p,i)=>`${px(i)},${py(p.mem)}`).join(' ');
     const last=pts[pts.length-1];
-    const curTxt=`${last.mem}MB`;
-    // 时间轴标注（首、中、末）
-    const tLabels=[0,Math.floor(n/2),n-1].map(i=>{
-      const p=pts[i]; if(!p)return '';
-      const hhmm=(p.ts||'').slice(11,16);
-      return `<text x="${px(i)}" y="${H+14}" text-anchor="${i===0?'start':i===n-1?'end':'middle'}" font-size="10" fill="var(--dim)">${hhmm}</text>`;
+    const area=`<polygon points="${px(0)},${BOTY} ${polyPts} ${px(n-1)},${BOTY}" fill="${mc(last.mem)}" opacity="0.08"/>`;
+    // 折线（逐段着色）
+    const segs=pts.map((p,i)=>i===0?'':`<line x1="${px(i-1)}" y1="${py(pts[i-1].mem)}" x2="${px(i)}" y2="${py(p.mem)}" stroke="${mc(p.mem)}" stroke-width="2.5" stroke-linecap="round"/>`).join('');
+    // running 色条（底部紧贴图表下方）
+    const dots=pts.map((p,i)=>p.running?`<rect x="${px(i)-2}" y="${BOTY+2}" width="4" height="4" rx="1" fill="var(--acc)" opacity="${Math.min(1,0.45+p.running*0.12)}" title="${(p.ts||'').slice(11,16)} r=${p.running}"/>`:''  ).join('');
+    // 当前值标注
+    const lx=px(n-1), ly=py(last.mem);
+    const ltxt=`${last.mem}MB`;
+    const lbx=lx>PL+CW-60?lx-ltxt.length*6.5-8:lx+6;
+    const curLabel=`<circle cx="${lx}" cy="${ly}" r="3.5" fill="${mc(last.mem)}"/>
+      <rect x="${lbx}" y="${ly-13}" width="${ltxt.length*6.5+6}" height="15" rx="3" fill="${mc(last.mem)}" opacity="0.15"/>
+      <text x="${lbx+3}" y="${ly-1}" font-size="11" fill="${mc(last.mem)}" font-weight="700">${ltxt}</text>`;
+    // 时间标签
+    const tLbls=[0,Math.floor(n/2),n-1].map(i=>{
+      if(!pts[i])return '';
+      const a=i===0?'start':i===n-1?'end':'middle';
+      return `<text x="${px(i)}" y="${BOTY+PB-2}" text-anchor="${a}" font-size="9" fill="var(--dim)">${(pts[i].ts||'').slice(11,16)}</text>`;
     }).join('');
-    box.innerHTML=`<svg width="${W}" height="${H+18}" style="display:block;overflow:visible">
-      ${hlines}${memSegs}${runDots}
-      <text x="${segs[segs.length-1].x}" y="${segs[segs.length-1].y-5}" text-anchor="end" font-size="11" fill="${memColor(last.mem)}" font-weight="600">${curTxt}</text>
-      ${tLabels}
-    </svg>
-    <div class="sub" style="margin-top:4px">峰值 ${mxMem}MB &nbsp;·&nbsp; 当前 ${last.mem}MB &nbsp;·&nbsp; 最后采样 ${(last.ts||'').slice(11,16)} &nbsp;·&nbsp; <span style="color:var(--acc)">●</span> running 任务数</div>`;
+    // 边框
+    const bord=`<rect x="${PL}" y="${PT}" width="${CW}" height="${CH}" rx="3" fill="none" stroke="var(--dim)" stroke-width="0.5" opacity="0.18"/>`;
+    box.innerHTML=`<div style="overflow:hidden"><svg viewBox="0 0 ${VW} ${VH}" style="display:block;width:100%" xmlns="http://www.w3.org/2000/svg">
+      ${grid}${bord}${hlines}${area}${segs}${dots}${curLabel}${yLbl}${tLbls}
+    </svg></div>
+    <div class="sub" style="margin-top:5px;display:flex;gap:14px;flex-wrap:wrap">
+      <span>峰值 <b>${Math.max(...pts.map(x=>x.mem))}MB</b></span>
+      <span>当前 <b style="color:${mc(last.mem)}">${last.mem}MB</b></span>
+      <span>采样 ${(last.ts||'').slice(11,16)}</span>
+      <span><span style="display:inline-block;width:8px;height:8px;background:var(--acc);border-radius:2px;vertical-align:middle;margin-right:2px"></span>running 任务</span>
+    </div>`;
   }catch(e){box.innerHTML='<div class="sub bad">加载失败：'+String(e).slice(0,60)+'</div>';}
 }
 /* ---- 类型中文映射（未知类型回退原名，不吞新类型） ---- */

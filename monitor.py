@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.13 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.14 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.13'
+VERSION = 'v3.18.14'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -1909,6 +1909,7 @@ def _cd2_dav(method: str, path: str, dest: str = None, data: bytes = None,
         h['Depth'] = depth
     if dest:
         h['Destination'] = base + quote(dest)
+        h['Overwrite'] = 'F'   # v3.18.14：防止 MOVE 静默覆盖目标，412=已存在
     req = urllib.request.Request(base + quote(path), method=method, headers=h, data=data)
     try:
         r = urllib.request.urlopen(req, timeout=timeout)
@@ -1961,6 +1962,8 @@ def _cd2_move(src_dir: str, dst_dir: str, name: str) -> tuple:
     s, b = _cd2_dav('MOVE', src, dest=dst)
     if s in (201, 204, 250):
         return True, ''
+    if s == 412:   # v3.18.14：Overwrite:F → 目标已存在同名文件夹
+        return False, f'{_clean_dir_name(name)[:40]}：目标目录已存在同名文件夹'
     return False, f'{_clean_dir_name(name)[:40]}：HTTP {s} {(b or b"")[:60].decode(errors="replace", ).strip()}'
 
 
@@ -2042,10 +2045,8 @@ def _feed_move_batch(src: str, dst: str, picks: list) -> tuple:
     其它错误仍即停回报。返回 (成功名单, 失败描述或 '', 跳过名单)。"""
     ok_names, skipped, err = [], [], ''
     for name in picks:
-        if _cd2_exists(dst, name):   # 目标同名已存在：不覆盖（防数据破坏）
-            # v2.8.11a：错误文案用清洗后主名（剥 {tmdb-xxx} 后缀），失败卡不再出现刮削残渣
-            err = f'{_clean_dir_name(name)[:40]}：目标目录已存在同名文件夹'
-            break
+        # v3.18.14：_cd2_dav MOVE 已带 Overwrite:F，目标存在→412→_cd2_move 返回错误
+        # 省去 _cd2_exists 预探测，CD2 请求数减半（50s→~25s per batch=25项）
         ok, e2 = _cd2_move(src, dst, name)
         if not ok:
             if 'HTTP 404' in (e2 or ''):
