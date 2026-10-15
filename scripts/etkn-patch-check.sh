@@ -15,6 +15,10 @@
 #               （compose 有 bind 行 → 补丁文件校验和正确 → 容器内已生效），任一环断即报，
 #               detail 指明断在哪一步。12 项 → 4 项。
 #               旧的 7 项版备份见同目录 etkn-patch-check.sh.bak-*。
+#   2026-10-16  期望 md5 改为「边车优先」：补丁文件旁的 <patch>.md5（auto_rebase_patch.py 每次
+#               rebase 时同步写入）= 单一真源，缺失才回退脚本内硬编码值。修掉复发问题：
+#               rebase 成功但期望值没同步 → 自检永久假红（实证：auto_rebase 的更新正则
+#               漏配带引号的 check_one 行，静默跳过）。
 # 退出码：0 = 全部正常；1 = 有问题
 # 用法：etkn-patch-check.sh [--json|--text]     默认 --json
 
@@ -27,6 +31,17 @@ MODE=json
 [ "$1" = "--text" ] && MODE=text
 
 md5_of() { [ -f "$1" ] && md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# 期望 md5：优先读补丁文件旁的 .md5 边车（auto_rebase_patch.py 在 rebase 时同步写入，
+# 单一真源），没有边车才用脚本内硬编码的回退值（新克隆仓库的场景）。
+expect_of() {  # <补丁文件> <回退md5>
+    _side="$1.md5"
+    if [ -s "$_side" ]; then
+        tr -d ' \t\r\n' < "$_side"
+    else
+        printf '%s' "$2"
+    fi
+}
 
 CHECKS=""; PROBLEMS=""; FAIL=0
 add() {
@@ -61,8 +76,8 @@ check_one() {  # <补丁文件> <容器内路径> <期望md5> <短名>
     fi
 }
 
-check_one "$ETKN_DIR/repository_patch.py"  "$SITE/modules/subscription/repository.py" "d08462056b43ef56793490b181286e7a" repository
-check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"          "f1310475fbf0673d53d011b4c29ef7c6" shared_pool
+check_one "$ETKN_DIR/repository_patch.py"  "$SITE/modules/subscription/repository.py" "$(expect_of "$ETKN_DIR/repository_patch.py"  d08462056b43ef56793490b181286e7a)" repository
+check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"          "$(expect_of "$ETKN_DIR/shared_pool_patch.py" ba9604c171b43226034ad0d3c0f33ea4)" shared_pool
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
