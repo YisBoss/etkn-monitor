@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.16 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.17 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.16'
+VERSION = 'v3.18.17'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -5609,10 +5609,21 @@ def main():
                       # 与 _hosts_loop 存在启动竞速——本轮重启实测 hosts 线程抢跑读到默认值
                       # hosts_enabled=False，首轮巡检被静默跳过睡 3600 秒（幸被新增日志暴露）。
                       # 各后台线程从此一律读到已加载设置（poll/fast 同享此修复）。
-    # v2.8.25 排障：每 180 秒转储一次全线程栈到日志（定位 poll_loop 阻塞点用；
-    # 输出量小，仅 7 线程；确认根因后可移除）
-    import faulthandler, sys
-    faulthandler.dump_traceback_later(180, repeat=True, file=sys.stderr)
+    # v3.18.17：全线程栈转储改为**按需开启、默认关闭**。
+    # 来历：v2.8.25 为定位 poll_loop 阻塞点加的临时诊断（每 180 秒 dump 一次），根因解决后
+    # 一直没撤——实测它占了容器日志的 86%（146k 行里 126k 行）、每天新增约 2.9 万行，
+    # 把应用日志彻底淹没（2026-10-18 排查喂料/清空卡时被它挡了一道）。
+    # 需要再抓卡死现场时：docker-compose 的 environment 里加 EM_STACKDUMP_SECONDS=180 即可开回来，
+    # 不用改代码；0 或不设 = 关闭。
+    try:
+        _stackdump_s = int(os.environ.get('EM_STACKDUMP_SECONDS', '0') or 0)
+    except ValueError:
+        _stackdump_s = 0
+    if _stackdump_s > 0:
+        import faulthandler, sys as _sys
+        faulthandler.dump_traceback_later(_stackdump_s, repeat=True, file=_sys.stderr)
+        print('[诊断] 已开启全线程栈转储：每 %d 秒一次（EM_STACKDUMP_SECONDS）' % _stackdump_s,
+              flush=True)
     _warmup_from_cache()
     _wecom_last_load()   # v3.18.1：恢复最近一次企微发送结果（重启前写盘）
     # v2.9.30：EM 启动时对齐一次 ETKN 任务目录（用户明确要求：只随启动跟随，不做定时跟随）。
