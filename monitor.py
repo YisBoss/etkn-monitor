@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.15 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.16 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.15'
+VERSION = 'v3.18.16'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -2167,6 +2167,17 @@ def _feed_delayed_trigger(moved_n: int, total_files: int, n_dirs: int = 0, n_fil
         rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
         if rid:
             _watch_shell_run(int(rid), 'feed')  # v2.7.3②：空转监视
+        # v3.18.16：喂料提交成功 = 新批次的起点，这里**显式声明批次开始**。
+        # 旧版只靠 check_organize_running 在 30s 巡检里「看到」running 任务才置 active=True；
+        # 而喂料批次常常只有几个散文件、1 分钟内就跑完（或队列快照没赶上），巡检抓不到 →
+        # 批次永不激活 → 清空判定永不成立，可喂料卡明明写着「完成后推清空提醒」
+        # （2026-10-17 19:28~19:38 实证：4 条喂料卡全部来自兜底轮询、0 条清空卡）。
+        # declared=True 让清空判定不再依赖 total_prev>0（快照没抓到任务也能正常收尾）。
+        _b = _organize_state['batch']
+        if not _b.get('active'):
+            _b['active'] = True
+            _b['started_at'] = _now()
+            _b['declared'] = True
         return
     body = json.dumps(b, ensure_ascii=False) if isinstance(b, (dict, list)) else str(b or '')
     if ('访问上限' in body) or ('429' in body) or ('限流' in body) or ('Too Many' in body):
@@ -2954,7 +2965,7 @@ _organize_state = {'snap': {}, 'stall_fired': {}, 'stall_last_push': {}, 'prev_q
                    'batch': {'active': False, 'done': 0, 'failed': 0, 'cancelled': 0,
                              'm_ok': 0, 'm_bad': 0, 'started_at': None,
                              'last': None, 'last_ts': None, 'flow': {},
-                             'other_fail': []}}
+                             'other_fail': [], 'declared': False}}
 _trigger_lock = threading.Lock()          # 忙锁：整理下一批触发期间拒绝并发/连点
 _trigger_token = {'val': None, 'exp': 0}  # 一次性令牌（30 分钟有效，每次清空提醒轮换）
 
@@ -3060,7 +3071,8 @@ def check_organize_running(now=None):
         total_cur = len(cur) + max(nq, 0)
         known = bool(cur) or nq >= 0          # 排队数未知时不评估，防误报清空
         if (batch['active'] and known and total_cur == 0
-                and (total_prev > 0 or _organize_state.get('pending_clear'))):
+                and (total_prev > 0 or _organize_state.get('pending_clear')
+                     or batch.get('declared'))):   # v3.18.16：喂料方声明的批次，快照没抓到也能收尾
             # ---- v2.5.5 统计漏项修复：权威口径=批时间窗查询（清空瞬间一次，低频） ----
             # 任务/媒体不再依赖 running 快照捕获（快任务两轮检查间完成/重启会漏），
             # 改为按 finished_at ∈ [批开始, now] 查全部终态整理类任务累加。
@@ -3280,7 +3292,7 @@ def check_organize_running(now=None):
             _organize_state['batch'] = {'active': False, 'done': 0, 'failed': 0,
                                         'cancelled': 0, 'm_ok': 0, 'm_bad': 0,
                                         'started_at': None, 'last': None, 'last_ts': None,
-                                        'flow': {}, 'other_fail': []}
+                                        'flow': {}, 'other_fail': [], 'declared': False}
             if ok:
                 # v2.9.4：事件驱动改 force 绕冷却——清空=新批次起点，理应立即喂料。
                 # 原先走 120s 冷却：批次提速后（2~3 分钟/轮）36% 轮次被拒（9/26 实证

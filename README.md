@@ -1,6 +1,21 @@
-# etkn-monitor —— ETKN 监控（v3.18.15）
+# etkn-monitor —— ETKN 监控（v3.18.16）
 
 手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试、手动整理触发、异常媒体明细。
+
+**v3.18.16 变化**（2026-10-18）——喂料即声明批次开始，修「只有喂料卡、没有清空卡」：
+
+- **现象**：用户问「em 的通知为什么只有自动喂料完成」。实测 10-17 19:28~19:38 四条喂料卡
+  全部来自 `[feed_loop] 兜底轮询补跑喂料成功`（每 150s 一次），同窗口 **0 条清空卡**；
+  而喂料卡正文明明写着「整理已自动提交，完成后推清空提醒」。
+- **根因**：批次状态 `batch['active']` 只在 `check_organize_running`（30s 巡检）里「看到」
+  running 的整理任务时才置 True。兜底喂料派生的批次常常只有 5 个散文件、1 分钟内跑完，
+  巡检抓不到 → 批次永不激活 → 清空判定（`batch['active'] and total_cur == 0 and ...`）
+  永不成立 → 清空卡不推。
+- **修法**：`_feed_delayed_trigger` 提交整理成功（拿到 `workflow_run_id`）后**显式声明批次开始**
+  （`active=True` + `started_at=now` + `declared=True`），清空判定新增 `batch.get('declared')`
+  分支——快照没抓到任务也能正常收尾。批次重置时 `declared` 归零。
+- **验证**：容器内 stub `api_post` 跑一遍 `_feed_delayed_trigger`，断言 `active/declared/started_at`
+  三项成立（不真发消息）。
 
 **v3.18.15 变化**（2026-10-16）——企微告警卡片正文不再删首行（修「认不出这是哪条通知」）：
 
