@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.18 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.19 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.18'
+VERSION = 'v3.18.19'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -195,6 +195,9 @@ SETTINGS_DEFAULTS = {
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
     'feed_batch_limit': 500,       # 每批文件夹上限（v2.8.6：一个剧夹=1 项，整夹转移）
+    # v3.18.19：喂料静置保护——源目录条目最近 N 秒内还在变动就先不搬（防搬半截）
+    # MoviePilot 等工具「先建目录再写文件」，写入中途整夹 MOVE 会把它写崩。
+    'feed_settle_seconds': 300,
     # ---- v3.18.18 待整理目录守卫（外部工具直接投递时自动触发整理） ----
     # 背景：ETKN 的整理是任务制，没有守护进程监听待整理目录；MoviePilot 等工具直接往里丢
     # 文件时没人触发 organize-p115，文件会一直待着（2026-10-22 用户实证）。
@@ -1929,9 +1932,9 @@ def _cd2_dav(method: str, path: str, dest: str = None, data: bytes = None,
 _NS_DAV = '{DAV:}'
 
 
-def _cd2_list_entries(dav_dir: str):
-    """WebDAV 列第一层（Depth=1，一次请求），返回 (夹名列表, 散文件名列表)。
-    v2.8.12：散视频文件与夹同权参与喂料——按 href 顺序分两类收集（CD2 返回序）。"""
+def _cd2_list_entries_meta(dav_dir: str):
+    """v3.18.19：同 _cd2_list_entries，另返回 {名字: mtime 秒}（取 getlastmodified）。
+    喂料静置保护要用——正在上传的夹/文件先别搬，避免整夹 MOVE 搬半截。"""
     s, b = _cd2_dav('PROPFIND', dav_dir, depth='1')
     if s != 207:
         return None
@@ -1939,20 +1942,38 @@ def _cd2_list_entries(dav_dir: str):
         root = ET.fromstring(b)
     except ET.ParseError:
         return None
-    dirs, files = [], []
+    dirs, files, mt = [], [], {}
     self_seg = urllib.parse.unquote(dav_dir.rstrip('/').rsplit('/', 1)[-1])
     for resp in root.iter(_NS_DAV + 'response'):
         href = resp.findtext(_NS_DAV + 'href') or ''
-        gt = resp.findtext(_NS_DAV + 'propstat/' + _NS_DAV + 'prop/' +
-                           _NS_DAV + 'getcontenttype') or ''
+        prop = resp.find(_NS_DAV + 'propstat/' + _NS_DAV + 'prop')
+        if prop is None:
+            continue
+        gt = prop.findtext(_NS_DAV + 'getcontenttype') or ''
         name = urllib.parse.unquote(href.rstrip('/').rsplit('/', 1)[-1])
         if not name or name == self_seg:
             continue                     # 排除目录自身条目（首条=目录本身）
+        lm = prop.findtext(_NS_DAV + 'getlastmodified') or ''
+        ts = 0.0
+        if lm:
+            try:
+                import email.utils as _eu
+                ts = _eu.parsedate_to_datetime(lm).timestamp()
+            except Exception:
+                ts = 0.0
+        mt[name] = ts
         if 'unix-directory' in gt:
             dirs.append(name)
         else:
             files.append(name)
-    return dirs, files
+    return dirs, files, mt
+
+
+def _cd2_list_entries(dav_dir: str):
+    """WebDAV 列第一层（Depth=1，一次请求），返回 (夹名列表, 散文件名列表)。
+    v2.8.12：散视频文件与夹同权参与喂料——按 href 顺序分两类收集（CD2 返回序）。"""
+    r = _cd2_list_entries_meta(dav_dir)
+    return None if r is None else (r[0], r[1])
 
 
 def _cd2_list_dirs(dav_dir: str) -> list:
@@ -2069,7 +2090,7 @@ def _dst_guard_once() -> str:
     print('[dst_guard] 待整理目录有 %d 项（%d 夹 + %d 散），已自动触发整理'
           % (cnt, len(dirs), len(files)), flush=True)
     return 'triggered'
-_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # 短缓存（防抖动，10 分钟）
+_feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None, 'mt': {}}   # 短缓存（防抖动，10 分钟）+ v3.18.19 mtime 表
 _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时器
 
 FEED_TREE_TTL = 600                    # v2.8.6：回到短缓存（v2.8.4/v2.8.5 逐夹计数已撤销——
@@ -2089,12 +2110,29 @@ def _feed_scan_entries(src: str):
     if (_feed_scan_cache['dirs'] is not None and _feed_scan_cache['src'] == src
             and now - _feed_scan_cache['ts'] < FEED_TREE_TTL):
         return _feed_scan_cache['dirs'], _feed_scan_cache.get('files') or []
-    r = _cd2_list_entries(src)
+    r = _cd2_list_entries_meta(src)
     if r is None:
         return None
-    dirs, files = r
-    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': dirs, 'files': files})
+    dirs, files, mt = r
+    _feed_scan_cache.update({'ts': now, 'src': src, 'dirs': dirs, 'files': files, 'mt': mt})
     return dirs, files
+
+
+def _feed_settle_filter(dirs: list, files: list, settle: int) -> tuple:
+    """v3.18.19：喂料静置保护——最近 settle 秒内还在变动的夹/文件本轮先不搬。
+
+    背景：MoviePilot 等工具上传是「先建目录、再往里写文件」，目录 mtime 一直变。
+    em 若在写入中途整夹 MOVE（CD2 同挂载=云端秒移），MP 会把剩余文件写进一个
+    已经不存在的路径 → 上传失败或产生半截目录。所以喂料前按 getlastmodified 过滤，
+    只搬「静置够久」的条目；本轮被压住的下一轮（150s 后）自然重试。
+    返回 (可搬夹, 可搬散文件, 被压住数量)。mtime 缺失按 0 处理=放行（fail-open，不退化）。
+    """
+    now = time.time()
+    mt = _feed_scan_cache.get('mt') or {}
+    ok_d = [n for n in dirs if now - (mt.get(n) or 0) >= settle]
+    ok_f = [n for n in files if now - (mt.get(n) or 0) >= settle]
+    held = (len(dirs) - len(ok_d)) + (len(files) - len(ok_f))
+    return ok_d, ok_f, held
 
 
 def _feed_scan_dirs(src: str) -> list:
@@ -2353,6 +2391,15 @@ def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
                     '检查：① 设置页「CD2 地址/账号/密码」是否仍有效 ② CD2 里该目录是否存在'])
             return 'err'
         dirs, loose = scanned
+        # v3.18.19：静置保护——正在写入的夹/文件本轮不搬，避免整夹 MOVE 搬半截
+        _settle = max(0, int(SETTINGS.get('feed_settle_seconds') or 0))
+        if _settle and (dirs or loose):
+            dirs, loose, _held = _feed_settle_filter(dirs, loose, _settle)
+            if _held:
+                print('[feed] %d 项最近 %d 秒内还在变动，本轮先不搬（防搬半截）'
+                      % (_held, _settle), flush=True)
+            if not dirs and not loose:
+                return 'settle'          # 全在写入中，等下一轮（150s 后）
         # v2.8.12：夹+散文件都空才算「源目录已空」（用户 9/19 晚定案：散文件参与转移）
         if not dirs and not loose:
             if not quiet_empty:
