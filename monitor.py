@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.17 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.18 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.17'
+VERSION = 'v3.18.18'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -195,6 +195,10 @@ SETTINGS_DEFAULTS = {
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
     'feed_batch_limit': 500,       # 每批文件夹上限（v2.8.6：一个剧夹=1 项，整夹转移）
+    # ---- v3.18.18 待整理目录守卫（外部工具直接投递时自动触发整理） ----
+    # 背景：ETKN 的整理是任务制，没有守护进程监听待整理目录；MoviePilot 等工具直接往里丢
+    # 文件时没人触发 organize-p115，文件会一直待着（2026-10-22 用户实证）。
+    'dst_guard_enabled': True,     # 待整理目录有东西且无人触发时，自动触发一次整理
     # ---- v2.8 喂料通道：CloudDrive2 WebDAV（不碰 fuse，凭据存设置不硬编码） ----
     'cd2_dav_url': '',             # 例：http://<CD2主机>:19798/dav
     'cd2_user': '',
@@ -1978,6 +1982,93 @@ def _cd2_exists(dst_dir: str, name: str) -> bool:
 # ================= v2.7 自动喂料（清空提醒后自动分批转移） =================
 _feed_lock = threading.Lock()          # 忙锁：防并发喂料
 _feed_state = {'last_run': 0.0, 'moving': False}
+
+# v3.18.18 待整理目录守卫状态
+DST_GUARD_COOLDOWN = 900       # 两次自动触发的最小间隔（秒）
+DST_GUARD_FORCE = 21600        # 目录内容没变化时，最多 6 小时也重试一次
+_dst_guard = {'last_trigger': 0.0, 'last_sig': None}
+
+
+def _dst_guard_trigger() -> bool:
+    """v3.18.18：触发一次 organize-p115（待整理目录守卫用；失败推告警）。"""
+    payload = {'parameters': {'trigger': 'telegram', 'task_key': 'organize-p115',
+                              'module_key': 'p115_organize', 'handoff_mode': 'independent'}}
+    s, b = None, None
+    for _attempt in range(3):
+        s, b = api_post('/api/task-center/tasks/organize-p115/runs', payload)
+        if s in (200, 201, 202):
+            break
+        if _attempt < 2 and s == -1:
+            time.sleep(15)
+            continue
+        break
+    if s in (200, 201, 202):
+        rid = (b or {}).get('workflow_run_id') if isinstance(b, dict) else None
+        if rid:
+            _watch_shell_run(int(rid), 'feed')
+        _b = _organize_state['batch']
+        if not _b.get('active'):
+            _b['active'] = True
+            _b['started_at'] = _now()
+            _b['declared'] = True
+        return True
+    body = json.dumps(b, ensure_ascii=False) if isinstance(b, (dict, list)) else str(b or '')
+    _alert_push('dst_guard_err', '待整理目录自动触发整理失败',
+                ['待整理目录里有文件，但自动触发整理失败（HTTP %s）' % s, body[:100],
+                 '可到面板手动触发「手动整理网盘文件」'])
+    return False
+
+
+def _dst_guard_once() -> str:
+    """v3.18.18：待整理目录守卫——外部工具直接投递时自动触发整理。
+
+    背景：ETKN 的整理是「任务制」，没有守护进程监听待整理目录。MoviePilot 等工具把文件
+    直接丢进 /115/媒体库-ETKN/待整理目录时，没有任何东西触发 organize-p115，文件会一直
+    待着不动（2026-10-22 用户实证：手动触发后才开始整理）。
+
+    每轮（跟随喂料兜底轮询，150s）检查：
+      ① 待整理目录里有东西（文件夹 + 散文件 > 0）；
+      ② 当前没有整理类任务在跑/排队，且批次未激活（避免边整理边重复触发）；
+      ③ 距上次自动触发超过冷却（15 分钟）；内容签名变化才触发，否则 6 小时兜底重试一次。
+    满足则触发一次 organize-p115 并声明批次开始（清空卡会正常收尾）。
+    """
+    dst = (SETTINGS.get('feed_dst_dir') or '').rstrip('/')
+    if not dst:
+        return 'skip'
+    fast = _state.get('fast') or {}
+    if not fast:
+        return 'skip'                      # 快轮询还没出第一轮
+    by = ((fast.get('active') or {}).get('by_kind') or {})
+    busy = sum((by.get(k) or {}).get('running', 0) + (by.get(k) or {}).get('queued', 0)
+               for k in ('网盘整理', '刮削入库', '手动整理网盘文件'))
+    if busy > 0 or _organize_state.get('batch', {}).get('active'):
+        return 'skip'
+    try:
+        r = _cd2_list_entries(dst)
+    except Exception:
+        return 'skip'
+    if r is None:
+        return 'skip'
+    dirs, files = r
+    cnt = len(dirs) + len(files)
+    if cnt <= 0:
+        _dst_guard['last_sig'] = (0, 0)
+        return 'empty'
+    now = time.time()
+    sig = (len(dirs), len(files))
+    since = now - _dst_guard['last_trigger']
+    if since < DST_GUARD_COOLDOWN:
+        return 'skip'
+    if sig == _dst_guard['last_sig'] and since < DST_GUARD_FORCE:
+        return 'skip'                      # 同一批内容已触发过，6 小时内不重复
+    if not _dst_guard_trigger():
+        _dst_guard['last_trigger'] = now   # 失败也记时间，避免每轮重试刷告警
+        return 'fail'
+    _dst_guard['last_trigger'] = now
+    _dst_guard['last_sig'] = sig
+    print('[dst_guard] 待整理目录有 %d 项（%d 夹 + %d 散），已自动触发整理'
+          % (cnt, len(dirs), len(files)), flush=True)
+    return 'triggered'
 _feed_scan_cache = {'ts': 0.0, 'src': None, 'dirs': None}   # 短缓存（防抖动，10 分钟）
 _feed_trigger = {'timer': None}        # v2.7.2①：延迟触发整理的定时器
 
@@ -2343,7 +2434,12 @@ def _feed_loop() -> None:
     while True:
         time.sleep(FEED_FALLBACK_INTERVAL)
         try:
-            if not (SETTINGS.get('push_enabled') and SETTINGS.get('feed_enabled')):
+            if not SETTINGS.get('push_enabled'):
+                continue
+            # v3.18.18：待整理目录守卫——独立于 feed_enabled（喂料关掉也应能自动整理外部投递）
+            if SETTINGS.get('dst_guard_enabled', True) and _dst_guard_once() == 'triggered':
+                continue                   # 已触发整理，本轮不再喂料（避免边整理边灌）
+            if not SETTINGS.get('feed_enabled'):
                 continue
             if _feed_state['moving']:
                 continue
