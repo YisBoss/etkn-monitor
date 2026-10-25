@@ -1,0 +1,11 @@
+[Unit]
+Description=每 20 分钟检查 ETKN 补丁是否跟随镜像
+
+[Timer]
+OnCalendar=*:0/20
+RandomizedDelaySec=120
+AccuracySec=30s
+Unit=etkn-patch-auto.service
+
+[Install]
+WantedBy=timers.target

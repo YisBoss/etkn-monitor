@@ -1,0 +1,12 @@
+[Unit]
+Description=ETKN 补丁自动跟随镜像（drift -> rebase -> 复核）
+Documentation=file:/vol1/1000/docker/etkn/etkn_patch_autorebase.py
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/vol1/1000/docker/etkn
+ExecStart=/usr/bin/python3 /vol1/1000/docker/etkn/etkn_patch_autorebase.py
+TimeoutStartSec=3600
+Nice=10
