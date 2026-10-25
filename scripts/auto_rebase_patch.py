@@ -99,6 +99,17 @@ def _center_session():
 '''
 
 
+# 部署者本机代理（服务共享中心用）。仓库里不写死任何 IP/域名：
+# 需要时设 EM_SHARED_PROXY=http://<路由器>:7890，本机由宿主脚本自行提供。
+SHARED_PROXY = os.environ.get('EM_SHARED_PROXY', '')
+
+
+def _proxy_line() -> str:
+    if not SHARED_PROXY:
+        return ''
+    return ("        session.proxies = {'http': '%s', 'https': '%s'}\n" % (SHARED_PROXY, SHARED_PROXY))
+
+
 def rebase_shared_pool(image_id: str):
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/shared_pool.py'
     orig = extract_from_image(mount_path)
@@ -112,9 +123,9 @@ def rebase_shared_pool(image_id: str):
 
     PATCH1 = (
         '        # [etkn-fix 2026-09-10] 共享中心经 7890 出网并关闭SSL校验(忽略自签证书)。\n'
-        '        # 依据: Open-Box 对 shared.55565576.xyz 有直连规则, 出口为路由器公网。\n'
+        '        # 依据: 中心端域名在 Open-Box 有直连规则, 出口为路由器公网。\n'
         "        session.verify = False\n"
-        "        session.proxies = {'http': 'http://192.168.31.1:7890', 'https': 'http://192.168.31.1:7890'}\n"
+        + _proxy_line() +
         '        import urllib3 as _urllib3\n'
         '        _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)\n'
         '        # [etkn-fix 2026-09-10] 读超时下限钳到 45s 吸收链路抖动。\n'
@@ -126,9 +137,9 @@ def rebase_shared_pool(image_id: str):
 
     PATCH2 = (
         '        # [etkn-fix 2026-09-10] 共享中心经 7890 出网并关闭SSL校验(忽略自签证书)。\n'
-        '        # 依据: Open-Box 对 shared.55565576.xyz 有直连规则, 出口为路由器公网。\n'
+        '        # 依据: 中心端域名在 Open-Box 有直连规则, 出口为路由器公网。\n'
         "        session.verify = False\n"
-        "        session.proxies = {'http': 'http://192.168.31.1:7890', 'https': 'http://192.168.31.1:7890'}\n"
+        + _proxy_line() +
         '        import urllib3 as _urllib3\n'
         '        _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)\n'
     )
