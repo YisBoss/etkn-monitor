@@ -1,5 +1,5 @@
 #!/bin/sh
-# etkn-patch-check.sh — ETKN bind-mount 补丁自检（5 补丁 × 2 维度）
+# etkn-patch-check.sh — ETKN bind-mount 补丁自检（7 补丁 × 部署链 + 上游一致性）
 #
 # 变更记录：
 #   2026-10-13  上游 v1.3.33 已修复 p115 / tmdb / scrape_repository / washing_recalculate /
@@ -87,6 +87,8 @@ check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"  
 check_one "$ETKN_DIR/watchlist_patch.py"   "$SITE/modules/subscription/watchlist.py"    "$(expect_of "$ETKN_DIR/watchlist_patch.py"   ff2a1bce4d1ebf1819d0e76ba08a1db9)" watchlist
 check_one "$ETKN_DIR/p115_workflow_patch.py" "$SITE/modules/organize/p115_workflow.py"   "$(expect_of "$ETKN_DIR/p115_workflow_patch.py" b36160405993e8c0c7b0743f9f418d25)" p115_workflow
 check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" bdbf50549384522e8eaa3b21c93068e7)" center_control
+check_one "$ETKN_DIR/play_pool_patch.py"     "$SITE/modules/playback/play_pool.py"     "$(expect_of "$ETKN_DIR/play_pool_patch.py" cf981579d350044189f2f281691a51bd)" play_pool
+check_one "$ETKN_DIR/screenshots_patch.py"   "$SITE/modules/scrape/screenshots.py"      "$(expect_of "$ETKN_DIR/screenshots_patch.py" dcdef9d07a4549cef46ba20de586c22f)" screenshots
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
@@ -100,7 +102,9 @@ for spec in \
     "$ETKN_DIR/shared_pool.py.orig|$SITE/integrations/shared_pool.py|shared_pool" \
     "$ETKN_DIR/watchlist.py.orig|$SITE/modules/subscription/watchlist.py|watchlist" \
     "$ETKN_DIR/p115_workflow.py.orig|$SITE/modules/organize/p115_workflow.py|p115_workflow" \
-    "$ETKN_DIR/center_control.py.orig|$SITE/integrations/center_control.py|center_control"
+    "$ETKN_DIR/center_control.py.orig|$SITE/integrations/center_control.py|center_control" \
+    "$ETKN_DIR/play_pool.py.orig|$SITE/modules/playback/play_pool.py|play_pool" \
+    "$ETKN_DIR/screenshots.py.orig|$SITE/modules/scrape/screenshots.py|screenshots"
 do
     _orig="${spec%%|*}"; _rest="${spec#*|}"; _path="${_rest%%|*}"; _name="${_rest##*|}"
     _new="$TMPD/${_name}_new.py"
@@ -128,7 +132,9 @@ if [ "$MODE" = "text" ]; then
         [ "$_o" = "true" ] && _mk="[ OK ]" || _mk="[FAIL]"
         printf '  %s %-22s %s\n' "$_mk" "$_k" "$_d"
     done
-    if [ "$FAIL" = "0" ]; then printf '结论：全部正常（5 补丁 × 部署链 + 上游一致性）\n'; else printf '结论：有问题\n'; fi
+    _nd=$(printf '%s' "$CHECKS" | grep -o '"key":"deploy_[^"]*","ok":true' | wc -l | tr -d ' ')
+    _nu=$(printf '%s' "$CHECKS" | grep -o '"key":"upstream_[^"]*","ok":true' | wc -l | tr -d ' ')
+    if [ "$FAIL" = "0" ]; then printf '结论：全部正常（%s 条部署链 + %s 条上游一致性）\n' "$_nd" "$_nu"; else printf '结论：有问题\n'; fi
 else
     printf '{"ok":%s,"ts":"%s","image_id":"%s","image_created":"%s","need_rebase":%s,"checks":[%s],"problems":[%s]}\n' \
         "$OKSTR" "$TS" "$IMG_ID" "$IMG_CREATED" \

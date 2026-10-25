@@ -20,7 +20,7 @@ ETKN 补丁自动 rebase 脚本 (v4: 支持 shared_pool / repository / watchlist
      - 启动阶段动态提升 maintenance 运行时优先级至 4（与 background 同级），根治 115 物理删除与共享登记饿死
      - reconcile_library_state 查询优化: 使用 ep_by_season 预聚合与 media_item_id 外键直连，单次更新从 75 分钟降至 0.2 秒
 """
-import subprocess, sys, hashlib, re, os, datetime, tempfile, py_compile
+import subprocess, sys, hashlib, re, os, datetime, tempfile, shutil, py_compile
 
 ETKN_DIR = '/vol1/1000/docker/etkn'
 ETKN_IMAGE_TAG = 'hbq0405/etkn:latest'
@@ -300,6 +300,49 @@ def optimize_library_status_counts(code: str) -> str:
     return out
 
 
+REPO_OPT_DIFF = os.path.join(ETKN_DIR, 'repository_optimizations.diff')
+REPO_OPT_MARKERS = (
+    '_materialize_library_demand_index',
+    '_materialize_library_media_meta',
+    '_materialize_season_episode_flags',
+    'dm_by_item',
+    'se_flags',
+    'season_keys',
+)
+
+
+def apply_repository_optimizations(code: str) -> str:
+    """把订阅列表优化补丁打到 base 代码上。
+
+    单一真源 = ETKN_DIR/repository_optimizations.diff。上游一旦改动到相关 SQL，
+    patch 会失败并抛异常（宁可红，也不能像 10-24/10-25 两次那样静默回到 17s/37s）。
+    """
+    if not os.path.exists(REPO_OPT_DIFF):
+        raise RuntimeError(f'repository: 缺少优化补丁 {REPO_OPT_DIFF}')
+    workdir = tempfile.mkdtemp(prefix='etkn-repo-rebase-')
+    try:
+        path = os.path.join(workdir, 'repository.py')
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(code)
+        res = subprocess.run(
+            ['patch', '--batch', '--forward', '-p0', '-i', REPO_OPT_DIFF],
+            cwd=workdir, capture_output=True, text=True,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                'repository: 优化补丁应用失败（上游可能改动了相关 SQL，请更新 repository_optimizations.diff）:\n'
+                + (res.stdout or '') + (res.stderr or '')
+            )
+        with open(path, encoding='utf-8') as fh:
+            out = fh.read()
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    missing = [marker for marker in REPO_OPT_MARKERS if marker not in out]
+    if missing:
+        raise RuntimeError('repository: 优化未全部生效，缺少标记: ' + ', '.join(missing))
+    return out
+
+
 def rebase_repository(image_id: str):
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/repository.py'
     orig = extract_from_image(mount_path)
@@ -307,6 +350,7 @@ def rebase_repository(image_id: str):
         f.write(orig)
 
     patched = optimize_library_status_counts(orig)
+    patched = apply_repository_optimizations(patched)
 
     validate_python_code(patched)
     patch_path = os.path.join(ETKN_DIR, 'repository_patch.py')
@@ -419,6 +463,49 @@ def rebase_center_control(image_id: str):
         raise RuntimeError('center_control_patch.py.md5 未生成')
 
 
+def rebase_play_pool(image_id: str):
+    """第 6 个补丁：play_pool.py 小号转播跨播放会话复用（同文件复播 3.2s → 0.03~0.6s）。
+
+    上游 _find_reusable_session() 里，PlaySessionId 不同就 continue；而 Emby/Hills 每次起播
+    都生成新的 PlaySessionId，会话里存的是上一次的，两者永不相等 → 同一文件每次播放都
+    重走 115 秒传 + 主号签名（实测冷启 3.2s，命中 31~44ms）。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/playback/play_pool.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'play_pool.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_play_pool_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('play_pool 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'play_pool_patch.py.md5')):
+        raise RuntimeError('play_pool_patch.py.md5 未生成')
+
+
+def rebase_screenshots(image_id: str):
+    """第 7 个补丁：screenshots.py 截图范围解析缓存（catalog.item() 每次白付 1.5s）。"""
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/scrape/screenshots.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'screenshots.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_screenshots_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('screenshots 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'screenshots_patch.py.md5')):
+        raise RuntimeError('screenshots_patch.py.md5 未生成')
+
+
 def restart_etkn():
     subprocess.run(['docker', 'restart', 'etkn'], timeout=30)
 
@@ -451,20 +538,26 @@ def main():
     image_id = get_image_id()
     log(f'当前容器镜像: {image_id}')
 
-    log('rebase 1/5: shared_pool.py …')
+    log('rebase 1/7: shared_pool.py …')
     rebase_shared_pool(image_id)
 
-    log('rebase 2/5: repository.py …')
+    log('rebase 2/7: repository.py …')
     rebase_repository(image_id)
 
-    log('rebase 3/5: watchlist.py …')
+    log('rebase 3/7: watchlist.py …')
     rebase_watchlist(image_id)
 
-    log('rebase 4/5: p115_workflow.py …')
+    log('rebase 4/7: p115_workflow.py …')
     rebase_p115_workflow(image_id)
 
-    log('rebase 5/5: center_control.py …')
+    log('rebase 5/7: center_control.py …')
     rebase_center_control(image_id)
+
+    log('rebase 6/7: play_pool.py …')
+    rebase_play_pool(image_id)
+
+    log('rebase 7/7: screenshots.py …')
+    rebase_screenshots(image_id)
 
     log('重启 etkn 容器 …')
     restart_etkn()
