@@ -1,5 +1,5 @@
 #!/bin/sh
-# etkn-patch-check.sh — ETKN bind-mount 补丁自检（7 补丁 × 部署链 + 上游一致性）
+# etkn-patch-check.sh — ETKN bind-mount 补丁自检（8 补丁 × 部署链 + 上游一致性）
 #
 # 变更记录：
 #   2026-10-13  上游 v1.3.33 已修复 p115 / tmdb / scrape_repository / washing_recalculate /
@@ -14,6 +14,11 @@
 #   2026-10-25  第 4 个补丁 p115_workflow —— 整理结果体瘦身：rejected 只留 4 字段、
 #               超 24MB 整体丢弃，避免 complete_step 5 倍写放大撑爆 libpq 缓冲区
 #               （表现为整理全跑完却判 failed、enqueue-ingest 被 block、organize.jobs 留 pending 孤儿行）。
+#   2026-10-25  第 8 个补丁 virtual_library_service —— 「新建媒体库」弹窗 28~33 秒才出现：
+#               GET /api/virtual-libraries/catalog 里 _local_options() 全表拉
+#               media.item_metadata.payload（382,717 行、约 823MB JSON）在 Python 逐行解析出
+#               7 组筛选项，实测 27.0s，其中 5 组随后被 _vocabularies() 整组覆盖丢弃；
+#               改为 SQL jsonb 聚合 genres/tags（1.37s）+ TTL 缓存，TMDB 类型表并行+落盘快照。
 #   2026-10-25  第 5 个补丁 center_control —— 控制长连接退避 120s→≤3s、断线/RPC 失败记
 #               kind/code/reason、去 15s recv 超时；配合 shared_pool 连接复用，把中心签名
 #               探测（预算 3s）从超时边缘拉回来，修「签名能力状态 异常」与离线时长虚增。
@@ -89,6 +94,7 @@ check_one "$ETKN_DIR/p115_workflow_patch.py" "$SITE/modules/organize/p115_workfl
 check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" bdbf50549384522e8eaa3b21c93068e7)" center_control
 check_one "$ETKN_DIR/play_pool_patch.py"     "$SITE/modules/playback/play_pool.py"     "$(expect_of "$ETKN_DIR/play_pool_patch.py" cf981579d350044189f2f281691a51bd)" play_pool
 check_one "$ETKN_DIR/screenshots_patch.py"   "$SITE/modules/scrape/screenshots.py"      "$(expect_of "$ETKN_DIR/screenshots_patch.py" dcdef9d07a4549cef46ba20de586c22f)" screenshots
+check_one "$ETKN_DIR/virtual_library_service_patch.py" "$SITE/modules/virtual_library/service.py" "$(expect_of "$ETKN_DIR/virtual_library_service_patch.py" dda522b8b8406f8e25e5a9764de9c77c)" virtual_library
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
@@ -104,7 +110,8 @@ for spec in \
     "$ETKN_DIR/p115_workflow.py.orig|$SITE/modules/organize/p115_workflow.py|p115_workflow" \
     "$ETKN_DIR/center_control.py.orig|$SITE/integrations/center_control.py|center_control" \
     "$ETKN_DIR/play_pool.py.orig|$SITE/modules/playback/play_pool.py|play_pool" \
-    "$ETKN_DIR/screenshots.py.orig|$SITE/modules/scrape/screenshots.py|screenshots"
+    "$ETKN_DIR/screenshots.py.orig|$SITE/modules/scrape/screenshots.py|screenshots" \
+    "$ETKN_DIR/virtual_library_service.py.orig|$SITE/modules/virtual_library/service.py|virtual_library"
 do
     _orig="${spec%%|*}"; _rest="${spec#*|}"; _path="${_rest%%|*}"; _name="${_rest##*|}"
     _new="$TMPD/${_name}_new.py"
