@@ -1,5 +1,5 @@
 #!/bin/sh
-# etkn-patch-check.sh — ETKN bind-mount 补丁自检（v1.3.34 起：3 补丁 × 2 维度）
+# etkn-patch-check.sh — ETKN bind-mount 补丁自检（5 补丁 × 2 维度）
 #
 # 变更记录：
 #   2026-10-13  上游 v1.3.33 已修复 p115 / tmdb / scrape_repository / washing_recalculate /
@@ -11,6 +11,12 @@
 #                 repository  —— 订阅需求汇总 SQL 提速（CTE 展开；上游至今仍是老写法）
 #                 shared_pool —— 共享中心强制走 7890 代理 + 忽略自签证书 + 读超时钳 45s
 #                 watchlist   —— 联动删除 SQL 提速 (外键直连 0.2s) + maintenance 优先级提升 (防 115 删除饿死)
+#   2026-10-25  第 4 个补丁 p115_workflow —— 整理结果体瘦身：rejected 只留 4 字段、
+#               超 24MB 整体丢弃，避免 complete_step 5 倍写放大撑爆 libpq 缓冲区
+#               （表现为整理全跑完却判 failed、enqueue-ingest 被 block、organize.jobs 留 pending 孤儿行）。
+#   2026-10-25  第 5 个补丁 center_control —— 控制长连接退避 120s→≤3s、断线/RPC 失败记
+#               kind/code/reason、去 15s recv 超时；配合 shared_pool 连接复用，把中心签名
+#               探测（预算 3s）从超时边缘拉回来，修「签名能力状态 异常」与离线时长虚增。
 #   维度精简：原 mount_/file_/inuse_ 三项合并为 deploy_ 一项——它们本就是同一条部署链
 #               （compose 有 bind 行 → 补丁文件校验和正确 → 容器内已生效），任一环断即报，
 #               detail 指明断在哪一步。12 项 → 4 项。
@@ -79,6 +85,8 @@ check_one() {  # <补丁文件> <容器内路径> <期望md5> <短名>
 check_one "$ETKN_DIR/repository_patch.py"  "$SITE/modules/subscription/repository.py" "$(expect_of "$ETKN_DIR/repository_patch.py"  df80c65f53c8be70027f101bf5bbfed0)" repository
 check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"          "$(expect_of "$ETKN_DIR/shared_pool_patch.py" 1965752ad40c8b367aaae8d941f35cb9)" shared_pool
 check_one "$ETKN_DIR/watchlist_patch.py"   "$SITE/modules/subscription/watchlist.py"    "$(expect_of "$ETKN_DIR/watchlist_patch.py"   ff2a1bce4d1ebf1819d0e76ba08a1db9)" watchlist
+check_one "$ETKN_DIR/p115_workflow_patch.py" "$SITE/modules/organize/p115_workflow.py"   "$(expect_of "$ETKN_DIR/p115_workflow_patch.py" b36160405993e8c0c7b0743f9f418d25)" p115_workflow
+check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" bdbf50549384522e8eaa3b21c93068e7)" center_control
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
@@ -90,7 +98,9 @@ ANY_REBASE=0
 for spec in \
     "$ETKN_DIR/repository.py.orig|$SITE/modules/subscription/repository.py|repository" \
     "$ETKN_DIR/shared_pool.py.orig|$SITE/integrations/shared_pool.py|shared_pool" \
-    "$ETKN_DIR/watchlist.py.orig|$SITE/modules/subscription/watchlist.py|watchlist"
+    "$ETKN_DIR/watchlist.py.orig|$SITE/modules/subscription/watchlist.py|watchlist" \
+    "$ETKN_DIR/p115_workflow.py.orig|$SITE/modules/organize/p115_workflow.py|p115_workflow" \
+    "$ETKN_DIR/center_control.py.orig|$SITE/integrations/center_control.py|center_control"
 do
     _orig="${spec%%|*}"; _rest="${spec#*|}"; _path="${_rest%%|*}"; _name="${_rest##*|}"
     _new="$TMPD/${_name}_new.py"
@@ -118,7 +128,7 @@ if [ "$MODE" = "text" ]; then
         [ "$_o" = "true" ] && _mk="[ OK ]" || _mk="[FAIL]"
         printf '  %s %-22s %s\n' "$_mk" "$_k" "$_d"
     done
-    if [ "$FAIL" = "0" ]; then printf '结论：全部正常（3 补丁 × 部署链 + 上游一致性）\n'; else printf '结论：有问题\n'; fi
+    if [ "$FAIL" = "0" ]; then printf '结论：全部正常（5 补丁 × 部署链 + 上游一致性）\n'; else printf '结论：有问题\n'; fi
 else
     printf '{"ok":%s,"ts":"%s","image_id":"%s","image_created":"%s","need_rebase":%s,"checks":[%s],"problems":[%s]}\n' \
         "$OKSTR" "$TS" "$IMG_ID" "$IMG_CREATED" \
