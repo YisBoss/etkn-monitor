@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.21 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.18.22 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -441,7 +441,7 @@ input[type=number]{width:90px}
 .edrow{display:grid;gap:6px;margin-bottom:6px;align-items:center}
 .edrow input{min-width:0;width:100%;box-sizing:border-box}
 .edrow-cl{grid-template-columns:minmax(0,88px) minmax(0,1fr) auto}
-.edrow-st{grid-template-columns:minmax(0,1.3fr) minmax(0,.9fr) minmax(0,1fr) auto}
+.edrow-st{grid-template-columns:minmax(0,1.2fr) minmax(0,.8fr) minmax(0,.9fr) minmax(0,1.2fr) minmax(0,.5fr) auto}   /* v3.18.22：加「路径」「类型」两列 */
 .edrow .act{white-space:nowrap}
 .edwrap{flex:1 1 auto;min-width:0}   /* v3.18.0：编辑区容器（原内联 flex:1 移入样式表，避免压过窄屏规则） */
 /* v3.18.0：窄屏「卡片按钮/测速目标」行改「字段换行 + 删除整行」。
@@ -639,7 +639,7 @@ html[data-theme="light"] .card::after{
         <div class="setgroup" data-g="3" onclick="tglGroup(this)">【测速】<span class="tgl">▶</span></div>
         <div class="setrow"><label>定时测速<span class="why">异常才推送</span></label><div class="setbox"><select id="cfgISp"><option value="0">关闭</option><option value="15">每 15 分钟</option><option value="30">每 30 分钟</option><option value="60">每 60 分钟</option><option value="120">每 120 分钟</option></select><label class="switch"><input type="checkbox" id="cfgASp"><span class="slider"></span></label></div></div>
         <div class="setrow"><label>测速异常阈值<span class="why">总耗时毫秒</span></label><input type="number" id="cfgTsp" min="1000"></div>
-        <div class="setrow"><label>测速目标<span class="why">≤12 项；域名必填，备注/代理可选</span></label>
+        <div class="setrow"><label>测速目标<span class="why">≤12 项；域名必填。可填「路径」与「类型」：类型 HTTP 打 GET，WS 打真正的 WebSocket 升级（中心长连接 /api/v1/control/ws 选 WS，101=通、403=身份被拒、404=走错出口）</span></label>
           <div class="edwrap"><div id="stList"></div>
           <div style="display:flex;gap:8px;margin-top:6px"><button type="button" class="act" onclick="stAdd()">＋新增测速目标</button>
           <span class="sub" style="align-self:center">列表为空=不测速不推送；代理留空=直连</span></div></div></div>
@@ -910,22 +910,46 @@ function viaTxt(v){const z=VIA_ZH[v]||v||'';return z==='ETKN'?'':z;}
    若哪天在设置页改了「测速告警阈值」，记得同步改这里。 */
 const spdCls=ms=>ms<1500?'spd-ok':(ms<5000?'spd-warn':'spd-bad');
 function spRow(x){
-  const dot = `<span class="dot" style="background:var(--${x.ok?'ok':'bad'})"></span>`;
-  const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'')
+  /* v3.18.22：判定改用后端 verdict（业务语义：WS 101=通、403=身份被拒、404=走错出口），
+     不再拿「有没有拿到状态码」当正常 —— 旧口径下中心根路径 404 会被判绿。 */
+  const okk=!!x.verdict_ok;
+  const dot = `<span class="dot" style="background:var(--${okk?'ok':'bad'})"></span>`;
+  const pg = (x.path&&x.path!=='/')?`<span class="via">${x.probe==='ws'?'WS':'HTTP'} ${esc(x.path)}</span>`:'';
+  const nm = x.host + (x.note?`<span class="sub">〔${esc(x.note)}〕</span>`:'') + pg
            + (viaTxt(x.via)?`<span class="via">${esc(viaTxt(x.via))}</span>`:'');
-  if(!x.ok){
-    return `<tr class="row-bad"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连+握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${x.error||'失败'}</td></tr>`;
+  const vd = x.verdict || (x.error||'失败');
+  const stc = okk?`<span class="ok">${esc(vd)}</span>`:`<span class="bad">${esc(vd)}</span>`;
+  if(!x.status){
+    return `<tr class="${okk?'':'row-bad'}"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连+握手</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">-</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval">${x.total_ms??'-'}ms</span></div></td><td class="bad">${esc(vd)}</td></tr>`;
   }
-  const stc = `<span class="ok">HTTP ${x.status}${(x.status&&! [200,204].includes(x.status))?' 可达':''}</span>`;
-  return `<tr><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连+握手</span><span class="spval">${msTxt(connTls(x))}</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">${msTxt(x.http_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
+  return `<tr class="${okk?'':'row-bad'}"><td>${dot}${nm}</td><td class="num"><div class="spline"><span class="lbl">建连+握手</span><span class="spval">${msTxt(connTls(x))}</span></div></td><td class="num"><div class="spline"><span class="lbl">首字节</span><span class="spval">${msTxt(x.http_ms)}</span></div></td><td class="num"><div class="spline"><span class="lbl">总耗时</span><span class="spval ${spdCls(x.total_ms??9999)}">${x.total_ms}ms</span></div></td><td>${stc}</td></tr>`;
+}
+/* v3.18.22：ETKN 自己的口径——它说中心连上了没、签名在线没，才是第一手结论 */
+function spSelfHtml(s){
+  if(!s)return '';
+  const c=s.center||{};
+  const parts=[];
+  if(s.api_ms!=null)parts.push('接口 '+s.api_ms+'ms');
+  if(c.center_url){
+    parts.push(c.connected?'中心已连接':'中心未连接');
+    parts.push(c.signing_online?'签名在线':`签名异常${c.reason?'（'+esc(c.reason)+'）':''}`);
+    if(c.heartbeat)parts.push('心跳 '+esc(c.heartbeat));
+    if(c.offline_seconds!=null&&c.limit_seconds)
+      parts.push(`本周离线 ${(c.offline_seconds/3600).toFixed(1)}/${(c.limit_seconds/3600)}h`);
+  }
+  if(parts.length===0)parts.push('@'+esc(s.ts||''));
+  return `<div class="sub" style="margin:6px 0 6px;line-height:1.6">`
+    +`<span class="dot" style="background:var(--${s.ok?'ok':'bad'})"></span>`
+    +`<b>ETKN 自身：${esc(s.verdict||'')}</b>　${parts.join(' · ')}</div>`;
 }
 /* v2.9.2.11：把「一轮结果的完整卡片 HTML」抽出来，手动测速与首屏回填共用。
    net/deps 可显式传入——/api/speed-history 的单条记录里没有这两个字段（在响应顶层）。 */
 function spRoundHtml(b,net,deps){
   net=net||b.etkn_net; deps=deps||b.etkn_deps;
   return `<div class="sub" style="margin-bottom:4px">测于 ${(b.ts||'').slice(11,16)}${spNet(net)}${spDeps(deps)}</div>`+
+    spSelfHtml(b.etkn_self)+
     `<div class="twrap"><table class="sptab"><thead><tr><th>域名</th><th class="num">建连+握手</th><th class="num">首字节</th><th class="num">总耗时</th><th>状态</th></tr></thead><tbody>${(b.results||[]).map(spRow).join('')}</tbody></table></div>`+
-    `<div class="sub" style="margin-top:4px">「建连+握手」= 从发出请求到连接就绪。ETKN 口径下目标是代理侧回源建连（sing-box 对 CONNECT 乐观秒回 200，客户端测不到目标 TCP 建连，已用不可达目标对照实验证明），所以这一格天然含回源；软路由口径下则含到目标的真实 TCP。「首字节」= 服务器处理+回传，「总耗时」= 全流程。</div>`;
+    `<div class="sub" style="margin-top:4px">「建连+握手」= 从发出请求到连接就绪。ETKN 口径下目标是代理侧回源建连（sing-box 对 CONNECT 乐观秒回 200，客户端测不到目标 TCP 建连，已用不可达目标对照实验证明），所以这一格天然含回源；软路由口径下则含到目标的真实 TCP。「首字节」= 服务器处理+回传，「总耗时」= 全流程。带「WS 路径」的目标打的是真正的 WebSocket 升级握手（101=通、403=身份被拒、404=走错出口），不是 GET /。</div>`;
 }
 async function runSpeedtest(){
   if(spBusy)return; spBusy=true;
@@ -1245,21 +1269,26 @@ function stRender(items){
     const h=document.createElement('input');h.type='text';h.placeholder='域名或 https://URL';h.value=it.host||'';h.dataset.st='h';
     const n=document.createElement('input');n.type='text';n.placeholder='备注(可选)';n.value=it.note||'';n.dataset.st='n';
     const p=document.createElement('input');p.type='text';p.placeholder='代理(可选)';p.value=it.proxy||'';p.dataset.st='p';
+    /* v3.18.22：路径 + 探针类型 —— 只测 GET / 只能证域名可达，证不了业务路通 */
+    const pa=document.createElement('input');pa.type='text';pa.placeholder='路径(可选)';pa.value=it.path||'/';pa.dataset.st='path';
+    const pb=document.createElement('input');pb.type='text';pb.placeholder='http/ws';pb.value=it.probe||'';pb.dataset.st='probe';
     const del=document.createElement('button');del.type='button';del.className='act';del.textContent='删除';
     del.onclick=()=>row.remove();
-    row.appendChild(h);row.appendChild(n);row.appendChild(p);row.appendChild(del);box.appendChild(row);
+    row.appendChild(h);row.appendChild(n);row.appendChild(p);row.appendChild(pa);row.appendChild(pb);row.appendChild(del);box.appendChild(row);
   });
 }
 function stAdd(){
   const box=document.getElementById('stList');
   if(box.children.length>=12){toast('最多 12 个测速目标','bad');return;}
-  stRender(Array.from(box.children).map(r=>({host:r.querySelector('[data-st=h]').value,note:r.querySelector('[data-st=n]').value,proxy:r.querySelector('[data-st=p]').value})).concat([{host:'',note:'',proxy:''}]));
+  stRender(Array.from(box.children).map(r=>({host:r.querySelector('[data-st=h]').value,note:r.querySelector('[data-st=n]').value,proxy:r.querySelector('[data-st=p]').value,path:r.querySelector('[data-st=path]').value,probe:r.querySelector('[data-st=probe]').value})).concat([{host:'',note:'',proxy:'',path:'',probe:''}]));
 }
 function stCollect(){
   return Array.from(document.getElementById('stList').children).map(r=>({
     host:r.querySelector('[data-st=h]').value.trim(),
     note:r.querySelector('[data-st=n]').value.trim(),
-    proxy:r.querySelector('[data-st=p]').value.trim()}))
+    proxy:r.querySelector('[data-st=p]').value.trim(),
+    path:r.querySelector('[data-st=path]').value.trim(),
+    probe:r.querySelector('[data-st=probe]').value.trim().toLowerCase()}))
     .filter(x=>x.host);
 }
 async function cfgLoad(){

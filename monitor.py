@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.21 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.22 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.21'
+VERSION = 'v3.18.22'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -147,7 +147,18 @@ def _norm_speed_targets(raw) -> list:
             px = 'etkn'
         elif px and not re.fullmatch(r'[A-Za-z0-9._-]+:\d{1,5}', px):
             px = ''
-        out.append({'host': h, 'note': note, 'proxy': px or None})
+        # v3.18.22：目标可指定「真实请求路径」与「探针类型」。
+        # 只测 GET / 只能证明「域名能握手」，证不了 ETKN 那条业务路真的通 ——
+        # 共享中心根路径本来就 404，业务走的是 /api/v1/control/ws 的 WebSocket 升级。
+        pth = str(it.get('path') or '').strip() or '/'
+        if not pth.startswith('/'):
+            pth = '/' + pth
+        pth = pth[:120]
+        prb = str(it.get('probe') or '').strip().lower()
+        if prb not in ('http', 'ws'):
+            prb = 'ws' if pth.endswith('/ws') else 'http'
+        out.append({'host': h, 'note': note, 'proxy': px or None,
+                    'path': pth, 'probe': prb})
         if len(out) >= 20:      # v2.9.2.9：原为 12，会静默丢弃第 13 项起的目标
             break
     return out
@@ -3047,25 +3058,39 @@ def run_speed_round(alert: bool = True):
     if not targets:
         return []
     results = []
+    # v3.18.22：先问 ETKN 自己，再逐域名打真实业务请求
+    self_probe = etkn_self_probe()
+    _id_hash, ws_headers, id_err = _etkn_identity()
     for t in targets:
         px, via = _speedtest_proxy(t['host'], t.get('proxy'))   # v2.9.2 跟随 ETKN 口径
-        r = speedtest_one(t['host'], proxy=px)
+        prb = t.get('probe') or 'http'
+        r = speedtest_one(t['host'], proxy=px, path=t.get('path') or '/', probe=prb,
+                          headers=(ws_headers if prb == 'ws' else None))
         r['via'] = via
         r['proxy_used'] = px
+        if id_err and prb == 'ws':
+            r['verdict'] = r['verdict'] + '（身份头获取失败：%s）' % id_err
         if t.get('note'):
             r['note'] = t['note']
         results.append(r)
-    _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results})
+    _speed_hist.appendleft({'ts': _now().isoformat(timespec='seconds'), 'results': results,
+                            'etkn_self': self_probe})
     if alert and SETTINGS['push_enabled'] and SETTINGS['alert_speed_enabled']:
         thr = SETTINGS['speed_threshold_ms']
         for r in results:
-            bad = (not r['ok']) or (r['total_ms'] is not None and r['total_ms'] > thr)
+            # v3.18.22：判定看 verdict_ok（业务语义），而不是「有没有拿到状态码」——
+            # 旧口径会把 404/403 也算正常，正是签名异常时面板一路绿的原因。
+            bad = (not r.get('verdict_ok')) or (r['total_ms'] is not None and r['total_ms'] > thr)
             host = r['host']
             if bad and not _alm['speed_fired'].get(host):
                 _alm['speed_fired'][host] = True
-                desc = (f'连接失败：{r["error"]}' if not r['ok']
-                        else f'总耗时 {r["total_ms"]}ms（阈值 {thr}ms）')
-                _alert_push('speed', '链路测速异常', [
+                desc = r.get('verdict') or '异常'
+                # v3.18.22：判定与文案分开。链路本身通、只是慢的时候，不能一边说「正常」
+                # 一边报「异常」——旧版推送正文就出现过「正常（HTTP 301）」配「链路测速异常」标题。
+                slow = r['total_ms'] is not None and r['total_ms'] > thr
+                if r.get('verdict_ok') and slow:
+                    desc = '%s，但总耗时 %dms 超过阈值 %dms' % (desc, r['total_ms'], thr)
+                _alert_push('speed', '链路测速异常' if not r.get('verdict_ok') else '链路测速偏慢', [
                     f'{host}　{desc}', '定时测速检出该域名异常，可能影响刮削/图片链路'],
                     buttons=_card_buttons())
             elif not bad:
@@ -4199,7 +4224,9 @@ def _rebase_do():
             _rebase_job['running'] = False
         return
     # 轮询：最多 180s，每 3s 读一次日志，找 __EXIT__ 行
-    deadline = time.time() + 180
+    # 全量 rebase + 重建容器 + 自检约 60~150s，镜像换代时会先 docker run 抽原版再重建容器，
+    # 180s 会误判超时（超时也算失败），放到 480s。
+    deadline = time.time() + 480
     log_content = ''
     exit_code = None
     while time.time() < deadline:
@@ -4237,7 +4264,10 @@ def _rebase_job_start() -> bool:
     with _rebase_job_lock:
         if _rebase_job['running']:
             return False
-        _rebase_job['running'] = True
+        # 新一轮开始时清掉上一轮结果，否则面板会立刻显示上轮的 ok=false/旧错误文本，
+        # 看起来像「点了立即修复却立刻失败」（2026-10-26 用户报的正是这个现象）。
+        _rebase_job.update({'running': True, 'ok': None, 'err': '', 'log': '',
+                            'ts': 0.0, 'started': time.time()})
     threading.Thread(target=_rebase_do, daemon=True).start()
     return True
 
@@ -4593,16 +4623,141 @@ def _speedtest_proxy(host: str, explicit):
     return env['proxy'], u'proxy·ETKN'
 
 
+# ---------- v3.18.22 探针口径：从「域名可达」升级到「ETKN 那条业务路真的通」 ----------
+# 为什么改：签名异常那次，面板测速一路绿（共享中心 666ms、HTTP 404 判 ok），
+# 而 ETKN 实际的控制长连接是不通的 —— 根路径 404 对中心是常态，测它等于没测。
+# 现在分两层：
+#   ① 逐目标：按配置的 path/probe 发真实请求；probe=ws 打真正的 WebSocket 升级握手
+#      （必须带 X-Server-ID-Hash，否则中心一律 403，测出来的是「探针没带身份」）；
+#   ② ETKN 自身：读它自己的 /api/health 与 /api/shared-pool/status ——
+#      它自己说「中心连上了没、签名在线没」，才是第一手结论。
+_CENTER_ID_TTL = 600
+_center_id_cache = {'ts': 0.0, 'hash': '', 'ver': '', 'err': ''}
+
+
+def _etkn_identity() -> tuple[str, dict, str]:
+    """拿 ETKN 的 installation_id 派生的身份材料：(server_id_hash, ws headers, err)。
+
+    installation_id 由 Emby 公共信息接口直接给出（/emby/System/Info/Public 的 Id），
+    无需登录、不读数据库；server_id_hash = sha256(installation_id)，中心的控制长连接
+    靠这个头认设备。版本头中心只校验「存在」，取值不影响结果。"""
+    now = time.time()
+    if _center_id_cache['hash'] and now - _center_id_cache['ts'] < _CENTER_ID_TTL:
+        return _center_id_cache['hash'], _ws_headers(_center_id_cache['ver'],
+                                                     _center_id_cache['hash']), ''
+    try:
+        req = urllib.request.Request(BASE + '/emby/System/Info/Public',
+                                     headers={'User-Agent': 'etkn-monitor'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d = json.loads(resp.read().decode() or '{}')
+        sid = str(d.get('Id') or '').strip()
+        if not sid:
+            raise ValueError('公共信息缺少 Id')
+        h = hashlib.sha256(sid.encode('utf-8')).hexdigest()
+        ver = str(d.get('Version') or '1.0.0')
+        _center_id_cache.update({'ts': now, 'hash': h, 'ver': ver, 'err': ''})
+        return h, _ws_headers(ver, h), ''
+    except Exception as exc:
+        _center_id_cache.update({'ts': now, 'err': str(exc)[:80]})
+        return _center_id_cache['hash'], _ws_headers(_center_id_cache['ver'],
+                                                     _center_id_cache['hash']), str(exc)[:80]
+
+
+def _ws_headers(ver: str, server_id_hash: str) -> dict:
+    """复刻 ETKN 自己的握手头（integrations/shared_pool.py: _headers）。"""
+    ver = ver or '1.0.0'
+    h = {'Accept': 'application/json', 'User-Agent': f'ETKvNext/{ver}',
+         'X-Client-Version': ver, 'X-ETK-Version': ver, 'X-ETKN-Version': ver}
+    if server_id_hash:
+        h['X-Server-ID-Hash'] = server_id_hash
+    return h
+
+
+def _probe_verdict(probe: str, status) -> tuple[bool, str]:
+    """把状态码翻成一句人话：这条业务路到底算不算正常。"""
+    if not status:
+        return False, '无响应'
+    if probe == 'ws':
+        table = {101: (True, '长连接已建立（101）'),
+                 403: (False, '被中心拒绝（403：身份/版本头不符）'),
+                 404: (False, '路径或出口不对（404）'),
+                 426: (False, '版本过低（426）'),
+                 502: (False, '网关 502（回源不通）'),
+                 504: (False, '网关 504（回源超时）')}
+        return table.get(status, (False, f'握手失败（{status}）'))
+    if status == 404:
+        return True, '链路可达（根路径 404，属正常服务）'
+    if 200 <= status < 400:
+        return True, f'正常（HTTP {status}）'
+    return False, f'服务端异常（HTTP {status}）'
+
+
+def etkn_self_probe() -> dict:
+    """ETKN 自己的口径：健康检查 + 共享中心/签名状态（第一手真实状态）。"""
+    out = {'ok': False, 'healthy': False, 'api_ms': None, 'center': {},
+           'verdict': 'ETKN 未响应', 'ts': _now().isoformat(timespec='seconds')}
+    t0 = time.perf_counter()
+    try:
+        st, d = api_get('/api/health')
+        out['api_ms'] = round((time.perf_counter() - t0) * 1000)
+        out['healthy'] = (st == 200 and str((d or {}).get('status') or '').lower() == 'ok')
+    except Exception as exc:
+        out['verdict'] = 'ETKN 接口不通：' + str(exc)[:60]
+        return out
+    if not out['healthy']:
+        out['verdict'] = f'ETKN 健康检查异常（HTTP {st}）'
+        return out
+    try:
+        _, sp = api_get('/api/shared-pool/status')
+    except Exception as exc:
+        out['verdict'] = '共享池状态读取失败：' + str(exc)[:60]
+        return out
+    sp = sp or {}
+    dev = sp.get('device') or {}
+    av = dev.get('availability') or {}
+    sign = av.get('signing') or {}
+    out['center'] = {
+        'configured': sp.get('configured'),
+        'connected': sp.get('connected'),
+        'center_url': sp.get('center_url') or '',
+        'signing_online': sign.get('online'),
+        'reason': sign.get('reason') or '',
+        'http_status': sign.get('http_status'),
+        'heartbeat': dev.get('share_heartbeat_status') or '',
+        'banned': av.get('banned'),
+        'offline_seconds': av.get('offline_seconds'),
+        'remaining_seconds': av.get('remaining_seconds'),
+        'limit_seconds': av.get('limit_seconds'),
+    }
+    c = out['center']
+    if c['banned']:
+        out['verdict'] = '账号已被封禁'
+    elif not c['configured']:
+        out['verdict'] = '共享中心未启用'
+    elif not c['connected']:
+        out['verdict'] = '中心未连接'
+    elif c['signing_online'] is not True:
+        out['verdict'] = '签名异常（%s）' % (c['reason'] or '原因未知')
+    else:
+        out['verdict'] = '正常'
+        out['ok'] = True
+    return out
+
+
 # ---------- 手动测速（无定时；默认直连，proxy 指定域经代理 CONNECT 隧道） ----------
-def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
+def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None,
+                  path: str = '/', probe: str = 'http', headers: dict | None = None):
     r = {'host': host, 'ok': False, 'tcp_ms': None, 'connect_ms': None, 'tls_ms': None,
          'http_ms': None, 'proxy_ms': None,
-         'total_ms': None, 'status': None, 'error': None, 'via': 'proxy' if proxy else 'direct'}
+         'total_ms': None, 'status': None, 'error': None, 'via': 'proxy' if proxy else 'direct',
+         'path': path or '/', 'probe': probe or 'http', 'verdict': '', 'verdict_ok': False}
     t0 = time.perf_counter()
     try:
         if proxy:
             # 经代理 CONNECT 隧道：模拟 ETKN 业务真实路径（socket 全程代持，分阶段仍可计时）
-            phost, pport = proxy.rsplit(':', 1)
+            if ':' not in str(proxy):
+                raise ConnectionError(f'代理地址无效（应为主机:端口）：{proxy}')
+            phost, pport = str(proxy).rsplit(':', 1)
             sock = socket.create_connection((phost, int(pport)), timeout=timeout)
             t1 = time.perf_counter()
             # v2.9.2.7：这一跳只是 em→本地代理（局域网，实测中位 0.115ms），不是目标建连，
@@ -4635,8 +4790,20 @@ def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
             tls = ssl.create_default_context().wrap_socket(sock, server_hostname=host)
             t2b = time.perf_counter()
             r['tls_ms'] = round((t2b - t1) * 1000)
-        tls.sendall(f'GET / HTTP/1.1\r\nHost: {host}\r\n'
-                    f'User-Agent: etkn-monitor\r\nConnection: close\r\n\r\n'.encode())
+        # v3.18.22：按配置的 path/probe 发真实请求。probe=ws 时发的是真正的
+        # WebSocket 升级握手（101 = 通），并把 ETKN 自己的身份头一起带上 ——
+        # 中心靠 X-Server-ID-Hash 认设备，不带就是 403，测出来的不是链路问题。
+        lines = [f'GET {path or "/"} HTTP/1.1', f'Host: {host}',
+                 'User-Agent: etkn-monitor/conn-probe']
+        if probe == 'ws':
+            ws_key = base64.b64encode(os.urandom(16)).decode()
+            lines += ['Upgrade: websocket', 'Connection: Upgrade',
+                      f'Sec-WebSocket-Key: {ws_key}', 'Sec-WebSocket-Version: 13']
+        else:
+            lines += ['Connection: close']
+        for hk, hv in (headers or {}).items():
+            lines.append(f'{hk}: {hv}')
+        tls.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
         chunk = tls.recv(256)
         t3 = time.perf_counter()
         r['http_ms'] = round((t3 - t2b) * 1000)  # v2.9.2.6 末段：GET 首字节（两路径同基准）
@@ -4644,6 +4811,7 @@ def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
         m = re.search(r'\b(\d{3})\b', line)
         r['status'] = int(m.group(1)) if m else None
         r['ok'] = bool(r['status'])
+        r['verdict_ok'], r['verdict'] = _probe_verdict(probe, r['status'])
         r['total_ms'] = round((t3 - t0) * 1000)
         try:
             tls.close()
@@ -4653,6 +4821,7 @@ def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None):
         t3 = time.perf_counter()
         r['total_ms'] = round((t3 - t0) * 1000)
         r['error'] = str(e)[:80] or type(e).__name__
+        r['verdict_ok'], r['verdict'] = False, '连接失败：' + r['error']
     return r
 
 
@@ -5572,6 +5741,7 @@ class Handler(BaseHTTPRequestHandler):
             results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results,
+                 'etkn_self': (_speed_hist[0] or {}).get('etkn_self') if _speed_hist else None,
                  'etkn_net': _etkn_net_env(),
                  'etkn_deps': _etkn_deps_public()},
                 ensure_ascii=False).encode())
@@ -5579,6 +5749,7 @@ class Handler(BaseHTTPRequestHandler):
             results = run_speed_round(alert=False)
             return self._send(200, json.dumps(
                 {'ts': _now().isoformat(timespec='seconds'), 'results': results,
+                 'etkn_self': (_speed_hist[0] or {}).get('etkn_self') if _speed_hist else None,
                  'etkn_net': _etkn_net_env(),
                  'etkn_deps': _etkn_deps_public()},
                 ensure_ascii=False).encode())

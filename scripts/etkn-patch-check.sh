@@ -1,5 +1,5 @@
 #!/bin/sh
-# etkn-patch-check.sh — ETKN bind-mount 补丁自检（8 补丁 × 部署链 + 上游一致性）
+# etkn-patch-check.sh — ETKN bind-mount 补丁自检（12 补丁 × 部署链 + 上游一致性）
 #
 # 变更记录：
 #   2026-10-13  上游 v1.3.33 已修复 p115 / tmdb / scrape_repository / washing_recalculate /
@@ -11,6 +11,9 @@
 #                 repository  —— 订阅需求汇总 SQL 提速（CTE 展开；上游至今仍是老写法）
 #                 shared_pool —— 共享中心强制走 7890 代理 + 忽略自签证书 + 读超时钳 45s
 #                 watchlist   —— 联动删除 SQL 提速 (外键直连 0.2s) + maintenance 优先级提升 (防 115 删除饿死)
+#   2026-10-26  共享登记 409 幂等（handlers）—— 追剧刷新每轮的 register-shared-source 里，
+#               同 SHA1 已被中心以其它身份登记会返回 409，上游把任一项失败当整批判 failed，
+#               导致同一批文件每轮都红、永远重试（文件本身在池中可播）。补丁把该类项计入 skipped。
 #   2026-10-25  第 4 个补丁 p115_workflow —— 整理结果体瘦身：rejected 只留 4 字段、
 #               超 24MB 整体丢弃，避免 complete_step 5 倍写放大撑爆 libpq 缓冲区
 #               （表现为整理全跑完却判 failed、enqueue-ingest 被 block、organize.jobs 留 pending 孤儿行）。
@@ -37,6 +40,7 @@ ETKN_DIR=${ETKN_DIR:-/vol1/1000/docker/etkn}
 COMPOSE=${COMPOSE:-$ETKN_DIR/docker-compose.yml}
 IMAGE=${IMAGE:-hbq0405/etkn:latest}
 CTR=${CTR:-etkn}
+DBCTR=${DBCTR:-etkn-db}
 SITE=/usr/local/lib/python3.12/site-packages/etk_vnext
 MODE=json
 [ "$1" = "--text" ] && MODE=text
@@ -87,14 +91,41 @@ check_one() {  # <补丁文件> <容器内路径> <期望md5> <短名>
     fi
 }
 
-check_one "$ETKN_DIR/repository_patch.py"  "$SITE/modules/subscription/repository.py" "$(expect_of "$ETKN_DIR/repository_patch.py"  df80c65f53c8be70027f101bf5bbfed0)" repository
+check_db_params() {  # 运行时参数：role/库级退化参数 + jit（2026-10-26 事故）
+    _cfg=$(docker exec "$DBCTR" psql -U etkn -d etkn -Atc \
+        "select coalesce(string_agg(coalesce(setconfig::text,''),' '),'') from pg_db_role_setting where setrole='etkn'::regrole" 2>&1)
+    _rc1=$?
+    _jit=$(docker exec "$DBCTR" psql -U etkn -d etkn -Atc "show jit" 2>&1 | tr -d ' \n')
+    _rc2=$?
+    if [ "$_rc1" != "0" ] || [ "$_rc2" != "0" ]; then
+        add "db_params" 1 "数据库参数状态未知（psql 失败，容器可能重启中）：$(printf '%s' "$_cfg" | head -c 120)"
+        return
+    fi
+    _bad=""
+    for _k in enable_nestloop enable_hashjoin enable_seqscan enable_mergejoin; do
+        case "$_cfg" in *"$_k=off"*) _bad="${_bad:+$_bad; }etkn 角色/库级 $_k=off";; esac
+    done
+    case "$_jit" in on) _bad="${_bad:+$_bad; }jit=on（曾触发 parallel worker 段错误）";; esac
+    if [ -z "$_bad" ]; then
+        add "db_params" 0 "运行参数正常（jit=$_jit，无角色/库级退化参数）"
+    else
+        add "db_params" 1 "$_bad → 点查退化成全表哈希连接（海报/详情/起播全线变慢）；跑 db_setting_guard.py 或点「立即修复」"
+    fi
+}
+
+check_one "$ETKN_DIR/repository_patch.py"  "$SITE/modules/subscription/repository.py" "$(expect_of "$ETKN_DIR/repository_patch.py" 9c5277d8021fcc3ed84d5cd2c996de09)" repository
 check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"          "$(expect_of "$ETKN_DIR/shared_pool_patch.py" 1965752ad40c8b367aaae8d941f35cb9)" shared_pool
 check_one "$ETKN_DIR/watchlist_patch.py"   "$SITE/modules/subscription/watchlist.py"    "$(expect_of "$ETKN_DIR/watchlist_patch.py"   ff2a1bce4d1ebf1819d0e76ba08a1db9)" watchlist
-check_one "$ETKN_DIR/p115_workflow_patch.py" "$SITE/modules/organize/p115_workflow.py"   "$(expect_of "$ETKN_DIR/p115_workflow_patch.py" b36160405993e8c0c7b0743f9f418d25)" p115_workflow
+check_one "$ETKN_DIR/p115_workflow_patch.py" "$SITE/modules/organize/p115_workflow.py"   "$(expect_of "$ETKN_DIR/p115_workflow_patch.py" 73ff4f7939bab37d41580faf86d3149f)" p115_workflow
+check_one "$ETKN_DIR/ai_service_patch.py" "$SITE/modules/ai_translation/service.py" "$(expect_of "$ETKN_DIR/ai_service_patch.py" 6619646db744b24da85cb23c9f2d88ac)" ai_service
 check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" bdbf50549384522e8eaa3b21c93068e7)" center_control
-check_one "$ETKN_DIR/play_pool_patch.py"     "$SITE/modules/playback/play_pool.py"     "$(expect_of "$ETKN_DIR/play_pool_patch.py" cf981579d350044189f2f281691a51bd)" play_pool
 check_one "$ETKN_DIR/screenshots_patch.py"   "$SITE/modules/scrape/screenshots.py"      "$(expect_of "$ETKN_DIR/screenshots_patch.py" dcdef9d07a4549cef46ba20de586c22f)" screenshots
 check_one "$ETKN_DIR/virtual_library_service_patch.py" "$SITE/modules/virtual_library/service.py" "$(expect_of "$ETKN_DIR/virtual_library_service_patch.py" dda522b8b8406f8e25e5a9764de9c77c)" virtual_library
+check_one "$ETKN_DIR/placeholders_patch.py" "$SITE/modules/virtual_library/placeholders.py" "$(expect_of "$ETKN_DIR/placeholders_patch.py" 3de661889d331cff003a89d4756ab788)" placeholders
+check_one "$ETKN_DIR/media_server_patch.py" "$SITE/api/media_server.py" "$(expect_of "$ETKN_DIR/media_server_patch.py" 591bae7f7138dc3e82603281eee8cda6)" media_server
+check_one "$ETKN_DIR/catalog_patch.py" "$SITE/modules/media_server/catalog.py" "$(expect_of "$ETKN_DIR/catalog_patch.py" ed3b28f87b6f88930bab719080663d9e)" catalog
+check_one "$ETKN_DIR/shared_register_patch.py" "$SITE/platform/tasks/handlers.py" "$(expect_of "$ETKN_DIR/shared_register_patch.py" ba5de21a5a26b14c59bd37db69319072)" shared_register
+check_db_params
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
 IMG_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}' 2>/dev/null)"
@@ -108,10 +139,14 @@ for spec in \
     "$ETKN_DIR/shared_pool.py.orig|$SITE/integrations/shared_pool.py|shared_pool" \
     "$ETKN_DIR/watchlist.py.orig|$SITE/modules/subscription/watchlist.py|watchlist" \
     "$ETKN_DIR/p115_workflow.py.orig|$SITE/modules/organize/p115_workflow.py|p115_workflow" \
+    "$ETKN_DIR/ai_service.py.orig|$SITE/modules/ai_translation/service.py|ai_service" \
     "$ETKN_DIR/center_control.py.orig|$SITE/integrations/center_control.py|center_control" \
-    "$ETKN_DIR/play_pool.py.orig|$SITE/modules/playback/play_pool.py|play_pool" \
     "$ETKN_DIR/screenshots.py.orig|$SITE/modules/scrape/screenshots.py|screenshots" \
-    "$ETKN_DIR/virtual_library_service.py.orig|$SITE/modules/virtual_library/service.py|virtual_library"
+    "$ETKN_DIR/virtual_library_service.py.orig|$SITE/modules/virtual_library/service.py|virtual_library" \
+    "$ETKN_DIR/placeholders.py.orig|$SITE/modules/virtual_library/placeholders.py|placeholders" \
+    "$ETKN_DIR/media_server.py.orig|$SITE/api/media_server.py|media_server" \
+    "$ETKN_DIR/catalog.py.orig|$SITE/modules/media_server/catalog.py|catalog" \
+    "$ETKN_DIR/handlers.py.orig|$SITE/platform/tasks/handlers.py|handlers"
 do
     _orig="${spec%%|*}"; _rest="${spec#*|}"; _path="${_rest%%|*}"; _name="${_rest##*|}"
     _new="$TMPD/${_name}_new.py"
@@ -141,7 +176,7 @@ if [ "$MODE" = "text" ]; then
     done
     _nd=$(printf '%s' "$CHECKS" | grep -o '"key":"deploy_[^"]*","ok":true' | wc -l | tr -d ' ')
     _nu=$(printf '%s' "$CHECKS" | grep -o '"key":"upstream_[^"]*","ok":true' | wc -l | tr -d ' ')
-    if [ "$FAIL" = "0" ]; then printf '结论：全部正常（%s 条部署链 + %s 条上游一致性）\n' "$_nd" "$_nu"; else printf '结论：有问题\n'; fi
+    if [ "$FAIL" = "0" ]; then printf '结论：全部正常（%s 条部署链 + %s 条上游一致性 + 1 条运行参数）\n' "$_nd" "$_nu"; else printf '结论：有问题\n'; fi
 else
     printf '{"ok":%s,"ts":"%s","image_id":"%s","image_created":"%s","need_rebase":%s,"checks":[%s],"problems":[%s]}\n' \
         "$OKSTR" "$TS" "$IMG_ID" "$IMG_CREATED" \
