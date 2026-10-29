@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.22 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.23 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.22'
+VERSION = 'v3.18.23'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -4744,6 +4744,47 @@ def etkn_self_probe() -> dict:
     return out
 
 
+# ---------- 共享池本周离线时长（v3.18.23：口径=ETKN /api/shared-pool/status 的 device.availability） ----------
+_WEEK_OFF_CACHE = {'ts': 0.0, 'data': None}
+_WEEK_OFF_TTL = 30.0
+
+
+def week_offline_snapshot() -> dict:
+    """取 ETKN 共享池「本周累计离线时长」。30 秒内复用同一份，避免 2 秒轮询打爆 ETKN。"""
+    now = time.time()
+    c = _WEEK_OFF_CACHE
+    if c['data'] is not None and now - c['ts'] < _WEEK_OFF_TTL:
+        return c['data']
+    try:
+        st, body = api_get('/api/shared-pool/status')
+        if st != 200 or not isinstance(body, dict):
+            raise RuntimeError('ETKN 返回 %s' % st)
+        dev = body.get('device') or {}
+        av = dev.get('availability') or {}
+        sg = av.get('signing') or {}
+        off = int(av.get('offline_seconds') or 0)
+        lim = int(av.get('limit_seconds') or 86400)
+        rem = av.get('remaining_seconds')
+        rem = int(rem) if rem is not None else max(lim - off, 0)
+        out = {
+            'ok': True,
+            'connected': bool(body.get('connected')),
+            'offline_seconds': off,
+            'limit_seconds': lim,
+            'remaining_seconds': rem,
+            'banned': bool(av.get('banned')),
+            'week_start': av.get('week_start'),
+            'resets_at': av.get('resets_at'),
+            'signing_online': bool(sg.get('online')),
+            'signing_reason': sg.get('reason'),
+            'ts': now,
+        }
+        c['ts'], c['data'] = now, out
+        return out
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc)[:160], 'ts': now}
+
+
 # ---------- 手动测速（无定时；默认直连，proxy 指定域经代理 CONNECT 隧道） ----------
 def speedtest_one(host: str, timeout: float = 10.0, proxy: str | None = None,
                   path: str = '/', probe: str = 'http', headers: dict | None = None):
@@ -5236,6 +5277,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, f.read(), 'text/html; charset=utf-8')
             except FileNotFoundError:
                 return self._send(404, '前端未构建'.encode(), 'text/plain; charset=utf-8')
+        if p == '/api/week-offline':      # v3.18.23：共享池本周累计离线时长（只读，30s 缓存）
+            return self._send(200, json.dumps(week_offline_snapshot(), ensure_ascii=False).encode())
         if p == '/api/status':
             snap = _state.get('snapshot')
             fs = _state.get('fast')

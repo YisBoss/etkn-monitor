@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.22 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.18.23 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -563,6 +563,7 @@ html[data-theme="light"] .card::after{
     </div>
     </div>
     <div class="card w"><div class="k">测速结果</div><div id="kSp" style="margin-top:6px"></div></div>
+    <div class="card w"><div class="k">共享池本周离线时长</div><div id="kOff" style="margin-top:6px">-</div></div>
     <div class="card w"><div class="k">系统状态</div><div id="kDiag" style="margin-top:6px">-</div></div>
   </div>
 </div>
@@ -884,6 +885,39 @@ async function doRetry(id){
       toast('ETKN 拒绝（状态 '+b.etkn_status+'）：'+msg,'bad');
     }
   }catch(e){toast('请求失败：'+String(e).slice(0,80),'bad');}
+}
+/* v3.18.23：共享池本周离线时长（口径=ETKN /api/shared-pool/status 的 device.availability） */
+let wkOffTs=0;
+async function loadWeekOffline(){
+  const now=Date.now();
+  if(now-wkOffTs<60000) return;          // 后端已 30s 缓存，这里再压到 60s
+  wkOffTs=now;
+  const box=document.getElementById('kOff'); if(!box) return;
+  try{
+    const d=await (await fetch('/api/week-offline',{cache:'no-store'})).json();
+    box.innerHTML=wkOffHtml(d);
+  }catch(e){
+    box.innerHTML='<div class="sub bad">读取失败：'+String(e).slice(0,60)+'</div>';
+  }
+}
+function wkOffHtml(d){
+  if(!d||!d.ok)
+    return '<div class="sub bad">ETKN 共享池状态不可用：'+((d&&d.error)?String(d.error).slice(0,80):'未知')+'</div>';
+  const off=Number(d.offline_seconds||0), lim=Number(d.limit_seconds||86400), rem=Number(d.remaining_seconds||0);
+  const pct=lim>0?Math.min(100,off*100/lim):0;
+  const hh=x=>{const v=x/3600; return v>=10?v.toFixed(1):v.toFixed(2);};
+  const col=pct>=80?'var(--bad)':(pct>=50?'var(--warn)':'var(--ok)');
+  const wk=(d.week_start||'').slice(0,10), rs=(d.resets_at||'').slice(0,10);
+  return '<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap">'
+    +'<span style="font-size:23px;font-weight:700;color:'+col+'">'+hh(off)+' 小时</span>'
+    +'<span class="sub">/ '+hh(lim)+' 小时（本周累计 · 已用 '+pct.toFixed(0)+'%）</span></div>'
+    +'<div style="height:8px;border-radius:5px;background:var(--line);overflow:hidden;margin:9px 0 7px">'
+    +'<div style="height:100%;width:'+pct.toFixed(1)+'%;background:'+col+';border-radius:5px"></div></div>'
+    +'<div class="sub">距封禁还剩 '+hh(rem)+' 小时'+(rs?' · '+rs+' 0 点重置':'')
+    +(d.banned?' · <b style="color:var(--bad)">已封禁</b>':'')+'</div>'
+    +'<div class="sub">中心'+(d.connected?'已连接':'未连接')+' · 签名'+(d.signing_online?'在线':'异常'
+    +(d.signing_reason&&d.signing_reason!=='ok'?'（'+d.signing_reason+'）':''))+'</div>'
+    +'<div class="histsub">口径：共享中心按周累计的「设备离线秒数」，与 ETKN 资源中心页面同一数据源'+(wk?' · 本周自 '+wk+' 起':'')+'</div>';
 }
 /* ---- 测速（表格：域名/建连/握手/总耗时/状态；正常绿、异常红——不再用橙色） ----
    v2.8.7：目标来自设置列表，列头按测速顺序标注「#1/#2…」序号；结果带备注则显示
@@ -1670,6 +1704,7 @@ async function refresh(){
     document.getElementById('cDone').innerHTML=fmtCard(rec.success||0,'媒体');
     document.getElementById('cDoneSub').textContent=`${dn.tasks||0} 任务（含流程类，与媒体数不同口径）`;
     document.getElementById('cDoneWk').textContent=`本周完成 ${(s.week?.media??'-')} 媒体（整理记录口径 · 周一 0 点起）`;
+    loadWeekOffline();                // v3.18.23：共享池本周离线时长卡（内部 60s 节流）
     // v2.8.23 异常卡改版：主数=今日异常（今日新增未识别+失败/部分任务）；拆分副行；累计未识别转次要小字
     const _urToday=rec.unrecognized_today??0, _badT=dn.bad_tasks??(s.failed_today?.length||0);
     document.getElementById('cBad').innerHTML=fmtCard(_urToday+_badT,'今日');
