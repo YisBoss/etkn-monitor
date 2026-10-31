@@ -118,13 +118,14 @@ check_one "$ETKN_DIR/shared_pool_patch.py" "$SITE/integrations/shared_pool.py"  
 check_one "$ETKN_DIR/watchlist_patch.py"   "$SITE/modules/subscription/watchlist.py"    "$(expect_of "$ETKN_DIR/watchlist_patch.py"   ff2a1bce4d1ebf1819d0e76ba08a1db9)" watchlist
 check_one "$ETKN_DIR/p115_workflow_patch.py" "$SITE/modules/organize/p115_workflow.py"   "$(expect_of "$ETKN_DIR/p115_workflow_patch.py" 73ff4f7939bab37d41580faf86d3149f)" p115_workflow
 check_one "$ETKN_DIR/ai_service_patch.py" "$SITE/modules/ai_translation/service.py" "$(expect_of "$ETKN_DIR/ai_service_patch.py" 6619646db744b24da85cb23c9f2d88ac)" ai_service
-check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" bdbf50549384522e8eaa3b21c93068e7)" center_control
+check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" 6715fb0ac4fafcb26f479f7e068c137d)" center_control
 check_one "$ETKN_DIR/screenshots_patch.py"   "$SITE/modules/scrape/screenshots.py"      "$(expect_of "$ETKN_DIR/screenshots_patch.py" dcdef9d07a4549cef46ba20de586c22f)" screenshots
 check_one "$ETKN_DIR/virtual_library_service_patch.py" "$SITE/modules/virtual_library/service.py" "$(expect_of "$ETKN_DIR/virtual_library_service_patch.py" dda522b8b8406f8e25e5a9764de9c77c)" virtual_library
 check_one "$ETKN_DIR/placeholders_patch.py" "$SITE/modules/virtual_library/placeholders.py" "$(expect_of "$ETKN_DIR/placeholders_patch.py" 3de661889d331cff003a89d4756ab788)" placeholders
 check_one "$ETKN_DIR/media_server_patch.py" "$SITE/api/media_server.py" "$(expect_of "$ETKN_DIR/media_server_patch.py" 591bae7f7138dc3e82603281eee8cda6)" media_server
 check_one "$ETKN_DIR/catalog_patch.py" "$SITE/modules/media_server/catalog.py" "$(expect_of "$ETKN_DIR/catalog_patch.py" ed3b28f87b6f88930bab719080663d9e)" catalog
 check_one "$ETKN_DIR/shared_register_patch.py" "$SITE/platform/tasks/handlers.py" "$(expect_of "$ETKN_DIR/shared_register_patch.py" ba5de21a5a26b14c59bd37db69319072)" shared_register
+check_one "$ETKN_DIR/media_dedup_patch.py" "$SITE/modules/media_dedup/service.py" "$(expect_of "$ETKN_DIR/media_dedup_patch.py" 8178f14c1f23592082246095d9a8d557)" media_dedup
 check_db_params
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
@@ -146,7 +147,8 @@ for spec in \
     "$ETKN_DIR/placeholders.py.orig|$SITE/modules/virtual_library/placeholders.py|placeholders" \
     "$ETKN_DIR/media_server.py.orig|$SITE/api/media_server.py|media_server" \
     "$ETKN_DIR/catalog.py.orig|$SITE/modules/media_server/catalog.py|catalog" \
-    "$ETKN_DIR/handlers.py.orig|$SITE/platform/tasks/handlers.py|handlers"
+    "$ETKN_DIR/handlers.py.orig|$SITE/platform/tasks/handlers.py|handlers" \
+    "$ETKN_DIR/media_dedup_service.orig|$SITE/modules/media_dedup/service.py|media_dedup"
 do
     _orig="${spec%%|*}"; _rest="${spec#*|}"; _path="${_rest%%|*}"; _name="${_rest##*|}"
     _new="$TMPD/${_name}_new.py"
