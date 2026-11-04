@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.26 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.24 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.26'
+VERSION = 'v3.18.27'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -206,10 +206,15 @@ SETTINGS_DEFAULTS = {
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
     'feed_batch_limit': 500,       # 每批上限（文件夹+散文件合计；一个剧夹=1 项，整夹转移）
-    'feed_interval_min': 0,        # v3.18.25 定时转移：每 N 分钟自动执行一次（0=不定时）
-    # v3.18.26：定时转移独立开关——只管「定时转移」这条线程，与「自动喂料（清空后触发）」
-    # 互不影响：xfer_enabled=关 时定时线程完全不动作，feed_enabled 仍然照旧工作。
-    'xfer_enabled': False,
+    # ---- v3.18.27 定时转移（独立功能：与上面喂料完全解耦，自己的源/目标/批量/间隔/开关） ----
+    # 喂料＝事件驱动（整理清空后把「自动整理入库」推到待整理目录），走 feed_*；
+    # 定时转移＝按固定间隔把用户指定目录搬到另一个目录，不触发整理、不共用任何喂料参数。
+    'xfer_enabled': False,         # 定时转移独立开关（默认关）
+    'xfer_src_dir': '',            # 源目录（CD2 WebDAV 路径，独立于 feed_src_dir）
+    'xfer_dst_dir': '',            # 目标目录（CD2 WebDAV 路径，独立于 feed_dst_dir）
+    'xfer_batch_limit': 10,        # 每次转移数量（文件夹+散文件合计，独立于 feed_batch_limit）
+    'xfer_interval_min': 30,       # 转移间隔（分钟，独立于喂料）
+    'xfer_settle_seconds': 60,     # 静置保护：最近 N 秒仍在变动的条目本轮跳过（0=不保护）
     # v3.18.19：喂料静置保护——源目录条目最近 N 秒内还在变动就先不搬（防搬半截）
     # MoviePilot 等工具「先建目录再写文件」，写入中途整夹 MOVE 会把它写崩。
     'feed_settle_seconds': 300,
@@ -397,7 +402,8 @@ def settings_load():
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
               'backlog_threshold', 'speed_threshold_ms',
               'stall_threshold_min', 'stall_repeat_min', 'feed_batch_limit',
-              'feed_settle_seconds', 'feed_interval_min',
+              'feed_settle_seconds',
+              'xfer_batch_limit', 'xfer_interval_min', 'xfer_settle_seconds',
               'relay_min_quota'):        # v2.9.20
         try:
             v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
@@ -412,6 +418,9 @@ def settings_load():
     for k in ('feed_src_dir', 'feed_dst_dir'):
         if not isinstance(SETTINGS[k], str) or not SETTINGS[k].strip():
             SETTINGS[k] = SETTINGS_DEFAULTS[k]
+    for k in ('xfer_src_dir', 'xfer_dst_dir'):      # v3.18.27 允许为空=未配置
+        v = SETTINGS.get(k)
+        SETTINGS[k] = v.strip().rstrip('/') if isinstance(v, str) else ''
     cl = _norm_card_links(SETTINGS.get('card_links'))   # v2.7（六）：脏数据兜底
     SETTINGS['card_links'] = cl if cl else [dict(x) for x in CARD_LINKS_DEFAULT]
     # v2.8.7 测速目标：载入即清洗（空列表合法=用户还没配；脏数据剔除不整表拒收）
@@ -2370,7 +2379,7 @@ def _cd2_probe_reason(src: str) -> str:
     return '原因：' + _cd2_reason_of(s, b)
 
 
-def _feed_run(force: bool = False, quiet_empty: bool = False, gate: str = 'feed') -> str:
+def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
     """喂料主流程：扫描→计划→转移→触发原生整理。
     转移失败/触发失败→飞书告警卡片；空源目录→飞书提示。全程忙锁+冷却。
 
@@ -2381,19 +2390,11 @@ def _feed_run(force: bool = False, quiet_empty: bool = False, gate: str = 'feed'
                       清空=新批次起点必须立即喂；兜底防的是与事件双触发重复，
                       由忙锁+last_run 双保险兜住）
     quiet_empty=True  源目录为空时不推卡（兜底轮询每 150s 就扫一次，推卡会刷屏）
-    gate='feed'       开关闸门口径（v3.18.26 定时转移独立开关）：
-                      'feed'=看 feed_enabled（清空事件驱动/兜底轮询）；
-                      'xfer'=看 xfer_enabled（定时转移线程）；
-                      'any' =两者任一开启即可（设置页「立即转移一次」）。
-                      无论哪个口径，push_enabled 总闸关闭都不动作。
-    返回值仅供 _feed_loop 记日志用，其它调用点忽略。"""
+    返回值仅供 _feed_loop 记日志用，其它调用点忽略。
+    注：v3.18.27 起「定时转移」是独立模块（_xfer_run），不再从这里借道。"""
     if not SETTINGS['push_enabled']:
         return 'off'
-    if gate == 'feed' and not SETTINGS.get('feed_enabled'):
-        return 'off'
-    if gate == 'xfer' and not SETTINGS.get('xfer_enabled'):
-        return 'off'
-    if gate == 'any' and not (SETTINGS.get('feed_enabled') or SETTINGS.get('xfer_enabled')):
+    if not SETTINGS.get('feed_enabled'):
         return 'off'
     if _feed_state['moving'] or (not force and time.time() - _feed_state['last_run'] < 120):
         return 'busy'                  # 忙锁 + 2 分钟冷却（清空重试窗口内不重复进）
@@ -2543,58 +2544,150 @@ def _feed_loop() -> None:
             print(f'[feed_loop] 兜底轮询异常：{type(e).__name__}: {e}', flush=True)
 
 
-# ============ v3.18.25 定时转移（四栏设置：原目录/目标目录/每批总数/间隔分钟） ============
-_feed_timer_state = {'last': 0.0, 'next': 0.0, 'last_status': '', 'paused_note': ''}
+# ============ v3.18.27 定时转移（独立功能：自己的源/目标/批量/间隔/开关） ============
+# 与喂料彻底解耦，四条硬边界：
+#   ① 不读 feed_* 任何键，不共用扫描缓存（直接对目标源做 PROPFIND），不写 _feed_state；
+#   ② 不触发 ETKN 整理（用户要的是单纯搬运），因此没有 feed_trigger_delay 那一段；
+#   ③ 自己一套开关/间隔，与「自动喂料」互不影响；
+#   ④ 推送总闸关闭时照常搬、只记日志——不因「没通知」而罢工。
+_xfer_state = {'last': 0.0, 'next': 0.0, 'last_status': '', 'paused_note': '',
+               'last_counts': {}, 'running': False, 'last_error': ''}
+_xfer_lock = threading.Lock()
 
 
-def _feed_timer_loop() -> None:
-    """定时转移：按「间隔分钟」周期性调用 _feed_run，把源目录里的文件夹+散文件
-    按「每批上限」合计口径搬到目标目录（复用 CD2 WebDAV 通道与静置保护）。
+def _xfer_cfg() -> dict:
+    """读取定时转移自己的参数（绝不回落到 feed_*）。"""
+    return {
+        'src': (SETTINGS.get('xfer_src_dir') or '').strip().rstrip('/'),
+        'dst': (SETTINGS.get('xfer_dst_dir') or '').strip().rstrip('/'),
+        'batch': max(1, int(SETTINGS.get('xfer_batch_limit') or 10)),
+        'iv': max(0, int(SETTINGS.get('xfer_interval_min') or 0)),
+        'settle': max(0, int(SETTINGS.get('xfer_settle_seconds') or 0)),
+    }
 
-    与 _feed_loop（事件驱动 + 整理空档兜底）互补：
-      * _feed_loop 只在 ETKN 整理队列清空时喂料；
-      * 本线程不管整理队列，到点就搬——用户明确要「定时多久转移一次」的固定节奏。
-    安全约束（与喂料一致，绝不放松）：
-      ① xfer_enabled 关闭 / 间隔为 0 → 不动作（v3.18.26 起独立开关，
-         与「自动喂料 feed_enabled」互不影响）；
-      ② 上一轮还在搬（_feed_state['moving']）→ 本轮跳过，不并发；
-      ③ 静置保护 feed_settle_seconds 照常生效，防把正在写入的夹搬半截；
-      ④ 推送总闸关闭时只记日志不搬（_feed_run 内部闸门），避免「有动作没通知」。
-    """
+
+def _xfer_push(kind: str, title: str, lines: list, tcolor: str = 'green') -> bool:
+    if not SETTINGS.get('push_enabled'):
+        return False
+    try:
+        _alert_push(kind, title, lines, buttons=_card_buttons(), tcolor=tcolor)
+        return True
+    except Exception as e:
+        print('[xfer] 推送失败：%s: %s' % (type(e).__name__, e), flush=True)
+        return False
+
+
+def _xfer_run(force: bool = False, quiet_empty: bool = True) -> str:
+    """独立定时转移：源目录→目标目录，按「每次转移数量」合计搬文件夹+散文件。"""
+    c = _xfer_cfg()
+    if not c['src'] or not c['dst']:
+        _xfer_state['last_error'] = '未配置源目录或目标目录'
+        return 'nocfg'
+    if c['src'] == c['dst']:
+        _xfer_state['last_error'] = '源目录与目标目录相同'
+        return 'samecfg'
+    if _xfer_state['running'] or (not force and time.time() - _xfer_state['last'] < 30):
+        return 'busy'
+    with _xfer_lock:
+        if _xfer_state['running']:
+            return 'busy'
+        _xfer_state['running'] = True
+    try:
+        r = _cd2_list_entries_meta(c['src'])
+        if r is None:
+            reason = _cd2_probe_reason(c['src'])
+            _xfer_state['last_error'] = reason
+            _xfer_push('xfer_err', '定时转移失败', [
+                '源目录不可读：%s' % c['src'], reason,
+                '检查：设置页【定时转移】里的源目录是否存在、CD2 账号是否仍有效'], 'yellow')
+            return 'err'
+        dirs, loose, mt = r
+        if c['settle'] and (dirs or loose):
+            _now = time.time()
+            okd = [n for n in dirs if _now - (mt.get(n) or 0) >= c['settle']]
+            okf = [n for n in loose if _now - (mt.get(n) or 0) >= c['settle']]
+            held = (len(dirs) - len(okd)) + (len(loose) - len(okf))
+            if held:
+                print('[xfer] %d 项最近 %d 秒内还在变动，本轮先不搬' % (held, c['settle']), flush=True)
+            dirs, loose = okd, okf
+        if not dirs and not loose:
+            if not quiet_empty:
+                _xfer_push('xfer_empty', '定时转移：源目录为空',
+                           ['%s 当前没有可转移的文件夹或文件' % c['src']], 'blue')
+            return 'empty'
+        pd = dirs[:c['batch']]
+        pf = loose[:max(0, c['batch'] - len(pd))]
+        total = len(pd) + len(pf)
+        md, err, sd = _feed_move_batch(c['src'], c['dst'], pd)
+        if err:
+            _xfer_state['last_error'] = err
+            _xfer_push('xfer_err', '定时转移失败', [
+                '从 %s 搬到 %s 时中断' % (c['src'], c['dst']),
+                '本批已完成 %d/%d 项，错误：%s' % (len(md), total, err)], 'yellow')
+            return 'fail'
+        mf, err, sf = _feed_move_batch(c['src'], c['dst'], pf)
+        if err:
+            _xfer_state['last_error'] = err
+            _xfer_push('xfer_err', '定时转移失败', [
+                '从 %s 搬到 %s 时中断' % (c['src'], c['dst']),
+                '本批已完成 %d/%d 项，错误：%s' % (len(md) + len(mf), total, err)], 'yellow')
+            return 'fail'
+        if not md and not mf:
+            _xfer_state['last_error'] = '本批全部跳过（源端已不存在）'
+            _xfer_push('xfer_err', '定时转移失败', [
+                '本批 %d 项全部跳过：源端已不存在（多半是列表缓存残影）' % total], 'yellow')
+            return 'skip'
+        left = _cd2_list_entries(c['src'])
+        parts = []
+        if md:
+            parts.append('%d 个文件夹' % len(md))
+        if mf:
+            parts.append('%d 个散文件' % len(mf))
+        lines = ['已转移 ' + ' + '.join(parts), '路径：%s → %s' % (c['src'], c['dst'])]
+        if left is not None:
+            lines.append('源目录剩余：%d 个文件夹 + %d 个散文件' % (len(left[0]), len(left[1])))
+        if sd or sf:
+            lines.append('另有 %d 项源端已不存在，已跳过' % (len(sd) + len(sf)))
+        _xfer_push('xfer', '定时转移完成', lines, 'green')
+        _xfer_state['last_counts'] = {'dirs': len(md), 'files': len(mf),
+                                       'skip': len(sd) + len(sf), 'total': total}
+        _xfer_state['last_error'] = ''
+        return 'ok'
+    finally:
+        _xfer_state['running'] = False
+        _xfer_state['last'] = time.time()
+
+
+def _xfer_loop() -> None:
+    """按「转移间隔」执行；开关关 / 间隔 0 / 未配路径 → 空转不动作。"""
     while True:
-        time.sleep(20)
+        time.sleep(15)
         try:
-            iv = max(0, int(SETTINGS.get('feed_interval_min') or 0))
-            if not iv or not SETTINGS.get('xfer_enabled'):
-                if _feed_timer_state['next']:
-                    _feed_timer_state['next'] = 0.0
-                    _feed_timer_state['paused_note'] = ''
+            c = _xfer_cfg()
+            if (not SETTINGS.get('xfer_enabled') or not c['iv']
+                    or not c['src'] or not c['dst']):
+                if _xfer_state['next']:
+                    _xfer_state['next'] = 0.0
+                    _xfer_state['paused_note'] = ''
                 continue
             now = time.time()
-            if not _feed_timer_state['next']:
-                _feed_timer_state['next'] = now + iv * 60
-                print('[feed_timer] 定时转移已启动：每 %d 分钟一批' % iv, flush=True)
+            if not _xfer_state['next']:
+                _xfer_state['next'] = now + c['iv'] * 60
+                print('[xfer] 定时转移已启动：每 %d 分钟一批，%s → %s，每批 %d 项'
+                      % (c['iv'], c['src'], c['dst'], c['batch']), flush=True)
                 continue
-            if now < _feed_timer_state['next']:
+            if _xfer_state['next'] > now + c['iv'] * 60:   # 间隔改小 → 立刻按新节奏
+                _xfer_state['next'] = now + c['iv'] * 60
+            if now < _xfer_state['next'] or _xfer_state['running']:
                 continue
-            if _feed_state.get('moving'):
-                continue                      # 上一轮还在搬，下个 tick 再判
-            if not SETTINGS.get('push_enabled'):
-                _feed_timer_state['next'] = now + 60
-                if _feed_timer_state['paused_note'] != 'push':
-                    _feed_timer_state['paused_note'] = 'push'
-                    print('[feed_timer] 推送总闸关闭，定时转移暂停', flush=True)
-                continue
-            _feed_timer_state['paused_note'] = ''
-            st = _feed_run(force=True, quiet_empty=True, gate='xfer')
-            _feed_timer_state['last'] = time.time()
-            _feed_timer_state['last_status'] = st
-            _feed_timer_state['next'] = _feed_timer_state['last'] + iv * 60
-            print('[feed_timer] 定时转移执行完毕：%s，下一轮 %s'
-                  % (st, datetime.fromtimestamp(_feed_timer_state['next'], TZ).strftime('%H:%M:%S')),
+            st = _xfer_run(force=True)
+            _xfer_state['last_status'] = st
+            _xfer_state['next'] = time.time() + c['iv'] * 60
+            print('[xfer] 执行完毕：%s，下一轮 %s'
+                  % (st, datetime.fromtimestamp(_xfer_state['next'], TZ).strftime('%H:%M:%S')),
                   flush=True)
-        except Exception as e:                 # 兜底线程绝不允许因单次异常退出
-            print('[feed_timer] 定时转移异常：%s: %s' % (type(e).__name__, e), flush=True)
+        except Exception as e:                 # 线程绝不允许因单次异常退出
+            print('[xfer] 异常：%s: %s' % (type(e).__name__, e), flush=True)
 
 
 # ============ v2.7 静止告警自动处置（只 restart etkn，禁重建） ============
@@ -5566,13 +5659,14 @@ class Handler(BaseHTTPRequestHandler):
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
-        d['feed_timer'] = {'interval_min': int(SETTINGS.get('feed_interval_min') or 0),
-                           'enabled': bool(SETTINGS.get('xfer_enabled')),
-                           'next_ts': float(_feed_timer_state.get('next') or 0),
-                           'last_ts': float(_feed_timer_state.get('last') or 0),
-                           'last_status': _feed_timer_state.get('last_status') or '',
-                           'paused': _feed_timer_state.get('paused_note') or '',
-                           'running': bool(_feed_state.get('moving'))}
+        d['xfer_state'] = {'enabled': bool(SETTINGS.get('xfer_enabled')),
+                           'interval_min': int(SETTINGS.get('xfer_interval_min') or 0),
+                           'next_ts': float(_xfer_state.get('next') or 0),
+                           'last_ts': float(_xfer_state.get('last') or 0),
+                           'last_status': _xfer_state.get('last_status') or '',
+                           'last_error': _xfer_state.get('last_error') or '',
+                           'last_counts': dict(_xfer_state.get('last_counts') or {}),
+                           'running': bool(_xfer_state.get('running'))}
         d['settings_path'] = SETTINGS_PATH
         if extra:
             d.update(extra)
@@ -5600,7 +5694,9 @@ class Handler(BaseHTTPRequestHandler):
                       ('speed_threshold_ms', 1000),
                       ('stall_threshold_min', 1), ('stall_repeat_min', 5),
                       ('feed_batch_limit', 1), ('feed_trigger_delay', 0),
-                      ('feed_settle_seconds', 0), ('feed_interval_min', 0),
+                      ('feed_settle_seconds', 0),
+                      ('xfer_batch_limit', 1), ('xfer_interval_min', 0),
+                      ('xfer_settle_seconds', 0),
                       ('loop_prepare_max', 2), ('loop_repeat_min', 10)):   # v3.18.9 空转阈值
             if k in b:
                 try:
@@ -5619,6 +5715,9 @@ class Handler(BaseHTTPRequestHandler):
         for k in ('feed_src_dir', 'feed_dst_dir'):
             if k in b and isinstance(b[k], str) and b[k].strip():
                 SETTINGS[k] = b[k].strip()
+        for k in ('xfer_src_dir', 'xfer_dst_dir'):      # v3.18.27：独立路径，允许清空
+            if k in b and isinstance(b[k], str):
+                SETTINGS[k] = b[k].strip().rstrip('/')
         if 'cd2_dav_url' in b and isinstance(b['cd2_dav_url'], str):   # v2.8 CD2 WebDAV
             u = b['cd2_dav_url'].strip().rstrip('/')
             if u and (u.startswith('http://') or u.startswith('https://')):
@@ -5764,22 +5863,34 @@ class Handler(BaseHTTPRequestHandler):
             record_push('test', text, ok, err)
             return self._send(200, json.dumps({'ok': ok, 'err': err, 'channels': chs},
                                               ensure_ascii=False).encode())
-        if p == '/api/feed-run':          # v3.18.25：定时转移「立即执行一次」
-            # v3.18.26：手动入口对两个开关都放行（自动喂料 / 定时转移任一开启即可）
-            if not (SETTINGS.get('feed_enabled') or SETTINGS.get('xfer_enabled')):
-                return self._send(200, json.dumps({'ok': False, 'err': '「自动喂料」与「定时转移」都未开启'}, ensure_ascii=False).encode())
+        if p == '/api/feed-run':          # 喂料「立即执行一次」（只喂料，不碰定时转移）
+            if not SETTINGS.get('feed_enabled'):
+                return self._send(200, json.dumps({'ok': False, 'err': '「自动喂料」未开启'}, ensure_ascii=False).encode())
             if _feed_state.get('moving'):
                 return self._send(200, json.dumps({'ok': False, 'err': '上一轮转移还在进行中'}, ensure_ascii=False).encode())
             def _w():
                 try:
-                    st = _feed_run(force=True, quiet_empty=False, gate='any')
-                    _feed_timer_state['last'] = time.time()
-                    _feed_timer_state['last_status'] = st
-                    iv = max(0, int(SETTINGS.get('feed_interval_min') or 0))
-                    _feed_timer_state['next'] = (_feed_timer_state['last'] + iv * 60) if iv else 0.0
+                    _feed_run(force=True, quiet_empty=False)
                 except Exception as e:
-                    _feed_timer_state['last_status'] = 'error:' + str(e)[:60]
+                    print('[feed-run] 异常：%s: %s' % (type(e).__name__, e), flush=True)
             threading.Thread(target=_w, daemon=True).start()
+            return self._send(200, json.dumps({'ok': True, 'msg': '已开始喂料，完成会推送通知'}, ensure_ascii=False).encode())
+        if p == '/api/xfer-run':          # v3.18.27：定时转移「立即执行一次」（独立模块）
+            c = _xfer_cfg()
+            if not SETTINGS.get('xfer_enabled'):
+                return self._send(200, json.dumps({'ok': False, 'err': '「定时转移」开关未开启'}, ensure_ascii=False).encode())
+            if not c['src'] or not c['dst']:
+                return self._send(200, json.dumps({'ok': False, 'err': '请先填写源文件夹与目标文件夹'}, ensure_ascii=False).encode())
+            if _xfer_state.get('running'):
+                return self._send(200, json.dumps({'ok': False, 'err': '上一轮转移还在进行中'}, ensure_ascii=False).encode())
+            def _wx():
+                try:
+                    st = _xfer_run(force=True, quiet_empty=False)
+                    _xfer_state['last_status'] = st
+                except Exception as e:
+                    _xfer_state['last_status'] = 'error:' + str(e)[:60]
+                    print('[xfer-run] 异常：%s: %s' % (type(e).__name__, e), flush=True)
+            threading.Thread(target=_wx, daemon=True).start()
             return self._send(200, json.dumps({'ok': True, 'msg': '已开始转移，完成会推送通知'}, ensure_ascii=False).encode())
         if p == '/api/wecom-menu':        # v2.9.5：一键下发/覆盖自定义菜单
             ok, msg = wecom_menu_apply()
@@ -6071,7 +6182,7 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
-    threading.Thread(target=_feed_timer_loop, daemon=True).start()  # v3.18.25 定时转移
+    threading.Thread(target=_xfer_loop, daemon=True).start()        # v3.18.27 定时转移（独立）
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（默认 1h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)

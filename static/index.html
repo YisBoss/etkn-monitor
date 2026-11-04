@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.26 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.18.24 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -648,14 +648,19 @@ html[data-theme="light"] .card::after{
         <div class="setrow"><label>原文件夹（115）<span class="why">CD2 WebDAV 路径，要搬走的文件/文件夹放这里</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
         <div class="setrow"><label>目标文件夹（115）<span class="why">CD2 WebDAV 路径，转移目的地</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
         <div class="setrow"><label>每次转移总数<span class="why">文件夹 + 文件合计计数（例：3 个文件夹 + 4 个文件 = 7）</span></label><div class="setbox"><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"><span class="sub">项 / 批</span></div></div>
-        <div class="setrow"><label>定时转移开关<span class="why">只控制下面的定时转移，与上面的自动喂料互不影响</span></label><label class="switch"><input type="checkbox" id="cfgXfer"><span class="slider"></span></label></div>
-        <div class="setrow"><label>定时转移间隔<span class="why">每 N 分钟自动搬一批（0=不定时；开关关掉时本项不生效）</span></label><div class="setbox"><input type="number" id="cfgFeedIv" min="0" style="max-width:120px"><span class="sub">分钟</span><button class="act" id="btnFeedRun" onclick="feedRunNow()">立即转移一次</button></div></div>
-        <div class="setrow"><label>定时转移状态<span class="why">最近一次结果 / 下一轮时间</span></label><div id="feedTimerStat" class="sub" style="text-align:right">—</div></div>
         <div class="setrow"><label>喂料静置保护<span class="why">最近 N 秒内还在变动的夹/文件本轮不搬，防搬半截（0=关）</span></label><input type="number" id="cfgFeedSettle" min="0" style="max-width:120px"></div>
         <div class="setrow"><label>待整理目录守卫<span class="why">有人直接往待整理目录丢文件时自动触发整理（兜底）</span></label><label class="switch"><input type="checkbox" id="cfgDstGuard"><span class="slider"></span></label></div>
         <div class="setrow"><label>喂料转移后延迟秒数<span class="why">隔 N 秒触发整理，0=立即</span></label><input type="number" id="cfgFeedDelay" min="0" style="max-width:120px"></div>
         <div class="setrow"><label>CD2 WebDAV 地址<span class="why">CloudDrive2 挂载通道</span></label><input type="text" id="cfgCd2Url" style="max-width:340px" placeholder="http://&lt;CD2主机&gt;:19798/dav"></div>
         <div class="setrow"><label>CD2 账号 / 密码<span class="why">密码留空=不修改</span></label><div class="setbox"><input type="text" id="cfgCd2User" style="max-width:220px" placeholder="CloudDrive2 登录邮箱"><input type="password" id="cfgCd2Pass" style="max-width:200px" placeholder="留空=不修改"></div></div>
+        <div class="setgroup" data-g="41" onclick="tglGroup(this)">【定时转移】（独立功能，与喂料互不共用参数）<span class="tgl">▶</span></div>
+        <div class="setrow"><label>定时转移开关<span class="why">只管本组；与上面「自动喂料」互不影响</span></label><label class="switch"><input type="checkbox" id="cfgXOn"><span class="slider"></span></label></div>
+        <div class="setrow"><label>原文件夹（115）<span class="why">要搬走的文件/文件夹放这里（CD2 WebDAV 路径）</span></label><input type="text" id="cfgXSrc" style="max-width:340px" placeholder="/115/待搬目录"></div>
+        <div class="setrow"><label>目标文件夹（115）<span class="why">转移目的地（CD2 WebDAV 路径）</span></label><input type="text" id="cfgXDst" style="max-width:340px" placeholder="/115/目标目录"></div>
+        <div class="setrow"><label>每次转移数量<span class="why">文件夹 + 文件合计计数（例：3 个文件夹 + 4 个文件 = 7），独立于喂料</span></label><div class="setbox"><input type="number" id="cfgXBatch" min="1" style="max-width:120px"><span class="sub">项 / 批</span></div></div>
+        <div class="setrow"><label>转移时间间隔<span class="why">每 N 分钟搬一批，独立于喂料（0=不定时）</span></label><div class="setbox"><input type="number" id="cfgXIv" min="0" style="max-width:120px"><span class="sub">分钟</span><button class="act" id="btnXferRun" onclick="xferRunNow()">立即转移一次</button></div></div>
+        <div class="setrow"><label>定时转移状态<span class="why">最近一次结果 / 下一轮时间</span></label><div id="xferStat" class="sub" style="text-align:right">—</div></div>
+        <div class="setrow"><label>静置保护<span class="why">最近 N 秒内还在变动的条目本轮不搬，防搬半截（0=关）</span></label><input type="number" id="cfgXSettle" min="0" style="max-width:120px"></div>
         <div class="setgroup" data-g="5" onclick="tglGroup(this)">【hosts】<span class="tgl">▶</span></div>
         <div class="setrow"><label>监控域名<span class="why">支持逗号分隔多个，逐域名监控漂移；解析比对路由器 /etc/hosts，漂移改行+重启 dnsmasq；留空=不监控</span></label><div class="setbox"><input type="text" id="cfgHostsDomain" placeholder="a.com,b.com" style="max-width:260px"><button class="act" id="btnHostsRe" onclick="hostsRecheck()">重新检测 IP</button></div></div>
         <div class="setrow"><label>当前绑定<span class="why">路由器 /etc/hosts 实际绑定 IP（点「重新检测 IP」后刷新）</span></label><div id="hostsIps" style="font-size:12px;opacity:.75;text-align:right">待检测</div></div>
@@ -1328,7 +1333,7 @@ async function cfgLoad(){
     _spNote={};(Array.isArray(d.speed_targets)?d.speed_targets:[]).forEach(t=>{if(t&&t.host)_spNote[t.host]=t.note||'';});
     stRender(Array.isArray(d.speed_targets)?d.speed_targets:[]);
     document.getElementById('cfgFeed').checked=!!d.feed_enabled;
-    document.getElementById('cfgXfer').checked=(d.xfer_enabled!==undefined)?!!d.xfer_enabled:!!(d.feed_timer&&d.feed_timer.enabled);
+    document.getElementById('cfgXOn').checked=!!d.xfer_enabled;
     document.getElementById('cfgCd2Url').value=d.cd2_dav_url||'';
     document.getElementById('cfgCd2User').value=d.cd2_user||'';
     document.getElementById('cfgCd2Pass').value='';   // v3.18.0：清空（原完全未处理→保存后残留输入值）
@@ -1336,8 +1341,12 @@ async function cfgLoad(){
     document.getElementById('cfgFeedSrc').value=d.feed_src_dir||'';
     document.getElementById('cfgFeedDst').value=d.feed_dst_dir||'';
     document.getElementById('cfgFeedLim').value=d.feed_batch_limit??500;
-    document.getElementById('cfgFeedIv').value=d.feed_interval_min??0;
-    feedTimerRender(d.feed_timer||null);
+    document.getElementById('cfgXSrc').value=d.xfer_src_dir||'';
+    document.getElementById('cfgXDst').value=d.xfer_dst_dir||'';
+    document.getElementById('cfgXBatch').value=d.xfer_batch_limit??10;
+    document.getElementById('cfgXIv').value=d.xfer_interval_min??30;
+    document.getElementById('cfgXSettle').value=d.xfer_settle_seconds??60;
+    xferStatRender(d.xfer_state||null);
     document.getElementById('cfgFeedSettle').value=d.feed_settle_seconds??300;
     document.getElementById('cfgDstGuard').checked=d.dst_guard_enabled!==false;
     document.getElementById('cfgFeedDelay').value=d.feed_trigger_delay??10;
@@ -1415,14 +1424,18 @@ async function cfgSave(){
         card_links:clCollect(),
         speed_targets:stCollect(),
         feed_enabled:document.getElementById('cfgFeed').checked,
-        xfer_enabled:document.getElementById('cfgXfer').checked,
+        xfer_enabled:document.getElementById('cfgXOn').checked,
         cd2_dav_url:document.getElementById('cfgCd2Url').value.trim(),
         cd2_user:document.getElementById('cfgCd2User').value.trim(),
         cd2_pass:document.getElementById('cfgCd2Pass').value||undefined,
         feed_src_dir:document.getElementById('cfgFeedSrc').value.trim(),
         feed_dst_dir:document.getElementById('cfgFeedDst').value.trim(),
         feed_batch_limit:+document.getElementById('cfgFeedLim').value||500,
-        feed_interval_min:Math.max(0,+document.getElementById('cfgFeedIv').value||0),
+        xfer_src_dir:document.getElementById('cfgXSrc').value.trim(),
+        xfer_dst_dir:document.getElementById('cfgXDst').value.trim(),
+        xfer_batch_limit:Math.max(1,+document.getElementById('cfgXBatch').value||10),
+        xfer_interval_min:Math.max(0,+document.getElementById('cfgXIv').value||0),
+        xfer_settle_seconds:Math.max(0,+document.getElementById('cfgXSettle').value||0),
         feed_settle_seconds:+document.getElementById('cfgFeedSettle').value||0,
         dst_guard_enabled:document.getElementById('cfgDstGuard').checked,
         feed_trigger_delay:Math.max(0,+document.getElementById('cfgFeedDelay').value||0),
@@ -1750,10 +1763,10 @@ async function pollLoop(){try{await refresh();}catch(e){}scheduleNext();}
 cfgLoadSpeed();
 /* v3.18.25 定时转移：状态行 + 立即执行 */
 function _fmtTs(ts){if(!ts)return '—';const d=new Date(ts*1000);const p=n=>String(n).padStart(2,'0');return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;}
-function feedTimerRender(t){
-  const el=document.getElementById('feedTimerStat');if(!el)return;
+function xferStatRender(t){
+  const el=document.getElementById('xferStat');if(!el)return;
   if(!t){el.textContent='—';return;}
-  const map={ok:'成功',empty:'源目录为空',settle:'静置保护中（写入未完成）',busy:'上一轮进行中',skip:'全部跳过（源已不存在）',fail:'失败（见推送）',err:'源目录不可读',off:'开关未开'};
+  const map={ok:'成功',empty:'源目录为空',settle:'静置保护中（写入未完成）',busy:'上一轮进行中',skip:'全部跳过（源已不存在）',fail:'失败（见推送）',err:'源目录不可读',nocfg:'未配置源/目标目录',samecfg:'源与目标相同',off:'开关未开'};
   const parts=[];
   if(t.running)parts.push('⏳ 正在转移');
   else if(t.enabled===false)parts.push('定时转移开关已关闭');
@@ -1761,14 +1774,16 @@ function feedTimerRender(t){
   else if(t.interval_min>0)parts.push('定时已启动');
   else parts.push('未开启定时');
   if(t.last_ts)parts.push('上次 '+_fmtTs(t.last_ts)+' · '+(map[t.last_status]||t.last_status||'—'));
-  if(t.paused==='push')parts.push('（推送总闸关闭，已暂停）');
+  const c=t.last_counts||{};
+  if(c.total)parts.push('上批 '+c.dirs+' 夹 + '+c.files+' 文件');
+  if(t.last_error)parts.push('错误：'+String(t.last_error).slice(0,60));
   el.textContent=parts.join('｜');
 }
-async function feedRunNow(){
-  const b=document.getElementById('btnFeedRun');
+async function xferRunNow(){
+  const b=document.getElementById('btnXferRun');
   if(b){b.disabled=true;b.textContent='已提交…';}
   try{
-    const r=await fetch('/api/feed-run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const r=await fetch('/api/xfer-run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     const d=await r.json();
     if(d.ok){toast(d.msg||'已开始转移','ok');setTimeout(cfgLoad,4000);}
     else toast(d.err||'无法执行','bad');
