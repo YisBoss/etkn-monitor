@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.24 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.27 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
