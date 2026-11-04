@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.24 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.18.25 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -645,9 +645,11 @@ html[data-theme="light"] .card::after{
           <span class="sub" style="align-self:center">列表为空=不测速不推送；代理留空=直连</span></div></div></div>
         <div class="setgroup" data-g="4" onclick="tglGroup(this)">【喂料】<span class="tgl">▶</span></div>
         <div class="setrow"><label>自动喂料<span class="why">清空提醒后自动分批转移，经 CD2 WebDAV 通道</span></label><label class="switch"><input type="checkbox" id="cfgFeed"><span class="slider"></span></label></div>
-        <div class="setrow"><label>喂料源目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
-        <div class="setrow"><label>喂料目标目录<span class="why">CD2 路径</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
-        <div class="setrow"><label>每批上限<span class="why">剧夹与散文件按个数累加</span></label><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"></div>
+        <div class="setrow"><label>原文件夹（115）<span class="why">CD2 WebDAV 路径，要搬走的文件/文件夹放这里</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
+        <div class="setrow"><label>目标文件夹（115）<span class="why">CD2 WebDAV 路径，转移目的地</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
+        <div class="setrow"><label>每次转移总数<span class="why">文件夹 + 文件合计计数（例：3 个文件夹 + 4 个文件 = 7）</span></label><div class="setbox"><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"><span class="sub">项 / 批</span></div></div>
+        <div class="setrow"><label>定时转移间隔<span class="why">每 N 分钟自动搬一批（0=不定时，只在整理清空后触发）</span></label><div class="setbox"><input type="number" id="cfgFeedIv" min="0" style="max-width:120px"><span class="sub">分钟</span><button class="act" id="btnFeedRun" onclick="feedRunNow()">立即转移一次</button></div></div>
+        <div class="setrow"><label>定时转移状态<span class="why">最近一次结果 / 下一轮时间</span></label><div id="feedTimerStat" class="sub" style="text-align:right">—</div></div>
         <div class="setrow"><label>喂料静置保护<span class="why">最近 N 秒内还在变动的夹/文件本轮不搬，防搬半截（0=关）</span></label><input type="number" id="cfgFeedSettle" min="0" style="max-width:120px"></div>
         <div class="setrow"><label>待整理目录守卫<span class="why">有人直接往待整理目录丢文件时自动触发整理（兜底）</span></label><label class="switch"><input type="checkbox" id="cfgDstGuard"><span class="slider"></span></label></div>
         <div class="setrow"><label>喂料转移后延迟秒数<span class="why">隔 N 秒触发整理，0=立即</span></label><input type="number" id="cfgFeedDelay" min="0" style="max-width:120px"></div>
@@ -934,6 +936,9 @@ function spSelfHtml(s){
     parts.push(c.connected?'中心已连接':'中心未连接');
     parts.push(c.signing_online?'签名在线':`签名异常${c.reason?'（'+esc(c.reason)+'）':''}`);
     if(c.heartbeat)parts.push('心跳 '+esc(c.heartbeat));
+    const l=c.link;
+    if(l&&l.ms!=null)parts.push(`中心链路 ${l.ms}ms${l.status?'（'+l.status+'）':''}${l.ok?'':' · '+esc(l.verdict||'异常')}`);
+    else if(l)parts.push('中心链路 '+esc(l.verdict||'未测'));
     if(c.offline_seconds!=null&&c.limit_seconds)
       parts.push(`本周离线 ${(c.offline_seconds/3600).toFixed(1)}/${(c.limit_seconds/3600)}h`);
   }
@@ -1329,6 +1334,8 @@ async function cfgLoad(){
     document.getElementById('cfgFeedSrc').value=d.feed_src_dir||'';
     document.getElementById('cfgFeedDst').value=d.feed_dst_dir||'';
     document.getElementById('cfgFeedLim').value=d.feed_batch_limit??500;
+    document.getElementById('cfgFeedIv').value=d.feed_interval_min??0;
+    feedTimerRender(d.feed_timer||null);
     document.getElementById('cfgFeedSettle').value=d.feed_settle_seconds??300;
     document.getElementById('cfgDstGuard').checked=d.dst_guard_enabled!==false;
     document.getElementById('cfgFeedDelay').value=d.feed_trigger_delay??10;
@@ -1412,6 +1419,7 @@ async function cfgSave(){
         feed_src_dir:document.getElementById('cfgFeedSrc').value.trim(),
         feed_dst_dir:document.getElementById('cfgFeedDst').value.trim(),
         feed_batch_limit:+document.getElementById('cfgFeedLim').value||500,
+        feed_interval_min:Math.max(0,+document.getElementById('cfgFeedIv').value||0),
         feed_settle_seconds:+document.getElementById('cfgFeedSettle').value||0,
         dst_guard_enabled:document.getElementById('cfgDstGuard').checked,
         feed_trigger_delay:Math.max(0,+document.getElementById('cfgFeedDelay').value||0),
@@ -1737,6 +1745,32 @@ async function pollLoop(){try{await refresh();}catch(e){}scheduleNext();}
 /* v2.9.2.11：首屏「测速结果」卡原本永远空白——cfgLoadSpeed() 只在进「任务统计」页
    或手动测速后才被调用，page1 的 kSp 一直没人填。这里补一次首屏加载。 */
 cfgLoadSpeed();
+/* v3.18.25 定时转移：状态行 + 立即执行 */
+function _fmtTs(ts){if(!ts)return '—';const d=new Date(ts*1000);const p=n=>String(n).padStart(2,'0');return `${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;}
+function feedTimerRender(t){
+  const el=document.getElementById('feedTimerStat');if(!el)return;
+  if(!t){el.textContent='—';return;}
+  const map={ok:'成功',empty:'源目录为空',settle:'静置保护中（写入未完成）',busy:'上一轮进行中',skip:'全部跳过（源已不存在）',fail:'失败（见推送）',err:'源目录不可读',off:'开关未开'};
+  const parts=[];
+  if(t.running)parts.push('⏳ 正在转移');
+  else if(t.interval_min>0&&t.next_ts)parts.push('下一轮 '+_fmtTs(t.next_ts));
+  else if(t.interval_min>0)parts.push('定时已启动');
+  else parts.push('未开启定时');
+  if(t.last_ts)parts.push('上次 '+_fmtTs(t.last_ts)+' · '+(map[t.last_status]||t.last_status||'—'));
+  if(t.paused==='push')parts.push('（推送总闸关闭，已暂停）');
+  el.textContent=parts.join('｜');
+}
+async function feedRunNow(){
+  const b=document.getElementById('btnFeedRun');
+  if(b){b.disabled=true;b.textContent='已提交…';}
+  try{
+    const r=await fetch('/api/feed-run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d=await r.json();
+    if(d.ok){toast(d.msg||'已开始转移','ok');setTimeout(cfgLoad,4000);}
+    else toast(d.err||'无法执行','bad');
+  }catch(e){toast('请求失败：'+String(e).slice(0,50),'bad');}
+  finally{if(b){b.disabled=false;b.textContent='立即转移一次';}}
+}
 setgApply();                 // v2.9.16：设置分组默认全部收起
 renderTaskCenter();          // v2.9.10：任务中心（两页各渲染一份，目录来自 /api/task-catalog）
 loadTaskCatalog();           // 拉取与企微菜单同源的 5 分类目录后重渲染

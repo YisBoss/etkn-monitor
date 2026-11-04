@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.24 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.25 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.24'
+VERSION = 'v3.18.25'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -205,7 +205,8 @@ SETTINGS_DEFAULTS = {
     'feed_enabled': False,         # 自动喂料开关（默认关）
     'feed_src_dir': '/115/自动整理入库',                                   # 源目录（CD2 WebDAV 路径）
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
-    'feed_batch_limit': 500,       # 每批文件夹上限（v2.8.6：一个剧夹=1 项，整夹转移）
+    'feed_batch_limit': 500,       # 每批上限（文件夹+散文件合计；一个剧夹=1 项，整夹转移）
+    'feed_interval_min': 0,        # v3.18.25 定时转移：每 N 分钟自动执行一次（0=不定时）
     # v3.18.19：喂料静置保护——源目录条目最近 N 秒内还在变动就先不搬（防搬半截）
     # MoviePilot 等工具「先建目录再写文件」，写入中途整夹 MOVE 会把它写崩。
     'feed_settle_seconds': 300,
@@ -393,6 +394,7 @@ def settings_load():
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
               'backlog_threshold', 'speed_threshold_ms',
               'stall_threshold_min', 'stall_repeat_min', 'feed_batch_limit',
+              'feed_settle_seconds', 'feed_interval_min',
               'relay_min_quota'):        # v2.9.20
         try:
             v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
@@ -2525,6 +2527,59 @@ def _feed_loop() -> None:
                 print(f'[feed_loop] 兜底轮询补跑喂料成功（上次喂料 {_bt}）', flush=True)
         except Exception as e:                 # 兜底线程绝不允许因单次异常退出
             print(f'[feed_loop] 兜底轮询异常：{type(e).__name__}: {e}', flush=True)
+
+
+# ============ v3.18.25 定时转移（四栏设置：原目录/目标目录/每批总数/间隔分钟） ============
+_feed_timer_state = {'last': 0.0, 'next': 0.0, 'last_status': '', 'paused_note': ''}
+
+
+def _feed_timer_loop() -> None:
+    """定时转移：按「间隔分钟」周期性调用 _feed_run，把源目录里的文件夹+散文件
+    按「每批上限」合计口径搬到目标目录（复用 CD2 WebDAV 通道与静置保护）。
+
+    与 _feed_loop（事件驱动 + 整理空档兜底）互补：
+      * _feed_loop 只在 ETKN 整理队列清空时喂料；
+      * 本线程不管整理队列，到点就搬——用户明确要「定时多久转移一次」的固定节奏。
+    安全约束（与喂料一致，绝不放松）：
+      ① feed_enabled 关闭 / 间隔为 0 → 不动作；
+      ② 上一轮还在搬（_feed_state['moving']）→ 本轮跳过，不并发；
+      ③ 静置保护 feed_settle_seconds 照常生效，防把正在写入的夹搬半截；
+      ④ 推送总闸关闭时只记日志不搬（_feed_run 内部闸门），避免「有动作没通知」。
+    """
+    while True:
+        time.sleep(20)
+        try:
+            iv = max(0, int(SETTINGS.get('feed_interval_min') or 0))
+            if not iv or not SETTINGS.get('feed_enabled'):
+                if _feed_timer_state['next']:
+                    _feed_timer_state['next'] = 0.0
+                    _feed_timer_state['paused_note'] = ''
+                continue
+            now = time.time()
+            if not _feed_timer_state['next']:
+                _feed_timer_state['next'] = now + iv * 60
+                print('[feed_timer] 定时转移已启动：每 %d 分钟一批' % iv, flush=True)
+                continue
+            if now < _feed_timer_state['next']:
+                continue
+            if _feed_state.get('moving'):
+                continue                      # 上一轮还在搬，下个 tick 再判
+            if not SETTINGS.get('push_enabled'):
+                _feed_timer_state['next'] = now + 60
+                if _feed_timer_state['paused_note'] != 'push':
+                    _feed_timer_state['paused_note'] = 'push'
+                    print('[feed_timer] 推送总闸关闭，定时转移暂停', flush=True)
+                continue
+            _feed_timer_state['paused_note'] = ''
+            st = _feed_run(force=True, quiet_empty=True)
+            _feed_timer_state['last'] = time.time()
+            _feed_timer_state['last_status'] = st
+            _feed_timer_state['next'] = _feed_timer_state['last'] + iv * 60
+            print('[feed_timer] 定时转移执行完毕：%s，下一轮 %s'
+                  % (st, datetime.fromtimestamp(_feed_timer_state['next'], TZ).strftime('%H:%M:%S')),
+                  flush=True)
+        except Exception as e:                 # 兜底线程绝不允许因单次异常退出
+            print('[feed_timer] 定时转移异常：%s: %s' % (type(e).__name__, e), flush=True)
 
 
 # ============ v2.7 静止告警自动处置（只 restart etkn，禁重建） ============
@@ -4729,7 +4784,28 @@ def etkn_self_probe() -> dict:
         'remaining_seconds': av.get('remaining_seconds'),
         'limit_seconds': av.get('limit_seconds'),
     }
+    # v3.18.25：中心域名链路实测——「ETKN 自身」原来只有本机接口耗时与状态位，
+    # 中心域名慢/走错出口时本机接口依然几十毫秒、状态位还可能滞后一轮。这里用与
+    # 测速表同一套 WS 升级探测（101=通、404=出口不对、403=身份被拒），把真实链路补进来。
     c = out['center']
+    _cu = c.get('center_url') or ''
+    try:
+        _ch = urllib.parse.urlsplit(_cu).hostname or ''
+    except Exception:
+        _ch = ''
+    if _ch:
+        try:
+            _px, _via = _speedtest_proxy(_ch, 'etkn')
+            _ih, _wh, _ie = _etkn_identity()
+            _lr = speedtest_one(_ch, timeout=8.0, proxy=_px, path='/api/v1/control/ws',
+                                probe='ws', headers=_wh)
+            out['center']['link'] = {'host': _ch, 'ms': _lr.get('total_ms'),
+                                     'status': _lr.get('status'),
+                                     'ok': bool(_lr.get('verdict_ok')),
+                                     'verdict': _lr.get('verdict') or '', 'via': _via}
+        except Exception as exc:
+            out['center']['link'] = {'host': _ch, 'ms': None, 'status': None, 'ok': False,
+                                     'verdict': '探测失败：%s' % str(exc)[:60], 'via': ''}
     if c['banned']:
         out['verdict'] = '账号已被封禁'
     elif not c['configured']:
@@ -5475,6 +5551,12 @@ class Handler(BaseHTTPRequestHandler):
         d['wecom_last'] = dict(_wecom_last)      # 最近一次企微发送结果（设置页回显）
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
+        d['feed_timer'] = {'interval_min': int(SETTINGS.get('feed_interval_min') or 0),
+                           'next_ts': float(_feed_timer_state.get('next') or 0),
+                           'last_ts': float(_feed_timer_state.get('last') or 0),
+                           'last_status': _feed_timer_state.get('last_status') or '',
+                           'paused': _feed_timer_state.get('paused_note') or '',
+                           'running': bool(_feed_state.get('moving'))}
         d['settings_path'] = SETTINGS_PATH
         if extra:
             d.update(extra)
@@ -5502,6 +5584,7 @@ class Handler(BaseHTTPRequestHandler):
                       ('speed_threshold_ms', 1000),
                       ('stall_threshold_min', 1), ('stall_repeat_min', 5),
                       ('feed_batch_limit', 1), ('feed_trigger_delay', 0),
+                      ('feed_settle_seconds', 0), ('feed_interval_min', 0),
                       ('loop_prepare_max', 2), ('loop_repeat_min', 10)):   # v3.18.9 空转阈值
             if k in b:
                 try:
@@ -5665,6 +5748,22 @@ class Handler(BaseHTTPRequestHandler):
             record_push('test', text, ok, err)
             return self._send(200, json.dumps({'ok': ok, 'err': err, 'channels': chs},
                                               ensure_ascii=False).encode())
+        if p == '/api/feed-run':          # v3.18.25：定时转移「立即执行一次」
+            if not SETTINGS.get('feed_enabled'):
+                return self._send(200, json.dumps({'ok': False, 'err': '「自动喂料」未开启'}, ensure_ascii=False).encode())
+            if _feed_state.get('moving'):
+                return self._send(200, json.dumps({'ok': False, 'err': '上一轮转移还在进行中'}, ensure_ascii=False).encode())
+            def _w():
+                try:
+                    st = _feed_run(force=True, quiet_empty=False)
+                    _feed_timer_state['last'] = time.time()
+                    _feed_timer_state['last_status'] = st
+                    iv = max(0, int(SETTINGS.get('feed_interval_min') or 0))
+                    _feed_timer_state['next'] = (_feed_timer_state['last'] + iv * 60) if iv else 0.0
+                except Exception as e:
+                    _feed_timer_state['last_status'] = 'error:' + str(e)[:60]
+            threading.Thread(target=_w, daemon=True).start()
+            return self._send(200, json.dumps({'ok': True, 'msg': '已开始转移，完成会推送通知'}, ensure_ascii=False).encode())
         if p == '/api/wecom-menu':        # v2.9.5：一键下发/覆盖自定义菜单
             ok, msg = wecom_menu_apply()
             return self._send(200, json.dumps({'ok': ok, 'msg': msg,
@@ -5955,6 +6054,7 @@ def main():
     threading.Thread(target=_dayweek_loop, daemon=True).start()  # v2.8.15c 今日/本周后台重建
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
+    threading.Thread(target=_feed_timer_loop, daemon=True).start()  # v3.18.25 定时转移
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（默认 1h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
