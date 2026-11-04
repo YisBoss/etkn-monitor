@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.25 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.18.26 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -99,7 +99,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.25'
+VERSION = 'v3.18.26'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -207,6 +207,9 @@ SETTINGS_DEFAULTS = {
     'feed_dst_dir': '/115/媒体库-ETKN/待整理目录',                         # 目标目录（CD2 WebDAV 路径）
     'feed_batch_limit': 500,       # 每批上限（文件夹+散文件合计；一个剧夹=1 项，整夹转移）
     'feed_interval_min': 0,        # v3.18.25 定时转移：每 N 分钟自动执行一次（0=不定时）
+    # v3.18.26：定时转移独立开关——只管「定时转移」这条线程，与「自动喂料（清空后触发）」
+    # 互不影响：xfer_enabled=关 时定时线程完全不动作，feed_enabled 仍然照旧工作。
+    'xfer_enabled': False,
     # v3.18.19：喂料静置保护——源目录条目最近 N 秒内还在变动就先不搬（防搬半截）
     # MoviePilot 等工具「先建目录再写文件」，写入中途整夹 MOVE 会把它写崩。
     'feed_settle_seconds': 300,
@@ -388,7 +391,7 @@ def settings_load():
             SETTINGS[_k] = ''
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
               'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-              'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
+              'trigger_enabled', 'feed_enabled', 'xfer_enabled', 'auto_restart_enabled', 'hosts_enabled',
               'relay_enabled'):          # v2.9.20
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
@@ -2367,7 +2370,7 @@ def _cd2_probe_reason(src: str) -> str:
     return '原因：' + _cd2_reason_of(s, b)
 
 
-def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
+def _feed_run(force: bool = False, quiet_empty: bool = False, gate: str = 'feed') -> str:
     """喂料主流程：扫描→计划→转移→触发原生整理。
     转移失败/触发失败→飞书告警卡片；空源目录→飞书提示。全程忙锁+冷却。
 
@@ -2378,8 +2381,19 @@ def _feed_run(force: bool = False, quiet_empty: bool = False) -> str:
                       清空=新批次起点必须立即喂；兜底防的是与事件双触发重复，
                       由忙锁+last_run 双保险兜住）
     quiet_empty=True  源目录为空时不推卡（兜底轮询每 150s 就扫一次，推卡会刷屏）
+    gate='feed'       开关闸门口径（v3.18.26 定时转移独立开关）：
+                      'feed'=看 feed_enabled（清空事件驱动/兜底轮询）；
+                      'xfer'=看 xfer_enabled（定时转移线程）；
+                      'any' =两者任一开启即可（设置页「立即转移一次」）。
+                      无论哪个口径，push_enabled 总闸关闭都不动作。
     返回值仅供 _feed_loop 记日志用，其它调用点忽略。"""
-    if not (SETTINGS['push_enabled'] and SETTINGS['feed_enabled']):
+    if not SETTINGS['push_enabled']:
+        return 'off'
+    if gate == 'feed' and not SETTINGS.get('feed_enabled'):
+        return 'off'
+    if gate == 'xfer' and not SETTINGS.get('xfer_enabled'):
+        return 'off'
+    if gate == 'any' and not (SETTINGS.get('feed_enabled') or SETTINGS.get('xfer_enabled')):
         return 'off'
     if _feed_state['moving'] or (not force and time.time() - _feed_state['last_run'] < 120):
         return 'busy'                  # 忙锁 + 2 分钟冷却（清空重试窗口内不重复进）
@@ -2541,7 +2555,8 @@ def _feed_timer_loop() -> None:
       * _feed_loop 只在 ETKN 整理队列清空时喂料；
       * 本线程不管整理队列，到点就搬——用户明确要「定时多久转移一次」的固定节奏。
     安全约束（与喂料一致，绝不放松）：
-      ① feed_enabled 关闭 / 间隔为 0 → 不动作；
+      ① xfer_enabled 关闭 / 间隔为 0 → 不动作（v3.18.26 起独立开关，
+         与「自动喂料 feed_enabled」互不影响）；
       ② 上一轮还在搬（_feed_state['moving']）→ 本轮跳过，不并发；
       ③ 静置保护 feed_settle_seconds 照常生效，防把正在写入的夹搬半截；
       ④ 推送总闸关闭时只记日志不搬（_feed_run 内部闸门），避免「有动作没通知」。
@@ -2550,7 +2565,7 @@ def _feed_timer_loop() -> None:
         time.sleep(20)
         try:
             iv = max(0, int(SETTINGS.get('feed_interval_min') or 0))
-            if not iv or not SETTINGS.get('feed_enabled'):
+            if not iv or not SETTINGS.get('xfer_enabled'):
                 if _feed_timer_state['next']:
                     _feed_timer_state['next'] = 0.0
                     _feed_timer_state['paused_note'] = ''
@@ -2571,7 +2586,7 @@ def _feed_timer_loop() -> None:
                     print('[feed_timer] 推送总闸关闭，定时转移暂停', flush=True)
                 continue
             _feed_timer_state['paused_note'] = ''
-            st = _feed_run(force=True, quiet_empty=True)
+            st = _feed_run(force=True, quiet_empty=True, gate='xfer')
             _feed_timer_state['last'] = time.time()
             _feed_timer_state['last_status'] = st
             _feed_timer_state['next'] = _feed_timer_state['last'] + iv * 60
@@ -5552,6 +5567,7 @@ class Handler(BaseHTTPRequestHandler):
         d['wecom_menu_last'] = dict(_wecom_menu_last)   # v2.9.7 最近一次菜单下发结果
         d['wecom_callback_path'] = '/wecom/callback'
         d['feed_timer'] = {'interval_min': int(SETTINGS.get('feed_interval_min') or 0),
+                           'enabled': bool(SETTINGS.get('xfer_enabled')),
                            'next_ts': float(_feed_timer_state.get('next') or 0),
                            'last_ts': float(_feed_timer_state.get('last') or 0),
                            'last_status': _feed_timer_state.get('last_status') or '',
@@ -5574,7 +5590,7 @@ class Handler(BaseHTTPRequestHandler):
         for k in ('push_enabled', 'feishu_enabled', 'alert_500_enabled', 'alert_speed_enabled',
                   'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-                  'trigger_enabled', 'feed_enabled', 'auto_restart_enabled', 'hosts_enabled',
+                  'trigger_enabled', 'feed_enabled', 'xfer_enabled', 'auto_restart_enabled', 'hosts_enabled',
                   'wecom_enabled',
                   'alert_loop_enabled', 'auto_cancel_enabled'):   # v3.18.9 空转告警/自动取消
             if k in b:
@@ -5749,13 +5765,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, json.dumps({'ok': ok, 'err': err, 'channels': chs},
                                               ensure_ascii=False).encode())
         if p == '/api/feed-run':          # v3.18.25：定时转移「立即执行一次」
-            if not SETTINGS.get('feed_enabled'):
-                return self._send(200, json.dumps({'ok': False, 'err': '「自动喂料」未开启'}, ensure_ascii=False).encode())
+            # v3.18.26：手动入口对两个开关都放行（自动喂料 / 定时转移任一开启即可）
+            if not (SETTINGS.get('feed_enabled') or SETTINGS.get('xfer_enabled')):
+                return self._send(200, json.dumps({'ok': False, 'err': '「自动喂料」与「定时转移」都未开启'}, ensure_ascii=False).encode())
             if _feed_state.get('moving'):
                 return self._send(200, json.dumps({'ok': False, 'err': '上一轮转移还在进行中'}, ensure_ascii=False).encode())
             def _w():
                 try:
-                    st = _feed_run(force=True, quiet_empty=False)
+                    st = _feed_run(force=True, quiet_empty=False, gate='any')
                     _feed_timer_state['last'] = time.time()
                     _feed_timer_state['last_status'] = st
                     iv = max(0, int(SETTINGS.get('feed_interval_min') or 0))

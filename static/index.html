@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.25 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.18.26 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -648,7 +648,8 @@ html[data-theme="light"] .card::after{
         <div class="setrow"><label>原文件夹（115）<span class="why">CD2 WebDAV 路径，要搬走的文件/文件夹放这里</span></label><input type="text" id="cfgFeedSrc" style="max-width:340px" placeholder="/115/自动整理入库"></div>
         <div class="setrow"><label>目标文件夹（115）<span class="why">CD2 WebDAV 路径，转移目的地</span></label><input type="text" id="cfgFeedDst" style="max-width:340px" placeholder="/115/媒体库-ETKN/待整理目录"></div>
         <div class="setrow"><label>每次转移总数<span class="why">文件夹 + 文件合计计数（例：3 个文件夹 + 4 个文件 = 7）</span></label><div class="setbox"><input type="number" id="cfgFeedLim" min="1" style="max-width:120px"><span class="sub">项 / 批</span></div></div>
-        <div class="setrow"><label>定时转移间隔<span class="why">每 N 分钟自动搬一批（0=不定时，只在整理清空后触发）</span></label><div class="setbox"><input type="number" id="cfgFeedIv" min="0" style="max-width:120px"><span class="sub">分钟</span><button class="act" id="btnFeedRun" onclick="feedRunNow()">立即转移一次</button></div></div>
+        <div class="setrow"><label>定时转移开关<span class="why">只控制下面的定时转移，与上面的自动喂料互不影响</span></label><label class="switch"><input type="checkbox" id="cfgXfer"><span class="slider"></span></label></div>
+        <div class="setrow"><label>定时转移间隔<span class="why">每 N 分钟自动搬一批（0=不定时；开关关掉时本项不生效）</span></label><div class="setbox"><input type="number" id="cfgFeedIv" min="0" style="max-width:120px"><span class="sub">分钟</span><button class="act" id="btnFeedRun" onclick="feedRunNow()">立即转移一次</button></div></div>
         <div class="setrow"><label>定时转移状态<span class="why">最近一次结果 / 下一轮时间</span></label><div id="feedTimerStat" class="sub" style="text-align:right">—</div></div>
         <div class="setrow"><label>喂料静置保护<span class="why">最近 N 秒内还在变动的夹/文件本轮不搬，防搬半截（0=关）</span></label><input type="number" id="cfgFeedSettle" min="0" style="max-width:120px"></div>
         <div class="setrow"><label>待整理目录守卫<span class="why">有人直接往待整理目录丢文件时自动触发整理（兜底）</span></label><label class="switch"><input type="checkbox" id="cfgDstGuard"><span class="slider"></span></label></div>
@@ -1327,6 +1328,7 @@ async function cfgLoad(){
     _spNote={};(Array.isArray(d.speed_targets)?d.speed_targets:[]).forEach(t=>{if(t&&t.host)_spNote[t.host]=t.note||'';});
     stRender(Array.isArray(d.speed_targets)?d.speed_targets:[]);
     document.getElementById('cfgFeed').checked=!!d.feed_enabled;
+    document.getElementById('cfgXfer').checked=(d.xfer_enabled!==undefined)?!!d.xfer_enabled:!!(d.feed_timer&&d.feed_timer.enabled);
     document.getElementById('cfgCd2Url').value=d.cd2_dav_url||'';
     document.getElementById('cfgCd2User').value=d.cd2_user||'';
     document.getElementById('cfgCd2Pass').value='';   // v3.18.0：清空（原完全未处理→保存后残留输入值）
@@ -1413,6 +1415,7 @@ async function cfgSave(){
         card_links:clCollect(),
         speed_targets:stCollect(),
         feed_enabled:document.getElementById('cfgFeed').checked,
+        xfer_enabled:document.getElementById('cfgXfer').checked,
         cd2_dav_url:document.getElementById('cfgCd2Url').value.trim(),
         cd2_user:document.getElementById('cfgCd2User').value.trim(),
         cd2_pass:document.getElementById('cfgCd2Pass').value||undefined,
@@ -1753,6 +1756,7 @@ function feedTimerRender(t){
   const map={ok:'成功',empty:'源目录为空',settle:'静置保护中（写入未完成）',busy:'上一轮进行中',skip:'全部跳过（源已不存在）',fail:'失败（见推送）',err:'源目录不可读',off:'开关未开'};
   const parts=[];
   if(t.running)parts.push('⏳ 正在转移');
+  else if(t.enabled===false)parts.push('定时转移开关已关闭');
   else if(t.interval_min>0&&t.next_ts)parts.push('下一轮 '+_fmtTs(t.next_ts));
   else if(t.interval_min>0)parts.push('定时已启动');
   else parts.push('未开启定时');
