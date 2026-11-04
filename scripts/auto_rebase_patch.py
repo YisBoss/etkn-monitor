@@ -22,6 +22,17 @@ ETKN 补丁自动 rebase 脚本 (v4: 支持 shared_pool / repository / watchlist
 """
 import subprocess, sys, hashlib, re, os, datetime, tempfile, shutil, py_compile
 
+# 部署者本机代理（服务共享中心用）。仓库里不写死任何 IP/域名：
+# 需要时设 EM_SHARED_PROXY=http://<路由器>:7890，本机由宿主脚本自行提供。
+SHARED_PROXY = os.environ.get('EM_SHARED_PROXY', '')
+
+
+def _proxy_line() -> str:
+    if not SHARED_PROXY:
+        return ''
+    return ("        session.proxies = {'http': '%s', 'https': '%s'}\n" % (SHARED_PROXY, SHARED_PROXY))
+
+
 ETKN_DIR = '/vol1/1000/docker/etkn'
 ETKN_IMAGE_TAG = 'hbq0405/etkn:latest'
 CHECK_SH = '/vol1/1000/docker/etkn-monitor/scripts/etkn-patch-check.sh'
@@ -48,6 +59,26 @@ def extract_from_image(mount_path: str) -> str:
     if r.returncode != 0:
         raise RuntimeError(f'提取 {mount_path} 失败: {r.stderr.strip()[:200]}')
     return r.stdout
+
+
+def _refresh_orig(mount_path: str, dest: str, image_id: str | None = None) -> str:
+    """按当前镜像（优先 image_id，避免 tag 漂移）刷新 .orig 基准文件。
+
+    生成器风格的 rebase 函数都读 .orig，基准必须来自正在运行的镜像，否则镜像更新后
+    补丁会基于旧原版生成，把上游修复静默盖掉（upstream_* 自检项就是为此设的）。
+    """
+    ref = image_id or ETKN_IMAGE_TAG
+    r = subprocess.run(
+        ['docker', 'run', '--rm', '--entrypoint', 'cat', ref, mount_path],
+        capture_output=True, text=True, timeout=90
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        raise RuntimeError(f'从镜像 {ref} 提取 {mount_path} 失败: {(r.stderr or "")[:200]}')
+    content = r.stdout
+    with open(dest, 'w') as f:
+        f.write(content)
+    log(f'  基准已刷新 {os.path.basename(dest)} ({len(content)} 字符, 源 {ref[:19]})')
+    return content
 
 
 def validate_python_code(content: str):
@@ -97,17 +128,6 @@ def _center_session():
     return session
 
 '''
-
-
-# 部署者本机代理（服务共享中心用）。仓库里不写死任何 IP/域名：
-# 需要时设 EM_SHARED_PROXY=http://<路由器>:7890，本机由宿主脚本自行提供。
-SHARED_PROXY = os.environ.get('EM_SHARED_PROXY', '')
-
-
-def _proxy_line() -> str:
-    if not SHARED_PROXY:
-        return ''
-    return ("        session.proxies = {'http': '%s', 'https': '%s'}\n" % (SHARED_PROXY, SHARED_PROXY))
 
 
 def rebase_shared_pool(image_id: str):
@@ -355,17 +375,26 @@ def apply_repository_optimizations(code: str) -> str:
 
 
 def rebase_repository(image_id: str):
+    """repository 补丁：三方合并到当前镜像原版（生成器负责刷新基准/合并/校验/写边车）。
+
+    2026-10-26 之前这里是 extract → optimize_library_status_counts → patch diff，
+    upstream 1.3.68 把同样的 SQL 段改写成 inline coalesce 后，patch 直接报
+    "Reversed or previously applied"，我们误以为"上游已内建"就停用了补丁，
+    结果订阅中心从 1.3s/7.3s 退化到 22s/39s。改用 gen_repository_patch.py 的
+    三方合并（base/orig/ours），冲突只在"我们整段取代上游连接条件"时自动收口。
+    """
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/repository.py'
-    orig = extract_from_image(mount_path)
-    with open(os.path.join(ETKN_DIR, 'repository.py.orig'), 'w') as f:
-        f.write(orig)
-
-    patched = optimize_library_status_counts(orig)
-    patched = apply_repository_optimizations(patched)
-
-    validate_python_code(patched)
-    patch_path = os.path.join(ETKN_DIR, 'repository_patch.py')
-    write_patch_and_sidecar(patch_path, patched)
+    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'repository.py.orig'), image_id)
+    script = os.path.join(ETKN_DIR, 'gen_repository_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-6:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('repository 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:800])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'repository_patch.py.md5')):
+        raise RuntimeError('repository_patch.py.md5 未生成')
 
 
 def rebase_watchlist(image_id: str):
@@ -448,6 +477,10 @@ except Exception as _exc:
 
 def rebase_p115_workflow(image_id: str):
     """第 4 个补丁：p115_workflow.py 整理结果瘦身（生成器负责抽取/断言/校验/写边车）。"""
+    # [2026-10-26] 生成器读的是 p115_workflow.py.orig，必须先按当前镜像刷新基准，
+    # 否则镜像更新后补丁会基于旧原版生成，把上游修复静默盖掉。
+    _refresh_orig('/usr/local/lib/python3.12/site-packages/etk_vnext/modules/organize/p115_workflow.py',
+                  os.path.join(ETKN_DIR, 'p115_workflow.py.orig'), image_id)
     script = os.path.join(ETKN_DIR, 'gen_p115_organize_patch.py')
     if not os.path.exists(script):
         raise RuntimeError(f'缺生成器 {script}')
@@ -460,9 +493,29 @@ def rebase_p115_workflow(image_id: str):
         raise RuntimeError('p115_workflow_patch.py.md5 未生成')
 
 
+def rebase_ai_service(image_id: str):
+    """第 13 个补丁：ai_translation/service.py 的 AI 调用熔断（坏通道把批量整理拖成小时级卡死）。"""
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/ai_translation/service.py'
+    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'ai_service.py.orig'), image_id)
+
+    script = os.path.join(ETKN_DIR, 'gen_ai_service_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('ai_service 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'ai_service_patch.py.md5')):
+        raise RuntimeError('ai_service_patch.py.md5 未生成')
+
+
 def rebase_center_control(image_id: str):
     """第 5 个补丁：center_control.py 控制长连接健壮性（退避压到 3s + 断线原因可诊断）。"""
-    script = os.path.join(ETKN_DIR, 'gen_center_control_patch.py')
+    # [2026-10-26] 同 p115_workflow：生成器读 center_control.py.orig，必须先按当前镜像刷新基准。
+    _refresh_orig('/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/center_control.py',
+                  os.path.join(ETKN_DIR, 'center_control.py.orig'), image_id)
+    script = os.path.join(ETKN_DIR, 'gen_center_control_patch_v2.py')
     if not os.path.exists(script):
         raise RuntimeError(f'缺生成器 {script}')
     r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
@@ -505,7 +558,7 @@ def rebase_screenshots(image_id: str):
     with open(os.path.join(ETKN_DIR, 'screenshots.py.orig'), 'w') as f:
         f.write(orig)
 
-    script = os.path.join(ETKN_DIR, 'gen_screenshots_patch.py')
+    script = os.path.join(ETKN_DIR, 'gen_screenshots_patch_v2.py')
     if not os.path.exists(script):
         raise RuntimeError(f'缺生成器 {script}')
     r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
@@ -517,19 +570,210 @@ def rebase_screenshots(image_id: str):
         raise RuntimeError('screenshots_patch.py.md5 未生成')
 
 
+def rebase_shared_register(image_id: str):
+    """第 11 个补丁：platform/tasks/handlers.py 的共享登记 409 幂等（追剧刷新每轮必红的根因）。"""
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/platform/tasks/handlers.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'handlers.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_shared_register_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script, image_id], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('shared_register 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    sidecar = os.path.join(ETKN_DIR, 'shared_register_patch.py.md5')
+    if not os.path.exists(sidecar):
+        raise RuntimeError('shared_register_patch.py.md5 未生成')
+
+    # handlers.py 是 3.12 语法，宿主 3.11 编译不了 → 在容器镜像里做语法校验
+    chk = extract_from_image('/usr/local/lib/python3.12/site-packages/etk_vnext/platform/tasks/handlers.py')
+    del chk  # 仅确认可抽取
+
+
+def rebase_virtual_library(image_id: str):
+    """第 8 个补丁：virtual_library/service.py 筛选项 SQL 聚合 + 缓存（弹窗 27s 的元凶）。"""
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/virtual_library/service.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'virtual_library_service.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_virtual_library_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('virtual_library 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'virtual_library_service_patch.py.md5')):
+        raise RuntimeError('virtual_library_service_patch.py.md5 未生成')
+
+
+def rebase_placeholders(image_id: str):
+    """第 9 个补丁：virtual_library/placeholders.py 榜单占位符查询（1262 条榜单 >240s → 1.4s）。"""
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/virtual_library/placeholders.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'placeholders.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_placeholders_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('placeholders 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'placeholders_patch.py.md5')):
+        raise RuntimeError('placeholders_patch.py.md5 未生成')
+
+
+def rebase_media_server(image_id: str):
+    """第 10 个补丁：api/media_server.py 榜单库（占位条目）列表页改用紧凑行（5s/页 → 1s 级）。"""
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/api/media_server.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'media_server.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_media_server_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('media_server 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'media_server_patch.py.md5')):
+        raise RuntimeError('media_server_patch.py.md5 未生成')
+
+
+def rebase_catalog(image_id: str):
+    """第 11 个补丁：modules/media_server/catalog.py 两处「规划器悬崖」慢查询。
+
+    ① child_count()：`EXISTS OR EXISTS` 退化成 items×item_versions 全量 Hash Join（0.4s/条，
+       列表 60 条 22.6s → library-21/26 打不开）② collections() 系：成员数逐行相关子查询，
+       1037 个合集 36.2s（客户端每次取 Views 卡住）。改为 LATERAL 索引探测 + 一次聚合。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/media_server/catalog.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'catalog.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_catalog_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-8:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('catalog 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'catalog_patch.py.md5')):
+        raise RuntimeError('catalog_patch.py.md5 未生成')
+
+
+def rebase_media_dedup(image_id: str):
+    """第 14 个补丁：modules/media_dedup/service.py「指定媒体库」范围 + 大结果集内存优化。
+
+    ① fix18：主查询不再取分析大字段（353k 行 × 33KB ≈ 11GB，会把容器 OOM），改为分组后按需补取。
+    ② fix19：「指定媒体库」配置之前读了却从未使用 → 设了范围仍然全库扫描、跨库判重
+       （4094 组，3.5 分钟）；现在解析成 media.items.id 集合并写进 WHERE
+       （范围=1 个库时 13945 项 24 秒）。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/media_dedup/service.py'
+    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'media_dedup_service.orig'), image_id)
+
+    script = os.path.join(ETKN_DIR, 'gen_media_dedup_patch_v2.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-8:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('media_dedup 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'media_dedup_patch.py.md5')):
+        raise RuntimeError('media_dedup_patch.py.md5 未生成')
+
+
+def rebase_deep_delete(image_id: str):
+    """第 15 个补丁：modules/emby_events/deep_delete.py 领取队列不再逐行回填 GB 级 payload。
+
+    联动删除 386 项时，due_delete_files 的 RETURNING 把 5MB 的 snapshot.payload 挂在每一行上，
+    合计 1.9GB JSONB，psycopg 展开成 Python 对象可达数 GB → mem-watch 在 9GB 处重启容器 →
+    删除事务在 processing 被打断（attempt_count 还是 0）→ 下一轮重新领取同一批 → 死循环，
+    任务中心永远「运行中」。改为 RETURNING queue.*，再按 token 一次性取回 payload。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/emby_events/deep_delete.py'
+    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'deep_delete.py.orig'), image_id)
+
+    script = os.path.join(ETKN_DIR, 'gen_deep_delete_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-8:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('deep_delete 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'deep_delete_patch.py.md5')):
+        raise RuntimeError('deep_delete_patch.py.md5 未生成')
+
+
+def _container_started_at() -> str:
+    r = subprocess.run(['docker', 'inspect', 'etkn', '--format', '{{.State.StartedAt}}'],
+                       capture_output=True, text=True, timeout=20)
+    return (r.stdout or '').strip()
+
+
 def restart_etkn():
-    subprocess.run(['docker', 'restart', 'etkn'], timeout=30)
+    # 有挂载项变更时必须走 compose 重建；但 compose 在配置无变化时只会打印
+    # "Container etkn  Running" 而**不重启**——此时进程里还是旧模块，自检却因为读文件
+    # 而显示全绿（2026-10-26 踩到：rebase 重新生成了 center_control 补丁但没重启）。
+    # 因此比较 StartedAt：没变就显式 docker restart。
+    before = _container_started_at()
+    r = subprocess.run(
+        ['docker', 'compose', '-p', 'etkn', 'up', '-d', '--no-deps', 'etkn'],
+        cwd=ETKN_DIR, capture_output=True, text=True, timeout=300,
+    )
+    if r.returncode != 0:
+        log('  compose 重建失败，回退 docker restart: ' + ((r.stderr or r.stdout) or '').strip()[:400])
+        subprocess.run(['docker', 'restart', 'etkn'], timeout=120)
+        return
+    after = _container_started_at()
+    if after and after == before:
+        log('  compose 未重建（配置无变化），改用 docker restart 让新补丁生效')
+        subprocess.run(['docker', 'restart', 'etkn'], timeout=120)
+    else:
+        log(f'  compose 已重建容器（StartedAt {after}）')
 
 
-def wait_ready(timeout: int = 120):
+def wait_ready(timeout: int = 180):
+    """等容器真正可用：既要求能 exec，也要求 /api/health 返回 ok。
+
+    只 exec md5sum 会在容器重启过程中就返回 True（旧进程还没完全退出），
+    随后的自检于是读到旧状态，看起来像「rebase 成功但没生效」。
+    """
     import time
+    import urllib.request
     t0 = time.time()
     test_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/subscription/watchlist.py'
+    exec_ok = False
     while time.time() - t0 < timeout:
-        r = subprocess.run(['docker', 'exec', 'etkn', 'md5sum', test_path], capture_output=True, text=True)
-        if r.returncode == 0:
-            log(f'容器就绪（{int(time.time() - t0)}s）')
-            return True
+        if not exec_ok:
+            r = subprocess.run(['docker', 'exec', 'etkn', 'md5sum', test_path],
+                               capture_output=True, text=True)
+            exec_ok = r.returncode == 0
+        if exec_ok:
+            try:
+                with urllib.request.urlopen('http://127.0.0.1:5257/api/health', timeout=3) as resp:
+                    body = resp.read().decode('utf-8', 'ignore')
+                if '"ok"' in body:
+                    log(f'容器就绪（{int(time.time() - t0)}s，health ok）')
+                    return True
+            except Exception:
+                pass
         time.sleep(3)
     log(f'⚠️ 容器 {timeout}s 内未就绪')
     return False
@@ -549,26 +793,60 @@ def main():
     image_id = get_image_id()
     log(f'当前容器镜像: {image_id}')
 
-    log('rebase 1/7: shared_pool.py …')
+    log('前置 0/14: 数据库运行参数哨兵（role/库级退化参数、jit）…')
+    try:
+        r = subprocess.run([sys.executable, '/vol1/1000/docker/etkn/db_setting_guard.py'],
+                           capture_output=True, text=True, timeout=180)
+        out = (r.stdout or '').strip()
+        log('  参数> ' + (out[:400] or '(无输出)'))
+        if r.returncode != 0:
+            log('  ⚠️ 参数哨兵返回非零，继续后续 rebase')
+    except Exception as exc:
+        log(f'  ⚠️ 参数哨兵调用失败：{exc}')
+
+    log('rebase 1/15: shared_pool.py …')
     rebase_shared_pool(image_id)
 
-    log('rebase 2/7: repository.py …')
+    log('rebase 2/15: repository.py …（三方合并：library_base 预计算 + dm_by_item）')
     rebase_repository(image_id)
 
-    log('rebase 3/7: watchlist.py …')
+    log('rebase 3/15: watchlist.py …')
     rebase_watchlist(image_id)
 
-    log('rebase 4/7: p115_workflow.py …')
+    log('rebase 4/15: p115_workflow.py …')
     rebase_p115_workflow(image_id)
 
-    log('rebase 5/7: center_control.py …')
+    log('rebase 5/15: center_control.py …')
     rebase_center_control(image_id)
 
-    log('rebase 6/7: play_pool.py …')
-    rebase_play_pool(image_id)
+    log('rebase 6/15: play_pool.py —— 镜像 b5fffdcc 上游已内建跨会话复用，本补丁停用，跳过')
 
-    log('rebase 7/7: screenshots.py …')
+    log('rebase 7/15: screenshots.py …')
     rebase_screenshots(image_id)
+
+    log('rebase 8/15: virtual_library/service.py …')
+    rebase_virtual_library(image_id)
+
+    log('rebase 9/15: virtual_library/placeholders.py …')
+    rebase_placeholders(image_id)
+
+    log('rebase 10/15: api/media_server.py …')
+    rebase_media_server(image_id)
+
+    log('rebase 11/15: modules/media_server/catalog.py …（child_count / collections 规划器悬崖）')
+    rebase_catalog(image_id)
+
+    log('rebase 12/15: platform/tasks/handlers.py …')
+    rebase_shared_register(image_id)
+
+    log('rebase 13/15: ai_translation/service.py …（AI 调用熔断）')
+    rebase_ai_service(image_id)
+
+    log('rebase 14/15: modules/media_dedup/service.py …（「指定媒体库」范围 + 大结果集内存）')
+    rebase_media_dedup(image_id)
+
+    log('rebase 15/15: modules/emby_events/deep_delete.py …（联动删除队列不再逐行回填 GB 级 payload）')
+    rebase_deep_delete(image_id)
 
     log('重启 etkn 容器 …')
     restart_etkn()
