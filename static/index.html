@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.18.27 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.18.28 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -1469,6 +1469,7 @@ async function cfgSave(){
       document.getElementById('cfgWxAes').value='';document.getElementById('cfgWxAes').placeholder=d.wecom_aeskey_set?'已保存（留空=不修改）':'留空=不修改';
       wxSyncCb();
       renderMenuLast(d.wecom_menu_last||{});
+      xferStatRender(d.xfer_state||null);   // v3.18.28：保存后立即回显真实调度状态（原来只在进页面时渲染一次，开了开关仍显示「已关闭」）
       {const el=document.getElementById('cfgAccessPass');if(el){el.value='';el.placeholder=d.access_set?'已启用（留空=不修改）':'留空=不修改';}
        const st=document.getElementById('accessState');if(st)st.textContent=d.access_enabled?'当前：已启用':'当前：未启用（面板公开可访问）';}
       if(d.menu_msg)toast(d.menu_msg,d.menu_msg.indexOf('失败')>=0?'bad':'ok');
@@ -1779,6 +1780,14 @@ function xferStatRender(t){
   if(t.last_error)parts.push('错误：'+String(t.last_error).slice(0,60));
   el.textContent=parts.join('｜');
 }
+/* v3.18.28：设置页可见时每 60 秒只刷新这一行状态（不动任何输入框），
+   避免「定时转移」跑了一轮后这里还停在打开页面那一刻。 */
+setInterval(async()=>{try{
+  const el=document.getElementById('xferStat');
+  if(!el||!el.offsetParent)return;
+  const d=await (await fetch('/api/settings',{cache:'no-store'})).json();
+  xferStatRender(d.xfer_state||null);
+}catch(e){}},60000);
 async function xferRunNow(){
   const b=document.getElementById('btnXferRun');
   if(b){b.disabled=true;b.textContent='已提交…';}
