@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.18.28 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.19.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -27,6 +27,7 @@ v2.1/v2.2/v2.3 功能（重试收敛/手动整理/异常明细/手动操作卡/�
 import base64
 import hashlib
 import hmac
+import http.cookiejar
 import json
 import os
 import re
@@ -99,7 +100,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.18.28'
+VERSION = 'v3.19.0'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -215,6 +216,13 @@ SETTINGS_DEFAULTS = {
     'xfer_batch_limit': 10,        # 每次转移数量（文件夹+散文件合计，独立于 feed_batch_limit）
     'xfer_interval_min': 30,       # 转移间隔（分钟，独立于喂料）
     'xfer_settle_seconds': 60,     # 静置保护：最近 N 秒仍在变动的条目本轮跳过（0=不保护）
+    # ---- v3.19.0 qB 队列轮换（内置线程，替代 Hermes 定时任务；零 token） ----
+    'qb_enabled': False,           # qB 轮换开关（默认关，配好地址账号再开）
+    'qb_host': '',                 # qB WebUI 地址，如 http://192.168.1.10:8080
+    'qb_user': 'admin',            # qB 用户名
+    'qb_pass': '',                 # qB 密码（设置页留空=不修改）
+    'qb_slots': 10,                # 同时下载槽位（写入 qB 的 max_active_downloads）
+    'qb_interval_min': 5,          # 轮换间隔（分钟）
     # v3.18.19：喂料静置保护——源目录条目最近 N 秒内还在变动就先不搬（防搬半截）
     # MoviePilot 等工具「先建目录再写文件」，写入中途整夹 MOVE 会把它写崩。
     'feed_settle_seconds': 300,
@@ -361,7 +369,7 @@ def _auth_check(handler, parsed) -> bool:
 # （CD2 密码变 *** 时，喂料报的是「源目录不可读，请检查 /cloud115 挂载」——查错了方向）。
 # 这里把「哪些是密钥」「什么值算掩码」集中定义，保存与载入两端各兜一道。
 _SECRET_KEYS = ('cd2_pass', 'router_pass', 'wecom_secret', 'wecom_token', 'wecom_aeskey',
-                'relay_admin_pass', 'relay_api_key', 'access_pass')
+                'relay_admin_pass', 'relay_api_key', 'access_pass', 'qb_pass')
 _MASK_RE = re.compile(r'^\s*[*·•]{3,}\s*$')     # *** / ****** / ··· 这类占位串
 
 
@@ -396,7 +404,8 @@ def settings_load():
             SETTINGS[_k] = ''
     for k in ('push_enabled', 'alert_500_enabled', 'alert_speed_enabled', 'alert_backlog_enabled',
               'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-              'trigger_enabled', 'feed_enabled', 'xfer_enabled', 'auto_restart_enabled', 'hosts_enabled',
+              'trigger_enabled', 'feed_enabled', 'xfer_enabled', 'qb_enabled',
+              'auto_restart_enabled', 'hosts_enabled',
               'relay_enabled'):          # v2.9.20
         SETTINGS[k] = bool(SETTINGS[k])
     for k in ('interval_500_min', 'interval_speed_min', 'count_500_threshold',
@@ -404,6 +413,7 @@ def settings_load():
               'stall_threshold_min', 'stall_repeat_min', 'feed_batch_limit',
               'feed_settle_seconds',
               'xfer_batch_limit', 'xfer_interval_min', 'xfer_settle_seconds',
+              'qb_slots', 'qb_interval_min',
               'relay_min_quota'):        # v2.9.20
         try:
             v = type(SETTINGS_DEFAULTS[k])(SETTINGS[k])
@@ -2688,6 +2698,254 @@ def _xfer_loop() -> None:
                   flush=True)
         except Exception as e:                 # 线程绝不允许因单次异常退出
             print('[xfer] 异常：%s: %s' % (type(e).__name__, e), flush=True)
+
+
+# ============ v3.19.0 qB 队列轮换（内置调度，替代外部脚本 + Hermes 定时任务） ============
+# 为什么搬进来：轮换逻辑本身只是几个本地 HTTP 调用，挂在 Hermes cron 上每轮都要
+# 唤醒一次 AI 上下文（消耗中转池额度=token），且状态散落在 em 之外看不见。
+# 现在由 em 自己的线程按「轮换间隔」跑，零 token、面板里能看到上一轮做了什么。
+# 硬边界：
+#   ① 只停「自己停过并打 AUTO_RETRY 标签」的种子，用户手动停的一概不碰；
+#   ② 只改 max_active_downloads（槽位）与必要的 max_active_torrents 下限，不碰下载/上传限速；
+#   ③ 槽位与间隔都从设置页读，改完下一轮自动按新值走，不需要重启。
+# 轮换策略（与 qb_queue_rotator.py 一致）：
+#   - 活跃但 dlspeed≈0：有种子等 15 分钟、连种子都没有等 5 分钟 → 停 + 打 AUTO_RETRY + 12 小时后再试
+#   - 空槽优先补「进度高、做种多、添加早」的排队种子，以及到点重试的 AUTO_RETRY
+_qb_state = {'last': 0.0, 'next': 0.0, 'last_status': '', 'last_error': '',
+             'last_counts': {}, 'running': False}
+_qb_lock = threading.Lock()
+_QB_STATE_FILE = os.path.join(os.path.dirname(SETTINGS_PATH) or '.', 'qb_rotator.json')
+_QB_RETRY_HOURS = 12          # 让位后多久再试
+_QB_STALL_MIN = 15            # 有种子但持续无速度多少分钟让位
+_QB_STALL_FAST_MIN = 5        # 连种子都没有，多少分钟就让位
+
+
+def _qb_cfg() -> dict:
+    """读取 qB 轮换参数（全部来自设置页）。"""
+    return {
+        'enabled': bool(SETTINGS.get('qb_enabled')),
+        'host': (SETTINGS.get('qb_host') or '').strip().rstrip('/'),
+        'user': (SETTINGS.get('qb_user') or '').strip(),
+        'pwd': SETTINGS.get('qb_pass') or '',
+        'slots': max(1, min(200, int(SETTINGS.get('qb_slots') or 10))),
+        'iv': max(1, min(1440, int(SETTINGS.get('qb_interval_min') or 5))),
+    }
+
+
+def _qb_load_state() -> dict:
+    try:
+        with open(_QB_STATE_FILE, encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _qb_save_state(st: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_QB_STATE_FILE) or '.', exist_ok=True)
+        tmp = _QB_STATE_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(st, f, ensure_ascii=False)
+        os.replace(tmp, _QB_STATE_FILE)
+    except Exception as e:
+        print('[qb] 状态写入失败：%s: %s' % (type(e).__name__, e), flush=True)
+
+
+class _QbClient:
+    """极简 qBittorrent WebAPI 客户端（cookie 会话，Referer 必须带，否则 403）。"""
+
+    def __init__(self, host: str, user: str = '', pwd: str = ''):
+        self.host = host
+        self.user = user
+        self.pwd = pwd
+        self.cj = http.cookiejar.CookieJar()
+        self.op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cj))
+
+    def call(self, path: str, data=None, raw: bool = False, timeout: int = 20):
+        body = urllib.parse.urlencode(data).encode() if data else None
+        req = urllib.request.Request(self.host + path, data=body,
+                                     headers={'Referer': self.host,
+                                              'User-Agent': 'etkn-monitor'})
+        with self.op.open(req, timeout=timeout) as r:
+            txt = r.read().decode('utf-8', 'replace')
+        if raw:
+            return txt
+        try:
+            return json.loads(txt)
+        except Exception:
+            return txt
+
+    def login(self) -> None:
+        r = self.call('/api/v2/auth/login',
+                      {'username': self.user, 'password': self.pwd}, raw=True, timeout=15)
+        if str(r).strip() not in ('Ok.', ''):
+            raise RuntimeError('qB 登录失败（账号或密码不对）')
+        # 新版 qB 登录成功可能不返回 Ok.，用一次带认证的读取确认会话有效
+        v = self.call('/api/v2/app/version', raw=True, timeout=15)
+        if not str(v).strip() or 'Forbidden' in str(v):
+            raise RuntimeError('qB 登录后仍无权限（IP 白名单/端口反代？）')
+
+
+def _qb_push(title: str, lines: list, tcolor: str = 'green') -> None:
+    if not SETTINGS.get('push_enabled'):
+        return
+    try:
+        _alert_push('qb', title, lines, buttons=_card_buttons(), tcolor=tcolor)
+    except Exception as e:
+        print('[qb] 推送失败：%s: %s' % (type(e).__name__, e), flush=True)
+
+
+def _qb_rotate(force: bool = False) -> str:
+    """执行一轮轮换：让位掉无速度的、补满空槽。返回状态码。"""
+    c = _qb_cfg()
+    if not c['host'] or not c['user']:
+        _qb_state['last_error'] = '未配置 qB 地址或账号'
+        return 'nocfg'
+    if _qb_state['running']:
+        return 'busy'
+    if not force and time.time() - float(_qb_state['last'] or 0) < 30:
+        return 'busy'
+    with _qb_lock:
+        if _qb_state['running']:
+            return 'busy'
+        _qb_state['running'] = True
+    try:
+        cli = _QbClient(c['host'], c['user'], c['pwd'])
+        try:
+            cli.login()
+        except Exception as e:
+            _qb_state['last_error'] = str(e)[:120]
+            _qb_state['last_status'] = 'auth'
+            return 'auth'
+
+        # 1) 槽位对齐：只在值不一致时写，避免每轮都改偏好触发 qB 重排
+        prefs = cli.call('/api/v2/app/preferences')
+        if not isinstance(prefs, dict):
+            _qb_state['last_error'] = 'qB 偏好读取失败'
+            return 'error'
+        upd = {}
+        if int(prefs.get('max_active_downloads') or 0) != c['slots']:
+            upd['max_active_downloads'] = c['slots']
+        if int(prefs.get('max_active_torrents') or 0) < c['slots']:
+            # qB 要求 max_active_torrents >= max_active_downloads，否则 setPreferences 直接报错
+            upd['max_active_torrents'] = c['slots'] + 10
+        if upd:
+            cli.call('/api/v2/app/setPreferences',
+                     {'json': json.dumps(upd, separators=(',', ':'))}, raw=True)
+
+        torrents = cli.call('/api/v2/torrents/info')
+        if not isinstance(torrents, list):
+            _qb_state['last_error'] = 'qB 种子列表读取失败'
+            return 'error'
+        now = time.time()
+        st = _qb_load_state()
+        ACT = ('downloading', 'stalledDL', 'forcedDL', 'metaDL')
+        active = [t for t in torrents if t.get('state') in ACT]
+        queued = [t for t in torrents if t.get('state') == 'queuedDL']
+
+        stop_list, start_list = [], []
+        # 2) 让位：活跃但长时间 0 速度
+        for t in active:
+            h = t.get('hash') or ''
+            if not h:
+                continue
+            rec = st.setdefault(h, {})
+            if float(t.get('dlspeed') or 0) > 1024:
+                rec['zero_since'] = None
+                continue
+            if not rec.get('zero_since'):
+                rec['zero_since'] = now
+            no_seed = (int(t.get('num_seeds') or 0) == 0 and float(t.get('progress') or 0) == 0)
+            limit = (_QB_STALL_FAST_MIN if no_seed else _QB_STALL_MIN) * 60
+            if now - float(rec['zero_since']) >= limit:
+                stop_list.append(h)
+                rec['retry_after'] = now + _QB_RETRY_HOURS * 3600
+                rec['zero_since'] = None
+                rec['tries'] = int(rec.get('tries') or 0) + 1
+
+        # 3) 补位：排队 + 到点重试的 AUTO_RETRY，按进度/做种数/添加时间排序
+        free = c['slots'] - (len(active) - len(stop_list))
+        cands = list(queued)
+        for t in torrents:
+            if t.get('state') == 'stoppedDL' and 'AUTO_RETRY' in (t.get('tags') or ''):
+                rec = st.get(t.get('hash') or '', {})
+                if float(rec.get('retry_after') or 0) <= now:
+                    cands.append(t)
+        cands.sort(key=lambda t: (float(t.get('progress') or 0),
+                                  int(t.get('num_seeds') or 0),
+                                  int(t.get('added_on') or 0)), reverse=True)
+        start_list = [t['hash'] for t in cands[:max(0, free)] if t.get('hash')]
+        for h in start_list:
+            st.setdefault(h, {})['retry_after'] = 0
+
+        if stop_list:
+            cli.call('/api/v2/torrents/stop', {'hashes': '|'.join(stop_list)}, raw=True)
+            cli.call('/api/v2/torrents/addTags',
+                     {'hashes': '|'.join(stop_list), 'tags': 'AUTO_RETRY'}, raw=True)
+        if start_list:
+            cli.call('/api/v2/torrents/start', {'hashes': '|'.join(start_list)}, raw=True)
+
+        # 只留最近 7 天还有意义的记录，防止状态文件无限膨胀
+        cutoff = now - 7 * 86400
+        for h in [k for k, v in st.items() if isinstance(v, dict)
+                  and float(v.get('retry_after') or 0) and float(v.get('retry_after') or 0) < cutoff
+                  and not v.get('zero_since')]:
+            st.pop(h, None)
+        _qb_save_state(st)
+
+        counts = {'active': len(active), 'queued': len(queued),
+                  'stop': len(stop_list), 'start': len(start_list), 'slots': c['slots']}
+        _qb_state['last_counts'] = counts
+        _qb_state['last_error'] = ''
+        if stop_list or start_list:
+            _qb_push('🔁 qB 队列轮换',
+                     ['让位停机：%d 个（%d 小时后再试）' % (len(stop_list), _QB_RETRY_HOURS),
+                      '补位启动：%d 个' % len(start_list),
+                      '当前活跃：%d / 槽位 %d，排队 %d'
+                      % (counts['active'] - len(stop_list) + len(start_list), c['slots'], len(queued))])
+            return 'ok'
+        return 'idle'
+    except Exception as e:
+        _qb_state['last_error'] = '%s: %s' % (type(e).__name__, str(e)[:110])
+        _qb_push('⚠️ qB 队列轮换失败', [_qb_state['last_error'],
+                                        '检查设置页【qB 队列轮换】里的地址/账号/密码'],
+                 tcolor='yellow')
+        return 'error'
+    finally:
+        _qb_state['running'] = False
+        _qb_state['last'] = time.time()
+
+
+def _qb_loop() -> None:
+    """按「轮换间隔」执行；开关关 / 未配置 → 空转，不打扰主流程。"""
+    while True:
+        time.sleep(15)
+        try:
+            c = _qb_cfg()
+            if (not c['enabled'] or not c['host'] or not c['user']):
+                if _qb_state['next']:
+                    _qb_state['next'] = 0.0
+                continue
+            now = time.time()
+            if not _qb_state['next']:
+                _qb_state['next'] = now + c['iv'] * 60
+                print('[qb] 队列轮换已启动：每 %d 分钟一轮，槽位 %d，目标 %s'
+                      % (c['iv'], c['slots'], c['host']), flush=True)
+                continue
+            if _qb_state['next'] > now + c['iv'] * 60:      # 间隔改小 → 立即按新节奏
+                _qb_state['next'] = now + c['iv'] * 60
+            if now < _qb_state['next'] or _qb_state['running']:
+                continue
+            st = _qb_rotate(force=True)
+            _qb_state['last_status'] = st
+            _qb_state['next'] = time.time() + c['iv'] * 60
+            if st != 'idle':
+                print('[qb] 轮换结果：%s，下一轮 %s'
+                      % (st, datetime.fromtimestamp(_qb_state['next'], TZ).strftime('%H:%M:%S')),
+                      flush=True)
+        except Exception as e:
+            print('[qb] 异常：%s: %s' % (type(e).__name__, e), flush=True)
 
 
 # ============ v2.7 静止告警自动处置（只 restart etkn，禁重建） ============
@@ -5667,6 +5925,17 @@ class Handler(BaseHTTPRequestHandler):
                            'last_error': _xfer_state.get('last_error') or '',
                            'last_counts': dict(_xfer_state.get('last_counts') or {}),
                            'running': bool(_xfer_state.get('running'))}
+        d['qb_pass_set'] = bool(SETTINGS.get('qb_pass'))
+        d.pop('qb_pass', None)          # v3.19.0：qB 密码永不回传，留空=不修改
+        d['qb_state'] = {'enabled': bool(SETTINGS.get('qb_enabled')),
+                         'interval_min': int(SETTINGS.get('qb_interval_min') or 0),
+                         'slots': int(SETTINGS.get('qb_slots') or 0),
+                         'next_ts': float(_qb_state.get('next') or 0),
+                         'last_ts': float(_qb_state.get('last') or 0),
+                         'last_status': _qb_state.get('last_status') or '',
+                         'last_error': _qb_state.get('last_error') or '',
+                         'last_counts': dict(_qb_state.get('last_counts') or {}),
+                         'running': bool(_qb_state.get('running'))}
         d['settings_path'] = SETTINGS_PATH
         if extra:
             d.update(extra)
@@ -5684,7 +5953,8 @@ class Handler(BaseHTTPRequestHandler):
         for k in ('push_enabled', 'feishu_enabled', 'alert_500_enabled', 'alert_speed_enabled',
                   'alert_backlog_enabled',
                   'alert_stall_enabled', 'stall_grace_enabled', 'alert_finish_enabled',
-                  'trigger_enabled', 'feed_enabled', 'xfer_enabled', 'auto_restart_enabled', 'hosts_enabled',
+                  'trigger_enabled', 'feed_enabled', 'xfer_enabled', 'qb_enabled',
+                  'auto_restart_enabled', 'hosts_enabled',
                   'wecom_enabled',
                   'alert_loop_enabled', 'auto_cancel_enabled'):   # v3.18.9 空转告警/自动取消
             if k in b:
@@ -5697,6 +5967,7 @@ class Handler(BaseHTTPRequestHandler):
                       ('feed_settle_seconds', 0),
                       ('xfer_batch_limit', 1), ('xfer_interval_min', 0),
                       ('xfer_settle_seconds', 0),
+                      ('qb_slots', 1), ('qb_interval_min', 1),
                       ('loop_prepare_max', 2), ('loop_repeat_min', 10)):   # v3.18.9 空转阈值
             if k in b:
                 try:
@@ -5718,6 +5989,23 @@ class Handler(BaseHTTPRequestHandler):
         for k in ('xfer_src_dir', 'xfer_dst_dir'):      # v3.18.27：独立路径，允许清空
             if k in b and isinstance(b[k], str):
                 SETTINGS[k] = b[k].strip().rstrip('/')
+        # v3.19.0 qB 队列轮换：地址/账号直写，密码「空或掩码=保留原值」
+        _qb_touched = any(k in b for k in ('qb_enabled', 'qb_host', 'qb_user', 'qb_pass',
+                                           'qb_slots', 'qb_interval_min'))
+        if 'qb_host' in b and isinstance(b['qb_host'], str):
+            _qh = b['qb_host'].strip().rstrip('/')
+            if not _qh or _qh.startswith('http://') or _qh.startswith('https://'):
+                SETTINGS['qb_host'] = _qh
+            else:
+                _warn_items.append('qB 地址需以 http:// 或 https:// 开头，已忽略')
+        if 'qb_user' in b and isinstance(b['qb_user'], str):
+            SETTINGS['qb_user'] = b['qb_user'].strip()
+        if b.get('qb_pass'):
+            _qp = str(b['qb_pass'])
+            if '***' not in _qp:
+                SETTINGS['qb_pass'] = _qp
+        if _qb_touched:
+            _qb_state['next'] = 0.0      # 参数改了就重新起算，不必等旧周期走完
         if 'cd2_dav_url' in b and isinstance(b['cd2_dav_url'], str):   # v2.8 CD2 WebDAV
             u = b['cd2_dav_url'].strip().rstrip('/')
             if u and (u.startswith('http://') or u.startswith('https://')):
@@ -5892,6 +6180,21 @@ class Handler(BaseHTTPRequestHandler):
                     print('[xfer-run] 异常：%s: %s' % (type(e).__name__, e), flush=True)
             threading.Thread(target=_wx, daemon=True).start()
             return self._send(200, json.dumps({'ok': True, 'msg': '已开始转移，完成会推送通知'}, ensure_ascii=False).encode())
+        if p == '/api/qb-run':            # v3.19.0：qB 队列轮换「立即轮换一次」
+            c = _qb_cfg()
+            if not c['host'] or not c['user']:
+                return self._send(200, json.dumps({'ok': False, 'err': '请先填写 qB 地址与账号'}, ensure_ascii=False).encode())
+            if _qb_state.get('running'):
+                return self._send(200, json.dumps({'ok': False, 'err': '上一轮轮换还在进行中'}, ensure_ascii=False).encode())
+            def _wq():
+                try:
+                    st = _qb_rotate(force=True)
+                    _qb_state['last_status'] = st
+                except Exception as e:
+                    _qb_state['last_status'] = 'error'
+                    print('[qb-run] 异常：%s: %s' % (type(e).__name__, e), flush=True)
+            threading.Thread(target=_wq, daemon=True).start()
+            return self._send(200, json.dumps({'ok': True, 'msg': '已开始轮换，状态行会显示结果'}, ensure_ascii=False).encode())
         if p == '/api/wecom-menu':        # v2.9.5：一键下发/覆盖自定义菜单
             ok, msg = wecom_menu_apply()
             return self._send(200, json.dumps({'ok': ok, 'msg': msg,
@@ -6183,6 +6486,7 @@ def main():
     threading.Thread(target=_today_done_loop, daemon=True).start()  # v2.8.20b 今日明细重线程
     threading.Thread(target=_feed_loop, daemon=True).start()   # v2.9.3 喂料兜底轮询（修死锁）
     threading.Thread(target=_xfer_loop, daemon=True).start()        # v3.18.27 定时转移（独立）
+    threading.Thread(target=_qb_loop, daemon=True).start()          # v3.19.0 qB 队列轮换（内置）
     threading.Thread(target=_patch_loop, daemon=True).start()   # v2.9.22 ETKN bind-mount 补丁自检（默认 1h）
     port = int(os.environ.get('MONITOR_PORT', '8620'))
     srv = ThreadingHTTPServer(('0.0.0.0', port), Handler)
