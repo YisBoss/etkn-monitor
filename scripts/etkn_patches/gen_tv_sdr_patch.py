@@ -4,11 +4,12 @@
 背景（实测，见 04-文档/ETKN-TV-0.1.99-HDR黑屏-给作者的问题说明-20261109.md）：
   ETKN TV 0.1.x 在起播协商里声明 HevcHdr10 能力，服务端据此保留 HDR 直出（p010le、不 tone-map）；
   但客户端播放时从不请求 HDR 数据空间（logcat 全程无 u2EotfValue、无 bRequestingDataSpace），
-  电视面板停在 SDR 制式 → 有声音、有字幕、有弹幕，画面全黑。原画与降码率转码都黑。
+  电视面板停在 SDR 制式 → 用户手动降到 1080p 也还是 10bit HDR 流 → 依旧黑。
+  本补丁只保证「客户端自己请求转码」时输出 SDR，不改变原画直连决策。
 
 本补丁只在「UA 命中 ETKN TV」且「片源是 HDR/DV」时生效，全部可用环境变量关闭：
-  A. Reason=user_bitrate 分支不再无条件返回 DirectPlay，落下去走转码；
-  B. hdr_capabilities 置空 → choose_profile 判定 preserve_hdr=False → tone-map 出 8bit bt709 SDR。
+  只改一处：hdr_capabilities 置空 → choose_profile 判定 preserve_hdr=False → tone-map 出 8bit bt709 SDR。
+  绝不改动 DirectPlay 判定：原画该直连还是直连（用户要求原画播放，不许被偷偷转码）。
 
 开关：ETKN_TV_FORCE_SDR=1（默认开）/ 0|off|false|no 关闭。
 """
@@ -55,15 +56,6 @@ def _hdr_source(source) -> bool:
 
 {HELPER_ANCHOR}'''
 
-OLD_A = """        if payload.Bitrate == 0 or not exceeds_bitrate and not exceeds_size:
-            return {'DirectPlay': True}
-"""
-NEW_A = f"""        if payload.Bitrate == 0 or not exceeds_bitrate and not exceeds_size:
-            # {MARK}: ETKN TV 播 HDR/DV 原画会黑屏（客户端不请求 HDR 制式）→ 拒绝 DirectPlay，落到下面转码
-            if not (_force_sdr() and _etkn_tv_ua(request) and _hdr_source(source)):
-                return {{'DirectPlay': True}}
-"""
-
 OLD_B = "        hdr_capabilities = [c.model_dump() for c in payload.HevcHdr10] if hevc_supported else []\n"
 NEW_B = (
     "        hdr_capabilities = [c.model_dump() for c in payload.HevcHdr10] if hevc_supported else []\n"
@@ -88,7 +80,6 @@ def main():
 
     text = sub_once(src, IMPORT_ANCHOR, IMPORT_NEW, 'import os')
     text = sub_once(text, HELPER_ANCHOR, HELPER_NEW, 'helpers')
-    text = sub_once(text, OLD_A, NEW_A, 'user_bitrate DirectPlay')
     text = sub_once(text, OLD_B, NEW_B, 'hdr_capabilities')
 
     for must in ('_etkn_tv_ua', '_force_sdr', '_hdr_source', 'ETKN_TV_FORCE_SDR'):

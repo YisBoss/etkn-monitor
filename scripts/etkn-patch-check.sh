@@ -129,7 +129,7 @@ check_one "$ETKN_DIR/catalog_patch.py" "$SITE/modules/media_server/catalog.py" "
 check_one "$ETKN_DIR/shared_register_patch.py" "$SITE/platform/tasks/handlers.py" "$(expect_of "$ETKN_DIR/shared_register_patch.py" ba5de21a5a26b14c59bd37db69319072)" shared_register
 check_one "$ETKN_DIR/media_dedup_patch.py" "$SITE/modules/media_dedup/service.py" "$(expect_of "$ETKN_DIR/media_dedup_patch.py" 3f288d436648f38b3dce3af8601e01c8)" media_dedup
 check_one "$ETKN_DIR/deep_delete_patch.py" "$SITE/modules/emby_events/deep_delete.py" "$(expect_of "$ETKN_DIR/deep_delete_patch.py" 34d07f1fa1bd9715b16537e14de28617)" deep_delete
-check_one "$ETKN_DIR/tv_transcode_patch.py" "$SITE/api/tv_transcode.py" "$(expect_of "$ETKN_DIR/tv_transcode_patch.py" 97d1d749ea887ea33ba433eb5dfa2294)" tv_sdr
+check_one "$ETKN_DIR/tv_transcode_patch.py" "$SITE/api/tv_transcode.py" "$(expect_of "$ETKN_DIR/tv_transcode_patch.py" 12c6e0ecffc5d77ff94ba895b196f6ff)" tv_sdr
 check_db_params
 
 # 上游一致性：镜像内原版 vs 我们保存的 .orig 基准（改了就必须 rebase）
