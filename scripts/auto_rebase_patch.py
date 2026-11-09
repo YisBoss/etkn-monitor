@@ -20,18 +20,7 @@ ETKN 补丁自动 rebase 脚本 (v4: 支持 shared_pool / repository / watchlist
      - 启动阶段动态提升 maintenance 运行时优先级至 4（与 background 同级），根治 115 物理删除与共享登记饿死
      - reconcile_library_state 查询优化: 使用 ep_by_season 预聚合与 media_item_id 外键直连，单次更新从 75 分钟降至 0.2 秒
 """
-import subprocess, sys, hashlib, re, os, datetime, tempfile, shutil, py_compile
-
-# 部署者本机代理（服务共享中心用）。仓库里不写死任何 IP/域名：
-# 需要时设 EM_SHARED_PROXY=http://<路由器>:7890，本机由宿主脚本自行提供。
-SHARED_PROXY = os.environ.get('EM_SHARED_PROXY', '')
-
-
-def _proxy_line() -> str:
-    if not SHARED_PROXY:
-        return ''
-    return ("        session.proxies = {'http': '%s', 'https': '%s'}\n" % (SHARED_PROXY, SHARED_PROXY))
-
+import subprocess, sys, hashlib, re, os, datetime, tempfile, shutil, py_compile, time
 
 ETKN_DIR = '/vol1/1000/docker/etkn'
 ETKN_IMAGE_TAG = 'hbq0405/etkn:latest'
@@ -44,11 +33,25 @@ def log(msg):
 
 
 def get_image_id():
+    # 容器在崩溃重启/被重建的瞬间 docker inspect 会失败，这里必须重试并回退到镜像名，
+    # 否则会把 image_id 变成字符串 'unknown'，后续 docker run unknown:latest 直接 pull denied。
+    for _ in range(6):
+        r = subprocess.run(
+            ['docker', 'inspect', 'etkn', '--format', '{{.Image}}'],
+            capture_output=True, text=True, timeout=10
+        )
+        value = r.stdout.strip()
+        if r.returncode == 0 and value.startswith('sha256:'):
+            return value[:20]
+        time.sleep(2)
     r = subprocess.run(
-        ['docker', 'inspect', 'etkn', '--format', '{{.Image}}'],
+        ['docker', 'image', 'inspect', ETKN_IMAGE_TAG, '--format', '{{.Id}}'],
         capture_output=True, text=True, timeout=10
     )
-    return r.stdout.strip()[:20] if r.returncode == 0 else 'unknown'
+    value = r.stdout.strip()
+    if r.returncode == 0 and value.startswith('sha256:'):
+        return value[:20]
+    raise RuntimeError('无法确定 ETKN 运行镜像（container etkn / %s 都取不到）' % ETKN_IMAGE_TAG)
 
 
 def extract_from_image(mount_path: str) -> str:
@@ -143,9 +146,9 @@ def rebase_shared_pool(image_id: str):
 
     PATCH1 = (
         '        # [etkn-fix 2026-09-10] 共享中心经 7890 出网并关闭SSL校验(忽略自签证书)。\n'
-        '        # 依据: 中心端域名在 Open-Box 有直连规则, 出口为路由器公网。\n'
+        '        # 依据: Open-Box 对 shared.55565576.xyz 有直连规则, 出口为路由器公网。\n'
         "        session.verify = False\n"
-        + _proxy_line() +
+        "        session.proxies = {'http': 'http://192.168.31.1:7890', 'https': 'http://192.168.31.1:7890'}\n"
         '        import urllib3 as _urllib3\n'
         '        _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)\n'
         '        # [etkn-fix 2026-09-10] 读超时下限钳到 45s 吸收链路抖动。\n'
@@ -157,9 +160,9 @@ def rebase_shared_pool(image_id: str):
 
     PATCH2 = (
         '        # [etkn-fix 2026-09-10] 共享中心经 7890 出网并关闭SSL校验(忽略自签证书)。\n'
-        '        # 依据: 中心端域名在 Open-Box 有直连规则, 出口为路由器公网。\n'
+        '        # 依据: Open-Box 对 shared.55565576.xyz 有直连规则, 出口为路由器公网。\n'
         "        session.verify = False\n"
-        + _proxy_line() +
+        "        session.proxies = {'http': 'http://192.168.31.1:7890', 'https': 'http://192.168.31.1:7890'}\n"
         '        import urllib3 as _urllib3\n'
         '        _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)\n'
     )
@@ -790,7 +793,7 @@ def wait_ready(timeout: int = 180):
             exec_ok = r.returncode == 0
         if exec_ok:
             try:
-                with urllib.request.urlopen('http://127.0.0.1:5257/api/health', timeout=3) as resp:
+                with urllib.request.urlopen('http://127.0.0.1:8097/api/health', timeout=3) as resp:
                     body = resp.read().decode('utf-8', 'ignore')
                 if '"ok"' in body:
                     log(f'容器就绪（{int(time.time() - t0)}s，health ok）')
@@ -865,15 +868,16 @@ def main():
     log('rebase 13/16: ai_translation/service.py …（AI 调用熔断）')
     rebase_ai_service(image_id)
 
-    log('rebase 14/16: modules/media_dedup/service.py …（「指定媒体库」范围 + 大结果集内存）')
-    rebase_media_dedup(image_id)
+    # rebase 14/16（media_dedup / 指定媒体库范围）已于 2026-11-09 退役：
+    # 上游 1.3.78 已用 pg_temp + 服务端游标解决大结果集内存，1.4.3 原生实现「指定媒体库」
+    # （_configured_library_ids + _library_scope_clause），无需再打补丁。函数 rebase_media_dedup 保留做存档。
+    # rebase 14/16: rebase_media_dedup(image_id)
 
     log('rebase 15/16: modules/emby_events/deep_delete.py …（联动删除队列不再逐行回填 GB 级 payload）')
     rebase_deep_delete(image_id)
 
-    log('rebase 16/16: api/tv_transcode.py …（ETKN TV 播 HDR/DV 黑屏 → 强制 SDR 转码）')
-    rebase_tv_sdr(image_id)
-
+    # rebase 16/16（tv_transcode / etkn-fix17 强制 SDR）已于 2026-11-09 按用户要求退役：
+    # 原画必须直连不转码，黑屏改由电视端手动规避。函数 rebase_tv_sdr 保留做存档。
     log('重启 etkn 容器 …')
     restart_etkn()
     wait_ready()

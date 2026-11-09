@@ -127,7 +127,8 @@ check_one "$ETKN_DIR/placeholders_patch.py" "$SITE/modules/virtual_library/place
 check_one "$ETKN_DIR/media_server_patch.py" "$SITE/api/media_server.py" "$(expect_of "$ETKN_DIR/media_server_patch.py" 591bae7f7138dc3e82603281eee8cda6)" media_server
 check_one "$ETKN_DIR/catalog_patch.py" "$SITE/modules/media_server/catalog.py" "$(expect_of "$ETKN_DIR/catalog_patch.py" ed3b28f87b6f88930bab719080663d9e)" catalog
 check_one "$ETKN_DIR/shared_register_patch.py" "$SITE/platform/tasks/handlers.py" "$(expect_of "$ETKN_DIR/shared_register_patch.py" ba5de21a5a26b14c59bd37db69319072)" shared_register
-check_one "$ETKN_DIR/media_dedup_patch.py" "$SITE/modules/media_dedup/service.py" "$(expect_of "$ETKN_DIR/media_dedup_patch.py" 3f288d436648f38b3dce3af8601e01c8)" media_dedup
+# [2026-11-09 退役] media_dedup 补丁：上游 1.4.3 原生支持「指定媒体库」，内存问题 1.3.78 已用 pg_temp+游标解决
+# check_one "$ETKN_DIR/media_dedup_patch.py" "$SITE/modules/media_dedup/service.py" "$(expect_of "$ETKN_DIR/media_dedup_patch.py" 3f288d436648f38b3dce3af8601e01c8)" media_dedup
 check_one "$ETKN_DIR/deep_delete_patch.py" "$SITE/modules/emby_events/deep_delete.py" "$(expect_of "$ETKN_DIR/deep_delete_patch.py" 34d07f1fa1bd9715b16537e14de28617)" deep_delete
 check_db_params
 
@@ -151,7 +152,6 @@ for spec in \
     "$ETKN_DIR/media_server.py.orig|$SITE/api/media_server.py|media_server" \
     "$ETKN_DIR/catalog.py.orig|$SITE/modules/media_server/catalog.py|catalog" \
     "$ETKN_DIR/handlers.py.orig|$SITE/platform/tasks/handlers.py|handlers" \
-    "$ETKN_DIR/media_dedup_service.orig|$SITE/modules/media_dedup/service.py|media_dedup" \
     "$ETKN_DIR/deep_delete.py.orig|$SITE/modules/emby_events/deep_delete.py|deep_delete"
 do
     _orig="${spec%%|*}"; _rest="${spec#*|}"; _path="${_rest%%|*}"; _name="${_rest##*|}"
