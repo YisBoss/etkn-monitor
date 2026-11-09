@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.19.0 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.19.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
   ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
@@ -100,7 +100,7 @@ ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.19.0'
+VERSION = 'v3.19.1'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -2709,13 +2709,14 @@ def _xfer_loop() -> None:
 #   ② 只改 max_active_downloads（槽位）与必要的 max_active_torrents 下限，不碰下载/上传限速；
 #   ③ 槽位与间隔都从设置页读，改完下一轮自动按新值走，不需要重启。
 # 轮换策略（与 qb_queue_rotator.py 一致）：
-#   - 活跃但 dlspeed≈0：有种子等 15 分钟、连种子都没有等 5 分钟 → 停 + 打 AUTO_RETRY + 12 小时后再试
+#   - 活跃但 dlspeed≈0：有种子等 15 分钟、连种子都没有等 5 分钟 → 停 + 打 AUTO_RETRY + 6 小时后再试（反复被让位的退避到 12 小时）
 #   - 空槽优先补「进度高、做种多、添加早」的排队种子，以及到点重试的 AUTO_RETRY
 _qb_state = {'last': 0.0, 'next': 0.0, 'last_status': '', 'last_error': '',
              'last_counts': {}, 'running': False}
 _qb_lock = threading.Lock()
 _QB_STATE_FILE = os.path.join(os.path.dirname(SETTINGS_PATH) or '.', 'qb_rotator.json')
-_QB_RETRY_HOURS = 12          # 让位后多久再试
+_QB_RETRY_HOURS = 6           # 让位后多久再试（首次）
+_QB_RETRY_HOURS_MAX = 12      # 同一部片反复被让位时的退避上限
 _QB_STALL_MIN = 15            # 有种子但持续无速度多少分钟让位
 _QB_STALL_FAST_MIN = 5        # 连种子都没有，多少分钟就让位
 
@@ -2860,9 +2861,10 @@ def _qb_rotate(force: bool = False) -> str:
             limit = (_QB_STALL_FAST_MIN if no_seed else _QB_STALL_MIN) * 60
             if now - float(rec['zero_since']) >= limit:
                 stop_list.append(h)
-                rec['retry_after'] = now + _QB_RETRY_HOURS * 3600
                 rec['zero_since'] = None
                 rec['tries'] = int(rec.get('tries') or 0) + 1
+                hrs = _QB_RETRY_HOURS if rec['tries'] <= 1 else _QB_RETRY_HOURS_MAX
+                rec['retry_after'] = now + hrs * 3600
 
         # 3) 补位：排队 + 到点重试的 AUTO_RETRY，按进度/做种数/添加时间排序
         free = c['slots'] - (len(active) - len(stop_list))
@@ -2900,7 +2902,7 @@ def _qb_rotate(force: bool = False) -> str:
         _qb_state['last_error'] = ''
         if stop_list or start_list:
             _qb_push('🔁 qB 队列轮换',
-                     ['让位停机：%d 个（%d 小时后再试）' % (len(stop_list), _QB_RETRY_HOURS),
+                     ['让位停机：%d 个（首次 %d 小时 / 反复 %d 小时后再试）' % (len(stop_list), _QB_RETRY_HOURS, _QB_RETRY_HOURS_MAX),
                       '补位启动：%d 个' % len(start_list),
                       '当前活跃：%d / 槽位 %d，排队 %d'
                       % (counts['active'] - len(stop_list) + len(start_list), c['slots'], len(queued))])
