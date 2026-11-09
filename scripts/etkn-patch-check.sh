@@ -123,6 +123,7 @@ check_one "$ETKN_DIR/ai_service_patch.py" "$SITE/modules/ai_translation/service.
 check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" 6715fb0ac4fafcb26f479f7e068c137d)" center_control
 check_one "$ETKN_DIR/screenshots_patch.py"   "$SITE/modules/scrape/screenshots.py"      "$(expect_of "$ETKN_DIR/screenshots_patch.py" dcdef9d07a4549cef46ba20de586c22f)" screenshots
 check_one "$ETKN_DIR/virtual_library_service_patch.py" "$SITE/modules/virtual_library/service.py" "$(expect_of "$ETKN_DIR/virtual_library_service_patch.py" dda522b8b8406f8e25e5a9764de9c77c)" virtual_library
+check_one "$ETKN_DIR/nginx_proxy_patch.py" "$SITE/modules/virtual_library/nginx_proxy.py" "$(expect_of "$ETKN_DIR/nginx_proxy_patch.py" 8a1f7c02d8ec63b8bacd2c6b6984a5e0)" nginx_proxy
 check_one "$ETKN_DIR/placeholders_patch.py" "$SITE/modules/virtual_library/placeholders.py" "$(expect_of "$ETKN_DIR/placeholders_patch.py" 3de661889d331cff003a89d4756ab788)" placeholders
 check_one "$ETKN_DIR/media_server_patch.py" "$SITE/api/media_server.py" "$(expect_of "$ETKN_DIR/media_server_patch.py" 591bae7f7138dc3e82603281eee8cda6)" media_server
 check_one "$ETKN_DIR/catalog_patch.py" "$SITE/modules/media_server/catalog.py" "$(expect_of "$ETKN_DIR/catalog_patch.py" ed3b28f87b6f88930bab719080663d9e)" catalog
@@ -148,6 +149,7 @@ for spec in \
     "$ETKN_DIR/center_control.py.orig|$SITE/integrations/center_control.py|center_control" \
     "$ETKN_DIR/screenshots.py.orig|$SITE/modules/scrape/screenshots.py|screenshots" \
     "$ETKN_DIR/virtual_library_service.py.orig|$SITE/modules/virtual_library/service.py|virtual_library" \
+    "$ETKN_DIR/nginx_proxy.py.orig|$SITE/modules/virtual_library/nginx_proxy.py|nginx_proxy" \
     "$ETKN_DIR/placeholders.py.orig|$SITE/modules/virtual_library/placeholders.py|placeholders" \
     "$ETKN_DIR/media_server.py.orig|$SITE/api/media_server.py|media_server" \
     "$ETKN_DIR/catalog.py.orig|$SITE/modules/media_server/catalog.py|catalog" \

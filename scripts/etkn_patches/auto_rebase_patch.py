@@ -133,6 +133,16 @@ def _center_session():
 '''
 
 
+# 需要时设 EM_SHARED_PROXY=http://<路由器>:7890；本机由宿主脚本自行提供，仓库版不含任何私有地址。
+SHARED_PROXY = os.environ.get('EM_SHARED_PROXY', '')
+
+
+def _proxy_line() -> str:
+    if not SHARED_PROXY:
+        return ''
+    return ("        session.proxies = {'http': '%s', 'https': '%s'}\n" % (SHARED_PROXY, SHARED_PROXY))
+
+
 def rebase_shared_pool(image_id: str):
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/integrations/shared_pool.py'
     orig = extract_from_image(mount_path)
@@ -146,9 +156,9 @@ def rebase_shared_pool(image_id: str):
 
     PATCH1 = (
         '        # [etkn-fix 2026-09-10] 共享中心经 7890 出网并关闭SSL校验(忽略自签证书)。\n'
-        '        # 依据: Open-Box 对 shared.55565576.xyz 有直连规则, 出口为路由器公网。\n'
+        '        # 依据: 中心端域名在 Open-Box 有直连规则, 出口为路由器公网。\n'
         "        session.verify = False\n"
-        "        session.proxies = {'http': 'http://192.168.31.1:7890', 'https': 'http://192.168.31.1:7890'}\n"
+        + _proxy_line() +
         '        import urllib3 as _urllib3\n'
         '        _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)\n'
         '        # [etkn-fix 2026-09-10] 读超时下限钳到 45s 吸收链路抖动。\n'
@@ -160,9 +170,9 @@ def rebase_shared_pool(image_id: str):
 
     PATCH2 = (
         '        # [etkn-fix 2026-09-10] 共享中心经 7890 出网并关闭SSL校验(忽略自签证书)。\n'
-        '        # 依据: Open-Box 对 shared.55565576.xyz 有直连规则, 出口为路由器公网。\n'
+        '        # 依据: 中心端域名在 Open-Box 有直连规则, 出口为路由器公网。\n'
         "        session.verify = False\n"
-        "        session.proxies = {'http': 'http://192.168.31.1:7890', 'https': 'http://192.168.31.1:7890'}\n"
+        + _proxy_line() +
         '        import urllib3 as _urllib3\n'
         '        _urllib3.disable_warnings(_urllib3.exceptions.InsecureRequestWarning)\n'
     )
@@ -616,6 +626,30 @@ def rebase_virtual_library(image_id: str):
         raise RuntimeError('virtual_library_service_patch.py.md5 未生成')
 
 
+def rebase_nginx_proxy(image_id: str):
+    """第 17 个补丁：virtual_library/nginx_proxy.py（etkn-fix19 2026-11-09）。
+
+    1.4.3 只对外开 8097，nginx 模板里 `location = / { return 302 /web/; }` 被 nginx
+    绝对化后变成 http://<内网IP>:8097/web/，经反代出去就是 https://<你的域名>:8097/web/
+    （公网 8097 不通）→ 根域名打不开。修法：server 块加 absolute_redirect off / port_in_redirect off。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/virtual_library/nginx_proxy.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'nginx_proxy.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_nginx_proxy_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('nginx_proxy 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'nginx_proxy_patch.py.md5')):
+        raise RuntimeError('nginx_proxy_patch.py.md5 未生成')
+
+
 def rebase_placeholders(image_id: str):
     """第 9 个补丁：virtual_library/placeholders.py 榜单占位符查询（1262 条榜单 >240s → 1.4s）。"""
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/virtual_library/placeholders.py'
@@ -852,6 +886,9 @@ def main():
 
     log('rebase 8/16: virtual_library/service.py …')
     rebase_virtual_library(image_id)
+
+    log('rebase 8b/16: virtual_library/nginx_proxy.py …（反代根路径跳转不带内网端口）')
+    rebase_nginx_proxy(image_id)
 
     log('rebase 9/16: virtual_library/placeholders.py …')
     rebase_placeholders(image_id)

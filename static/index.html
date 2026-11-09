@@ -13,7 +13,7 @@ try{
 </script>
 <style>
 /* ===================================================================
-   ETKN 监控 · 界面 v3.19.1 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
+   ETKN 监控 · 界面 v3.19.2 —— 补丁自检弹窗手机端可滚动 + 修复按钮置顶（Hermes 2026-10-25）
    —— 视觉层全部重做：极光背景 / 玻璃拟态 / 光晕 / 层级与动效。
    —— 契约不变：保留全部类名，且保留 JS 直接引用的 CSS 变量
       （--acc --bad --ok --warn --sub --dim --toast-*-{bg,tx,bd}）。
@@ -1648,9 +1648,10 @@ async function cfgLoadSpeed(){
 /* v2.9.6：通知渠道状态（后端 /api/status 的 notify 字段）——页头徽标 + 系统状态明细行。
    纯展示，不发请求；数据来自后端对设置项的静态判断 + 最近一次企微发送结果回显。 */
 let ETKN_SITE='';                     // ETKN 站点根地址（/api/meta 下发；空=未配置）
+let ETKN_WEB='';                      // ETKN web 客户端地址（含 #/；1.4.3 起前端在 /web/）
 function openEtknSite(){
-  if(!ETKN_SITE){toast('未配置 ETKN 站点地址（.env 里设 ETKN_SITE_URL）','bad');return;}
-  window.open(ETKN_SITE.replace(/\/+$/,'')+'/task-center','_blank');
+  if(!ETKN_WEB){toast('未配置 ETKN 站点地址（.env 里设 ETKN_SITE_URL 或 ETKN_WEB_URL）','bad');return;}
+  window.open(ETKN_WEB,'_blank');
 }
 function notifyText(nt){
   if(!nt||!nt.enabled)return '已静默';
@@ -1696,6 +1697,7 @@ async function refresh(){
       scheduleNext();   // v2.9.1 Bug C：真实轮询间隔到手立即重挂，首轮不等旧间隔
       if(m.version)document.getElementById('roTag').textContent=m.version;  // v2.8.1：版本号跟随 /api/meta
       if(m.etkn_site)ETKN_SITE=m.etkn_site;   // v2.9.6：ETKN 原站地址（「打开 ETKN 原站」按钮用）
+      if(m.etkn_web)ETKN_WEB=m.etkn_web;      // 1.4.3 起按钮开 /web/#/ 前端
     }
     const r=await fetch('/api/status',{cache:'no-store'});
     if(r.status===503){document.getElementById('updated').textContent='首轮采集中…';return}

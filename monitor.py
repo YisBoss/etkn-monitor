@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-etkn-monitor v3.19.1 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
+etkn-monitor v3.19.2 —— ETKN 监控服务（轮询+测速+重试+手动整理+异常明细+双速快照
                         +设置页+飞书Webhook/企业微信应用 双通道告警中心）
 配置全部走环境变量（零密钥，仓库内不含任何私有地址/域名）：
-  ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:5257
+  ETKN_BASE_URL     ETKN 地址        默认 http://127.0.0.1:8097
   ETKN_USERNAME     登录用户名        默认空（部署者自填）
   ETKN_PASSWORD     登录密码          必填（部署者自填，不落盘）
   ETKN_PUBLIC_URL   ETKN 外网入口     默认同 ETKN_BASE_URL（卡片「打开ETKN」按钮）
@@ -46,7 +46,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
-BASE = os.environ.get('ETKN_BASE_URL', 'http://127.0.0.1:5257').rstrip('/')
+BASE = os.environ.get('ETKN_BASE_URL', 'http://127.0.0.1:8097').rstrip('/')
 # 谁打开过面板，就用谁的地址当「面板地址」（内存态，不落盘）。
 # 为什么不靠容器自探：面板跑在 Docker 里时，socket 探到的只能是网桥地址（形如 172.x.x.x），
 # 对用户手机完全不可达 —— 探了等于没探。而从请求的 Host 头学到的，才是用户真正在用的地址。
@@ -97,10 +97,15 @@ def _detect_lan_host() -> str:
 LAN_HOST = os.environ.get('MONITOR_LAN_HOST', '').strip()
 ETKN_PUBLIC_URL = os.environ.get('ETKN_PUBLIC_URL', BASE).rstrip('/')   # 卡片「打开ETKN」按钮（ETKN 主程序外网入口）
 ETKN_SITE_URL = os.environ.get('ETKN_SITE_URL', '').rstrip('/')         # 面板「打开 ETKN 原站」按钮（空=提示未配置）
+# 1.4.3 起 ETKN 前端搬到 /web/（hash 路由），根路径只剩 302。/task-center 在新前端已不存在，
+# 面板按钮改为打开 web 客户端的库列表。可用 ETKN_WEB_URL 整体覆盖（含 #/ 尾巴）。
+ETKN_WEB_URL = os.environ.get('ETKN_WEB_URL', '').strip()
+if not ETKN_WEB_URL and ETKN_SITE_URL:
+    ETKN_WEB_URL = ETKN_SITE_URL + '/web/#/'
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.19.1'
+VERSION = 'v3.19.2'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -5705,6 +5710,7 @@ class Handler(BaseHTTPRequestHandler):
                 'poll_interval': FAST_INTERVAL, 'slow_poll_interval': POLL_INTERVAL,
                 'version': VERSION, 'readonly': False,
                 'etkn_site': ETKN_SITE_URL or BASE,
+                'etkn_web': ETKN_WEB_URL or (BASE + '/web/#/'),
                 'actions': ['speedtest', 'retry-failed', 'run-organize-p115',
                             'run-generate-covers', 'purge-register-queued', 'bad-media',
                             'settings', 'test-push', 'check-500-now', 'speed-now',

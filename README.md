@@ -1,4 +1,4 @@
-# etkn-monitor —— ETKN 监控（v3.19.1）
+# etkn-monitor —— ETKN 监控（v3.19.2）
 
 手机友好的 ETKN（ETK vNext）监控面板：队列规模、入库进度、完成速率与 ETA、分类任务统计、手动链路测速、失败任务重试、手动整理触发、异常媒体明细。
 
@@ -453,7 +453,7 @@ cd etkn-monitor
 
 # 2. 准备配置（.env 已被 .gitignore 忽略，绝不会进仓库）
 cp .env.example .env
-vi .env            # 至少填 ETKN_BASE_URL / ETKN_USERNAME / ETKN_PASSWORD
+vi .env            # 至少填 ETKN_BASE_URL（1.4.3 起 8097）/ ETKN_USERNAME / ETKN_PASSWORD
 
 # 3. 启动
 docker compose up -d --build
@@ -525,10 +525,11 @@ EM_RELEASE_PROXY=http://192.168.1.1:7890 python3 scripts/em_release.py v3.19.0 -
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
-| ETKN_BASE_URL | ETKN 地址（**必填**） | http://127.0.0.1:5257 |
+| ETKN_BASE_URL | ETKN 地址（**必填**；1.4.3 起只有 8097） | http://127.0.0.1:8097 |
 | ETKN_USERNAME | ETKN 登录用户名（**必填**） | 空 |
 | ETKN_PASSWORD | ETKN 登录密码（**必填**） | 空 |
-| ETKN_SITE_URL | 面板「打开 ETKN 原站」按钮指向的地址 | 同 ETKN_BASE_URL |
+| ETKN_SITE_URL | ETKN 站点根地址（面板「打开 ETKN 原站」按钮） | 同 ETKN_BASE_URL |
+| ETKN_WEB_URL | ETKN web 客户端地址（含 `#/`；留空= `ETKN_SITE_URL + /web/#/`） | 派生 |
 | ETKN_PUBLIC_URL | 卡片「打开 ETKN」按钮（ETKN 主程序外网入口） | 同 ETKN_BASE_URL |
 | ETKN_ETA_WINDOW | ETA 滚动窗口（分钟） | 10 |
 | POLL_INTERVAL | 慢速全量轮询间隔（秒） | 120 |
