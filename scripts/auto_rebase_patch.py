@@ -721,6 +721,29 @@ def rebase_deep_delete(image_id: str):
         raise RuntimeError('deep_delete_patch.py.md5 未生成')
 
 
+def rebase_tv_sdr(image_id: str):
+    """第 16 个补丁：api/tv_transcode.py —— ETKN TV 播 HDR/DV 黑屏，服务端强制 SDR 转码。
+
+    ETKN TV 0.1.x 在起播协商里声明 HevcHdr10 能力（服务端据此保留 HDR 直出、p010le 不 tone-map），
+    但客户端从不请求 HDR 数据空间（logcat 无 u2EotfValue、无 bRequestingDataSpace），电视面板停在
+    SDR → 有声音/字幕/弹幕、画面全黑；原画与降码率转码都黑。补丁对 UA 命中 ETKN TV 且片源为
+    HDR/DV 的请求：user_bitrate 分支不再 DirectPlay + hdr_capabilities 置空强制 tone-map 出 SDR。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/api/tv_transcode.py'
+    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'tv_transcode.py.orig'), image_id)
+
+    script = os.path.join(ETKN_DIR, 'gen_tv_sdr_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-8:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('tv_sdr 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'tv_transcode_patch.py.md5')):
+        raise RuntimeError('tv_transcode_patch.py.md5 未生成')
+
+
 def _container_started_at() -> str:
     r = subprocess.run(['docker', 'inspect', 'etkn', '--format', '{{.State.StartedAt}}'],
                        capture_output=True, text=True, timeout=20)
@@ -804,49 +827,52 @@ def main():
     except Exception as exc:
         log(f'  ⚠️ 参数哨兵调用失败：{exc}')
 
-    log('rebase 1/15: shared_pool.py …')
+    log('rebase 1/16: shared_pool.py …')
     rebase_shared_pool(image_id)
 
-    log('rebase 2/15: repository.py …（三方合并：library_base 预计算 + dm_by_item）')
+    log('rebase 2/16: repository.py …（三方合并：library_base 预计算 + dm_by_item）')
     rebase_repository(image_id)
 
-    log('rebase 3/15: watchlist.py …')
+    log('rebase 3/16: watchlist.py …')
     rebase_watchlist(image_id)
 
-    log('rebase 4/15: p115_workflow.py …')
+    log('rebase 4/16: p115_workflow.py …')
     rebase_p115_workflow(image_id)
 
-    log('rebase 5/15: center_control.py …')
+    log('rebase 5/16: center_control.py …')
     rebase_center_control(image_id)
 
-    log('rebase 6/15: play_pool.py —— 镜像 b5fffdcc 上游已内建跨会话复用，本补丁停用，跳过')
+    log('rebase 6/16: play_pool.py —— 镜像 b5fffdcc 上游已内建跨会话复用，本补丁停用，跳过')
 
-    log('rebase 7/15: screenshots.py …')
+    log('rebase 7/16: screenshots.py …')
     rebase_screenshots(image_id)
 
-    log('rebase 8/15: virtual_library/service.py …')
+    log('rebase 8/16: virtual_library/service.py …')
     rebase_virtual_library(image_id)
 
-    log('rebase 9/15: virtual_library/placeholders.py …')
+    log('rebase 9/16: virtual_library/placeholders.py …')
     rebase_placeholders(image_id)
 
-    log('rebase 10/15: api/media_server.py …')
+    log('rebase 10/16: api/media_server.py …')
     rebase_media_server(image_id)
 
-    log('rebase 11/15: modules/media_server/catalog.py …（child_count / collections 规划器悬崖）')
+    log('rebase 11/16: modules/media_server/catalog.py …（child_count / collections 规划器悬崖）')
     rebase_catalog(image_id)
 
-    log('rebase 12/15: platform/tasks/handlers.py …')
+    log('rebase 12/16: platform/tasks/handlers.py …')
     rebase_shared_register(image_id)
 
-    log('rebase 13/15: ai_translation/service.py …（AI 调用熔断）')
+    log('rebase 13/16: ai_translation/service.py …（AI 调用熔断）')
     rebase_ai_service(image_id)
 
-    log('rebase 14/15: modules/media_dedup/service.py …（「指定媒体库」范围 + 大结果集内存）')
+    log('rebase 14/16: modules/media_dedup/service.py …（「指定媒体库」范围 + 大结果集内存）')
     rebase_media_dedup(image_id)
 
-    log('rebase 15/15: modules/emby_events/deep_delete.py …（联动删除队列不再逐行回填 GB 级 payload）')
+    log('rebase 15/16: modules/emby_events/deep_delete.py …（联动删除队列不再逐行回填 GB 级 payload）')
     rebase_deep_delete(image_id)
+
+    log('rebase 16/16: api/tv_transcode.py …（ETKN TV 播 HDR/DV 黑屏 → 强制 SDR 转码）')
+    rebase_tv_sdr(image_id)
 
     log('重启 etkn 容器 …')
     restart_etkn()
