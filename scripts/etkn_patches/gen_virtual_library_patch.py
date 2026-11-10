@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 from pathlib import Path
 
@@ -51,6 +52,8 @@ MARKER = "[etkn-fix 2026-10-25 媒体库筛选项]"
 
 OLD_IMPORT = "from typing import Any, Iterator\n"
 NEW_IMPORT = "from typing import Any, Iterator\nfrom concurrent.futures import ThreadPoolExecutor\nfrom threading import Lock, Thread\n\nimport time\n"
+# 只追加、不重写 typing 行（上游 1.4.x 增删 typing 名字时不会失配）
+IMPORT_ADDON = "from concurrent.futures import ThreadPoolExecutor\nfrom threading import Lock, Thread\n\nimport time\n"
 
 ANCHOR_LOGGER = "logger = logging.getLogger(__name__)\n"
 
@@ -254,9 +257,13 @@ def build(source: str) -> str:
     if MARKER in source:
         raise SystemExit("源文件已含补丁标记，别重复打补丁")
 
-    if source.count(OLD_IMPORT) != 1:
+    # 1.4.x 上游把 typing 导入改成 `from typing import Any, Callable, Iterator`，
+    # 不能再用整行字面量做锚点（每次上游加个名字就炸），只认「唯一一行 typing 导入」，
+    # 在它后面按需补并发/时间导入。
+    _typing_lines = re.findall(r'(?m)^from typing import .+\n', source)
+    if len(_typing_lines) != 1:
         raise SystemExit("找不到唯一的 typing 导入行")
-    text = source.replace(OLD_IMPORT, NEW_IMPORT, 1)
+    text = source.replace(_typing_lines[0], _typing_lines[0] + IMPORT_ADDON, 1)
 
     if text.count(ANCHOR_LOGGER) != 1:
         raise SystemExit("找不到唯一的 logger 定义")

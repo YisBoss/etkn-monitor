@@ -650,6 +650,30 @@ def rebase_nginx_proxy(image_id: str):
         raise RuntimeError('nginx_proxy_patch.py.md5 未生成')
 
 
+def rebase_auth(image_id: str):
+    """第 18 个补丁：api/auth.py 管理员账号豁免到期/禁用（etkn-fix18 2026-11-10）。
+
+    管理员账号 expiration_date 到期后 status 被置 disabled，/api/auth/login 直接 403
+    「账号已禁用或已过期」→ 自建库后台完全进不去（已复发两次）。
+    管理员是后台唯一入口，到期语义对它只有风险：登录与会话校验两处对 is_administrator 豁免。
+    """
+    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/api/auth.py'
+    orig = extract_from_image(mount_path)
+    with open(os.path.join(ETKN_DIR, 'auth.py.orig'), 'w') as f:
+        f.write(orig)
+
+    script = os.path.join(ETKN_DIR, 'gen_auth_patch.py')
+    if not os.path.exists(script):
+        raise RuntimeError(f'缺生成器 {script}')
+    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
+    for ln in (r.stdout or '').strip().splitlines()[-5:]:
+        log('  ' + ln.strip()[:300])
+    if r.returncode != 0:
+        raise RuntimeError('auth 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
+    if not os.path.exists(os.path.join(ETKN_DIR, 'auth_patch.py.md5')):
+        raise RuntimeError('auth_patch.py.md5 未生成')
+
+
 def rebase_placeholders(image_id: str):
     """第 9 个补丁：virtual_library/placeholders.py 榜单占位符查询（1262 条榜单 >240s → 1.4s）。"""
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/virtual_library/placeholders.py'
@@ -887,8 +911,12 @@ def main():
     log('rebase 8/16: virtual_library/service.py …')
     rebase_virtual_library(image_id)
 
-    log('rebase 8b/16: virtual_library/nginx_proxy.py …（反代根路径跳转不带内网端口）')
-    rebase_nginx_proxy(image_id)
+    # [2026-11-10 退役] nginx_proxy 补丁：1.4.x 上游模板已自带 absolute_redirect off;，
+    # 根路径 302 不再被补成内网 IP:8097。函数保留存档，不再参与 rebase。
+    # rebase_nginx_proxy(image_id)
+
+    log('rebase 8c/16: api/auth.py …（管理员账号豁免到期/禁用，防止后台 403 进不去）')
+    rebase_auth(image_id)
 
     log('rebase 9/16: virtual_library/placeholders.py …')
     rebase_placeholders(image_id)
