@@ -123,14 +123,12 @@ check_one "$ETKN_DIR/ai_service_patch.py" "$SITE/modules/ai_translation/service.
 check_one "$ETKN_DIR/center_control_patch.py" "$SITE/integrations/center_control.py"      "$(expect_of "$ETKN_DIR/center_control_patch.py" 6715fb0ac4fafcb26f479f7e068c137d)" center_control
 check_one "$ETKN_DIR/screenshots_patch.py"   "$SITE/modules/scrape/screenshots.py"      "$(expect_of "$ETKN_DIR/screenshots_patch.py" dcdef9d07a4549cef46ba20de586c22f)" screenshots
 check_one "$ETKN_DIR/virtual_library_service_patch.py" "$SITE/modules/virtual_library/service.py" "$(expect_of "$ETKN_DIR/virtual_library_service_patch.py" dda522b8b8406f8e25e5a9764de9c77c)" virtual_library
-# [2026-11-10 退役] nginx_proxy 补丁：上游 1.4.x 模板已自带 absolute_redirect off;
 check_one "$ETKN_DIR/auth_patch.py" "$SITE/api/auth.py" "$(expect_of "$ETKN_DIR/auth_patch.py" deb9f63e8b99aab3f91720c3c9e3a579)" auth
 check_one "$ETKN_DIR/placeholders_patch.py" "$SITE/modules/virtual_library/placeholders.py" "$(expect_of "$ETKN_DIR/placeholders_patch.py" 3de661889d331cff003a89d4756ab788)" placeholders
 check_one "$ETKN_DIR/media_server_patch.py" "$SITE/api/media_server.py" "$(expect_of "$ETKN_DIR/media_server_patch.py" 591bae7f7138dc3e82603281eee8cda6)" media_server
 check_one "$ETKN_DIR/catalog_patch.py" "$SITE/modules/media_server/catalog.py" "$(expect_of "$ETKN_DIR/catalog_patch.py" ed3b28f87b6f88930bab719080663d9e)" catalog
 check_one "$ETKN_DIR/shared_register_patch.py" "$SITE/platform/tasks/handlers.py" "$(expect_of "$ETKN_DIR/shared_register_patch.py" ba5de21a5a26b14c59bd37db69319072)" shared_register
-# [2026-11-09 退役] media_dedup 补丁：上游 1.4.3 原生支持「指定媒体库」，内存问题 1.3.78 已用 pg_temp+游标解决
-# check_one "$ETKN_DIR/media_dedup_patch.py" "$SITE/modules/media_dedup/service.py" "$(expect_of "$ETKN_DIR/media_dedup_patch.py" 3f288d436648f38b3dce3af8601e01c8)" media_dedup
+# 已退役补丁（play_pool / nginx_proxy / media_dedup / tv_transcode）不再进自检，清单见 $ETKN_DIR/PATCHES-STATUS.md
 check_one "$ETKN_DIR/deep_delete_patch.py" "$SITE/modules/emby_events/deep_delete.py" "$(expect_of "$ETKN_DIR/deep_delete_patch.py" 34d07f1fa1bd9715b16537e14de28617)" deep_delete
 check_db_params
 

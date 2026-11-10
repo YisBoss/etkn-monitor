@@ -540,30 +540,6 @@ def rebase_center_control(image_id: str):
         raise RuntimeError('center_control_patch.py.md5 未生成')
 
 
-def rebase_play_pool(image_id: str):
-    """第 6 个补丁：play_pool.py 小号转播跨播放会话复用（同文件复播 3.2s → 0.03~0.6s）。
-
-    上游 _find_reusable_session() 里，PlaySessionId 不同就 continue；而 Emby/Hills 每次起播
-    都生成新的 PlaySessionId，会话里存的是上一次的，两者永不相等 → 同一文件每次播放都
-    重走 115 秒传 + 主号签名（实测冷启 3.2s，命中 31~44ms）。
-    """
-    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/playback/play_pool.py'
-    orig = extract_from_image(mount_path)
-    with open(os.path.join(ETKN_DIR, 'play_pool.py.orig'), 'w') as f:
-        f.write(orig)
-
-    script = os.path.join(ETKN_DIR, 'gen_play_pool_patch.py')
-    if not os.path.exists(script):
-        raise RuntimeError(f'缺生成器 {script}')
-    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
-    for ln in (r.stdout or '').strip().splitlines()[-5:]:
-        log('  ' + ln.strip()[:300])
-    if r.returncode != 0:
-        raise RuntimeError('play_pool 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
-    if not os.path.exists(os.path.join(ETKN_DIR, 'play_pool_patch.py.md5')):
-        raise RuntimeError('play_pool_patch.py.md5 未生成')
-
-
 def rebase_screenshots(image_id: str):
     """第 7 个补丁：screenshots.py 截图范围解析缓存（catalog.item() 每次白付 1.5s）。"""
     mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/scrape/screenshots.py'
@@ -624,30 +600,6 @@ def rebase_virtual_library(image_id: str):
         raise RuntimeError('virtual_library 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
     if not os.path.exists(os.path.join(ETKN_DIR, 'virtual_library_service_patch.py.md5')):
         raise RuntimeError('virtual_library_service_patch.py.md5 未生成')
-
-
-def rebase_nginx_proxy(image_id: str):
-    """第 17 个补丁：virtual_library/nginx_proxy.py（etkn-fix19 2026-11-09）。
-
-    1.4.3 只对外开 8097，nginx 模板里 `location = / { return 302 /web/; }` 被 nginx
-    绝对化后变成 http://<内网IP>:8097/web/，经反代出去就是 https://<你的域名>:8097/web/
-    （公网 8097 不通）→ 根域名打不开。修法：server 块加 absolute_redirect off / port_in_redirect off。
-    """
-    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/virtual_library/nginx_proxy.py'
-    orig = extract_from_image(mount_path)
-    with open(os.path.join(ETKN_DIR, 'nginx_proxy.py.orig'), 'w') as f:
-        f.write(orig)
-
-    script = os.path.join(ETKN_DIR, 'gen_nginx_proxy_patch.py')
-    if not os.path.exists(script):
-        raise RuntimeError(f'缺生成器 {script}')
-    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
-    for ln in (r.stdout or '').strip().splitlines()[-5:]:
-        log('  ' + ln.strip()[:300])
-    if r.returncode != 0:
-        raise RuntimeError('nginx_proxy 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
-    if not os.path.exists(os.path.join(ETKN_DIR, 'nginx_proxy_patch.py.md5')):
-        raise RuntimeError('nginx_proxy_patch.py.md5 未生成')
 
 
 def rebase_auth(image_id: str):
@@ -736,29 +688,6 @@ def rebase_catalog(image_id: str):
         raise RuntimeError('catalog_patch.py.md5 未生成')
 
 
-def rebase_media_dedup(image_id: str):
-    """第 14 个补丁：modules/media_dedup/service.py「指定媒体库」范围 + 大结果集内存优化。
-
-    ① fix18：主查询不再取分析大字段（353k 行 × 33KB ≈ 11GB，会把容器 OOM），改为分组后按需补取。
-    ② fix19：「指定媒体库」配置之前读了却从未使用 → 设了范围仍然全库扫描、跨库判重
-       （4094 组，3.5 分钟）；现在解析成 media.items.id 集合并写进 WHERE
-       （范围=1 个库时 13945 项 24 秒）。
-    """
-    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/modules/media_dedup/service.py'
-    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'media_dedup_service.orig'), image_id)
-
-    script = os.path.join(ETKN_DIR, 'gen_media_dedup_patch_v2.py')
-    if not os.path.exists(script):
-        raise RuntimeError(f'缺生成器 {script}')
-    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
-    for ln in (r.stdout or '').strip().splitlines()[-8:]:
-        log('  ' + ln.strip()[:300])
-    if r.returncode != 0:
-        raise RuntimeError('media_dedup 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
-    if not os.path.exists(os.path.join(ETKN_DIR, 'media_dedup_patch.py.md5')):
-        raise RuntimeError('media_dedup_patch.py.md5 未生成')
-
-
 def rebase_deep_delete(image_id: str):
     """第 15 个补丁：modules/emby_events/deep_delete.py 领取队列不再逐行回填 GB 级 payload。
 
@@ -780,29 +709,6 @@ def rebase_deep_delete(image_id: str):
         raise RuntimeError('deep_delete 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
     if not os.path.exists(os.path.join(ETKN_DIR, 'deep_delete_patch.py.md5')):
         raise RuntimeError('deep_delete_patch.py.md5 未生成')
-
-
-def rebase_tv_sdr(image_id: str):
-    """第 16 个补丁：api/tv_transcode.py —— ETKN TV 播 HDR/DV 黑屏，服务端强制 SDR 转码。
-
-    ETKN TV 0.1.x 在起播协商里声明 HevcHdr10 能力（服务端据此保留 HDR 直出、p010le 不 tone-map），
-    但客户端从不请求 HDR 数据空间（logcat 无 u2EotfValue、无 bRequestingDataSpace），电视面板停在
-    SDR → 有声音/字幕/弹幕、画面全黑；原画与降码率转码都黑。补丁对 UA 命中 ETKN TV 且片源为
-    HDR/DV 的请求：user_bitrate 分支不再 DirectPlay + hdr_capabilities 置空强制 tone-map 出 SDR。
-    """
-    mount_path = '/usr/local/lib/python3.12/site-packages/etk_vnext/api/tv_transcode.py'
-    _refresh_orig(mount_path, os.path.join(ETKN_DIR, 'tv_transcode.py.orig'), image_id)
-
-    script = os.path.join(ETKN_DIR, 'gen_tv_sdr_patch.py')
-    if not os.path.exists(script):
-        raise RuntimeError(f'缺生成器 {script}')
-    r = subprocess.run([sys.executable, script], capture_output=True, text=True, timeout=300)
-    for ln in (r.stdout or '').strip().splitlines()[-8:]:
-        log('  ' + ln.strip()[:300])
-    if r.returncode != 0:
-        raise RuntimeError('tv_sdr 补丁生成失败: ' + ((r.stderr or r.stdout) or '').strip()[:600])
-    if not os.path.exists(os.path.join(ETKN_DIR, 'tv_transcode_patch.py.md5')):
-        raise RuntimeError('tv_transcode_patch.py.md5 未生成')
 
 
 def _container_started_at() -> str:
@@ -888,61 +794,50 @@ def main():
     except Exception as exc:
         log(f'  ⚠️ 参数哨兵调用失败：{exc}')
 
-    log('rebase 1/16: shared_pool.py …')
+    log('rebase 1/14: shared_pool.py …')
     rebase_shared_pool(image_id)
 
-    log('rebase 2/16: repository.py …（三方合并：library_base 预计算 + dm_by_item）')
+    log('rebase 2/14: repository.py …（三方合并：library_base 预计算 + dm_by_item）')
     rebase_repository(image_id)
 
-    log('rebase 3/16: watchlist.py …')
+    log('rebase 3/14: watchlist.py …')
     rebase_watchlist(image_id)
 
-    log('rebase 4/16: p115_workflow.py …')
+    log('rebase 4/14: p115_workflow.py …')
     rebase_p115_workflow(image_id)
 
-    log('rebase 5/16: center_control.py …')
+    log('rebase 5/14: center_control.py …')
     rebase_center_control(image_id)
 
-    log('rebase 6/16: play_pool.py —— 镜像 b5fffdcc 上游已内建跨会话复用，本补丁停用，跳过')
-
-    log('rebase 7/16: screenshots.py …')
+    log('rebase 6/14: screenshots.py …')
     rebase_screenshots(image_id)
 
-    log('rebase 8/16: virtual_library/service.py …')
+    log('rebase 7/14: virtual_library/service.py …')
     rebase_virtual_library(image_id)
 
-    # [2026-11-10 退役] nginx_proxy 补丁：1.4.x 上游模板已自带 absolute_redirect off;，
-    # 根路径 302 不再被补成内网 IP:8097。函数保留存档，不再参与 rebase。
-    # rebase_nginx_proxy(image_id)
-
-    log('rebase 8c/16: api/auth.py …（管理员账号豁免到期/禁用，防止后台 403 进不去）')
+    log('rebase 8/14: api/auth.py …（管理员账号豁免到期/禁用，防止后台 403 进不去）')
     rebase_auth(image_id)
 
-    log('rebase 9/16: virtual_library/placeholders.py …')
+    log('rebase 9/14: virtual_library/placeholders.py …')
     rebase_placeholders(image_id)
 
-    log('rebase 10/16: api/media_server.py …')
+    log('rebase 10/14: api/media_server.py …')
     rebase_media_server(image_id)
 
-    log('rebase 11/16: modules/media_server/catalog.py …（child_count / collections 规划器悬崖）')
+    log('rebase 11/14: modules/media_server/catalog.py …（child_count / collections 规划器悬崖）')
     rebase_catalog(image_id)
 
-    log('rebase 12/16: platform/tasks/handlers.py …')
+    log('rebase 12/14: platform/tasks/handlers.py …')
     rebase_shared_register(image_id)
 
-    log('rebase 13/16: ai_translation/service.py …（AI 调用熔断）')
+    log('rebase 13/14: ai_translation/service.py …（AI 调用熔断）')
     rebase_ai_service(image_id)
 
-    # rebase 14/16（media_dedup / 指定媒体库范围）已于 2026-11-09 退役：
-    # 上游 1.3.78 已用 pg_temp + 服务端游标解决大结果集内存，1.4.3 原生实现「指定媒体库」
-    # （_configured_library_ids + _library_scope_clause），无需再打补丁。函数 rebase_media_dedup 保留做存档。
-    # rebase 14/16: rebase_media_dedup(image_id)
-
-    log('rebase 15/16: modules/emby_events/deep_delete.py …（联动删除队列不再逐行回填 GB 级 payload）')
+    log('rebase 14/14: modules/emby_events/deep_delete.py …（联动删除队列不再逐行回填 GB 级 payload）')
     rebase_deep_delete(image_id)
 
-    # rebase 16/16（tv_transcode / etkn-fix17 强制 SDR）已于 2026-11-09 按用户要求退役：
-    # 原画必须直连不转码，黑屏改由电视端手动规避。函数 rebase_tv_sdr 保留做存档。
+    # 已退役、不参与 rebase（产物与生成器见 retired/20261110/ 与 PATCHES-STATUS.md）：
+    #   play_pool / nginx_proxy / media_dedup / tv_transcode —— 上游已内建或按用户要求撤除
     log('重启 etkn 容器 …')
     restart_etkn()
     wait_ready()
