@@ -263,7 +263,11 @@ def _collection_group_child_dto(
     item_count: int = 0,
     parent_id: str | None = None,
 ) -> dict[str, Any]:
-    """分组里的成员媒体库：以 BoxSet 形态出现在合集内，点进去仍是该库的正常列表。
+    """分组里的成员媒体库：在合集内以「媒体库」形态出现，点进去就是该库的正常列表。
+
+    2026-11-15 起不再伪装成 BoxSet：客户端会按 CollectionType 决定向服务端要什么子项，
+    而服务端 BoxSet 列表不按父库过滤（返回全库合集），伪装成 BoxSet 必然导致
+    「合集里每个库点进去内容都一样」。这里直接给 CollectionFolder + 该库真实类型。
 
     不调用 _library_dto()：那个函数会为榜单型库统计占位条目（0.04~1.2s/库），
     合集内 8 个库就要多花数秒；这里只用 in_library_count，合集页秒开。
@@ -279,8 +283,8 @@ def _collection_group_child_dto(
         "SortName": str(library["name"]),
         "ServerId": _server_id(request),
         "Id": protocol_id,
-        "Type": "BoxSet",
-        "CollectionType": "boxsets",
+        "Type": "CollectionFolder",
+        "CollectionType": _library_collection_type(library),
         "IsFolder": True,
         "ChildCount": item_count,
         "RecursiveItemCount": item_count,
@@ -634,9 +638,14 @@ def _apply_collection_groups(
     # 已经接管同一批库：成员库照旧从「媒体库」列表收起，卡片由上游原生分组自己出，
     # 本补丁不再重复出卡，也不再改写成员库 DTO（改写会让详情变成 BoxSet，
     # 客户端按合集语义要 BoxSet 子项，服务端 BoxSet 列表不按父库过滤 → 每个库都一样）。
+    # 只有 /api/tv（web 端 / Hills 走的自有协议）能表达上游原生分组；/emby 协议下
+    # 上游不发分组卡（1.4.x 原生 library_groups 未覆盖 /emby），若在这里也把成员库收起，
+    # 第三方播放器（Hills、Emby 官方客户端等）会「连媒体库都看不到」。
+    # 故按协议分流：/api/tv 让路给原生分组；/emby 继续用 vgroup 合集卡兜底。
+    tv_api = str(request.url.path).startswith("/api/tv")
     native_members = {
         int(library["id"]) for library in libraries
-        if library.get("group_id") is not None
+        if tv_api and library.get("group_id") is not None
     }
     groups = _collection_group_view_entries()
     by_id = {int(library["id"]): library for library in libraries}
