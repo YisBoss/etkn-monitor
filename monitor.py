@@ -105,7 +105,7 @@ if not ETKN_WEB_URL and ETKN_SITE_URL:
 
 # 版本号（唯一真源）：发版由 scripts/em_release.py 自动同步到本常量、界面版本与 README 标题，
 # 不要在别处再写死版本串 —— 以前散落多处，发版时漏改就会「界面/接口报的版本对不上」。
-VERSION = 'v3.19.2'
+VERSION = 'v3.19.3'
 
 CARD_LINKS_DEFAULT = []   # v2.7（六）：卡片按钮可配置，全新安装默认空，部署者在设置页自增
 USERNAME = os.environ.get('ETKN_USERNAME', '')
@@ -2855,6 +2855,9 @@ def _qb_rotate(force: bool = False) -> str:
         for t in active:
             h = t.get('hash') or ''
             if not h:
+                continue
+            # PINNED：人工钉住的种子不参与让位（冷门资源经常长期 0 速度，一让位就永远下不完）
+            if 'PINNED' in (t.get('tags') or ''):
                 continue
             rec = st.setdefault(h, {})
             if float(t.get('dlspeed') or 0) > 1024:
