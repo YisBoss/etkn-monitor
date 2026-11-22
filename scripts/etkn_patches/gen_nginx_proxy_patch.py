@@ -4,7 +4,7 @@
 
 背景：1.4.3 起对外只监听 8097，nginx 模板里 `location = / { return 302 /web/; }`
 是相对跳转，但 nginx 默认 absolute_redirect on，会把 Location 补成绝对地址
-`http://<内网IP>:8097/web/`（经 Lucky 反代后变成 `https://etkn.zclyjb.top:8097/web/`，
+`http://<内网IP>:8097/web/`（经 Lucky 反代后变成 `https://<你的域名>:8097/web/`，
 公网 8097 不通 → 点根域名打不开）。修法：在 server 块里 `absolute_redirect off;`
 + `port_in_redirect off;`，让 nginx 原样输出相对 Location `/web/`。
 
